@@ -74,6 +74,7 @@ Requested for this skill and not in Limn.
 | A2b | `gr batch`: many writes as one atomic update | `main.mjs` `batch`, `gr.mjs` | T (happy path, atomic failure, cancelled request) |
 | A2c | Stuck-request recovery: elapsed counter, "Send again" after five minutes without progress; unfinished requests re-delivered to the next listener | `requestRetry`, `requestTakeAll`, UI | T; UI |
 | A2d | Request ownership: a claimed request belongs to the Claude Code session that claimed it; another session leaves it alone while its owner is alive and takes it over when the owner is gone; `gr stop` is refused while tabs or other sessions are connected; a sent reply nobody answered is pending again; a comment answered by reply becomes `answered` | `main.mjs` (`ownerAlive`, `requestTakeAll`, `finish`), `gr.mjs` | T (`owners.test.mjs`, 10 tests: takeover, restart, retry, id-less sessions, the stop guard; thread tests) |
+| A2e | Follow-up questions: a Question thread takes a follow-up, sent at once as a `question` request that carries `follows` and the `thread` so far; a failed or cancelled question can be asked again in its thread | `main.mjs` `requestCreate`, `gr.mjs` `requestEvent`, UI (`AskThread`) | T (`asks.test.mjs`, 7 tests); UI + gr |
 | A3 | A single historical commit as a comparison | `gr.mjs` `resolveSpec` | T sem |
 | A4 | Root commits (empty-tree base) | `review.mjs` | T sem; UI |
 | A5 | Merge commits: first parent, stated | `gr.mjs` | T sem |

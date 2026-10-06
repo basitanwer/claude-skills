@@ -123,7 +123,7 @@ interface Store {
   removeComment(id: string): Promise<void>
 
   /** Ask the attached Claude Code session for something. */
-  request(input: { kind: RequestKind; text?: string; anchor?: AnchorInput; commentIds?: string[]; update?: boolean; commit?: boolean }): Promise<ReviewRequest | null>
+  request(input: { kind: RequestKind; text?: string; anchor?: AnchorInput; commentIds?: string[]; update?: boolean; commit?: boolean; follows?: string }): Promise<ReviewRequest | null>
   cancelRequest(id: string): Promise<void>
   /** Put a request a session claimed but seems to have dropped back in the queue. */
   retryRequest(id: string): Promise<void>

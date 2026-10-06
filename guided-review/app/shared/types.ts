@@ -171,6 +171,8 @@ export interface Message {
   anchor?: CommentAnchor
   /** the request this message opened (user) or answered (agent) */
   requestId?: string
+  /** a follow-up question: the request id of the first question of its thread (see `ReviewRequest.threadId`) */
+  threadId?: string
   /** focus / tour chips attached to an agent answer */
   actions?: UiAction[]
 }
@@ -185,6 +187,11 @@ export interface ReviewRequest {
   /** question text, or the reviewer's steer for walkthrough / apply */
   text?: string
   anchor?: CommentAnchor
+  /** question: the question this one follows up on, asked from that question's thread */
+  follows?: string
+  /** question: the thread a follow-up belongs to, as the id of the thread's first question
+   *  (a follow-up to a follow-up stays in it). Absent on a first question, which is its own thread. */
+  threadId?: string
   /** apply / decisions: the comments handed over (new comments and threads with new replies) */
   commentIds?: string[]
   /** apply: the subset of `commentIds` sent only because the reviewer replied in the thread */
@@ -353,7 +360,9 @@ export interface Api {
   setPref(key: string, value: string): Promise<void>
 
   // requests: the reviewer asks the attached Claude Code session for something
-  requestCreate(sessionId: number, input: { kind: RequestKind; text?: string; anchor?: AnchorInput; commentIds?: string[]; update?: boolean; commit?: boolean }): Promise<ReviewRequest>
+  /** A question with `follows` (a question request of this review) is a follow-up: it
+   *  joins that question's thread and, with no anchor of its own, takes the thread's. */
+  requestCreate(sessionId: number, input: { kind: RequestKind; text?: string; anchor?: AnchorInput; commentIds?: string[]; update?: boolean; commit?: boolean; follows?: string }): Promise<ReviewRequest>
   requestCancel(sessionId: number, requestId: string): Promise<ReviewRequest>
   /** Put a claimed request back in the queue (the session that took it seems to be gone). */
   requestRetry(sessionId: number, requestId: string): Promise<ReviewRequest>

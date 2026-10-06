@@ -282,6 +282,15 @@ function liveRequest(s, id) {
   if (caller && r.owner && r.owner !== caller) throw new Error('displaced: another Claude Code session now holds this request — stop working on it')
   return r
 }
+/** The first question of the thread a follow-up joins. `id` is the question it follows,
+ *  which may itself be a follow-up: the thread is still the first question's.
+ *  @param {Session} s @param {string} id */
+function threadRoot(s, id) {
+  const q = s.state.requests.find((x) => x.id === id)
+  if (!q) throw new Error(`cannot follow up on ${id}: this review has no such request`)
+  if (q.kind !== 'question') throw new Error(`cannot follow up on ${id}: it is a ${q.kind} request, not a question`)
+  return s.state.requests.find((x) => x.id === q.threadId) ?? q
+}
 
 // ── RPC handlers (the Api in app/shared/types.ts) ────────────
 /** @type {Record<string, (...args: any[]) => any>} */
@@ -457,6 +466,8 @@ const api = {
     const kind = input?.kind
     if (!['walkthrough', 'question', 'apply', 'decisions'].includes(kind)) throw new Error(`unknown request kind ${kind}`)
     const text = String(input.text ?? '').trim()
+    // a follow-up question: refused here, before anything is touched, if what it follows is not a question of this review
+    const root = kind === 'question' && input.follows ? threadRoot(s, String(input.follows)) : null
     const open = s.state.requests.filter((r) => r.status === 'pending' || r.status === 'running')
     const loaded = await load(s)
     /** @type {ReviewRequest} */
@@ -468,7 +479,13 @@ const api = {
     } else if (kind === 'question') {
       if (!text) throw new Error('a question needs text')
       if (input.anchor) r.anchor = await makeAnchor(loaded, input.anchor, sideReader(s.repo, loaded))
-      s.state.messages.push({ id: store.nextId(s, 'm'), role: 'user', text, at: now(), ...(r.anchor ? { anchor: r.anchor } : {}), requestId: r.id })
+      if (root) {
+        r.follows = String(input.follows); r.threadId = root.id
+        // asked from the thread, so it is about the same spot; the anchor is copied as it
+        // is, not checked again: the line may have changed since the first question
+        if (!r.anchor && root.anchor) r.anchor = structuredClone(root.anchor)
+      }
+      s.state.messages.push({ id: store.nextId(s, 'm'), role: 'user', text, at: now(), ...(r.anchor ? { anchor: r.anchor } : {}), requestId: r.id, ...(r.threadId ? { threadId: r.threadId } : {}) })
     } else {
       const ids = Array.isArray(input.commentIds) ? input.commentIds.map(String) : []
       const hasReply = (/** @type {import('../shared/types.ts').Comment} */ c) => c.replies.some((x) => x.pending)

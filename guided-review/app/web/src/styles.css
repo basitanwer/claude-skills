@@ -431,3 +431,8 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .more-line:hover { background: var(--bg-sunk); }
 /* a tour's bar sits at the bottom centre: the way back moves above it */
 .tourbar ~ .backbar { bottom: 172px; }
+
+/* question follow-ups */
+.thread.ask .thread-main.reply.failed, .thread.ask .thread-main.reply.cancelled { flex-wrap: wrap; } .thread.ask .thread-main.reply > .btn { margin-left: auto; }
+.ask-reason { color: var(--bad); overflow-wrap: anywhere; min-width: 0; flex: 1 1 220px; }   /* a long reason wraps beside the button, not above it */
+.ask-follows .link { font-size: inherit; overflow-wrap: anywhere; }

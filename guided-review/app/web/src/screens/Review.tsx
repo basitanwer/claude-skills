@@ -3,7 +3,7 @@ import type {
   AnchorInput, Artifact, Comment, FileDiff, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, showSection, startTour } from '../focus'
+import { focusAnchor, focusQuestion, showSection, startTour } from '../focus'
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, driftText, elapsed, focusable, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
@@ -836,13 +836,18 @@ function Description({ loaded }: { loaded: LoadedReview }) {
   )
 }
 
+/** how much of the first question a follow-up quotes in the timeline */
+const FOLLOWS_QUOTE = 80
 function MessageEntry({ m, request, answered }: { m: Message; request?: ReviewRequest; answered: boolean }) {
+  // a follow-up names the question that opened its thread: in the timeline other entries can sit between the two
+  const first = useStore((s) => (m.threadId ? s.loaded?.state.messages.find((x) => x.role === 'user' && x.requestId === m.threadId) : undefined))
   if (m.role === 'user') {
     const t = m.anchor ? focusable(m.anchor) : null
     return (
       <>
-        <Box author="user" label="asked" at={m.at} hook={{ 'data-gr-message': m.id }}>
+        <Box author="user" label={m.threadId ? 'asked a follow-up' : 'asked'} at={m.at} hook={{ 'data-gr-message': m.id }}>
           {m.anchor && <button className="ref-chip mono link-chip" disabled={!t} onClick={() => t && focusAnchor(t)}>{anchorLabel(m.anchor)}</button>}
+          {first && <div className="muted small ask-follows" data-gr="follows">Follows <button className="link" title="Show the question that opened this thread" onClick={() => focusQuestion(first.requestId!)}>“{first.text.length > FOLLOWS_QUOTE ? first.text.slice(0, FOLLOWS_QUOTE).trimEnd() + '…' : first.text}”</button></div>}
           <div className="pre-wrap">{m.text}</div>
           {request && !answered && isOpen(request) && <Progress r={request} />}
           {request && !answered && request.status === 'failed' && <div className="flash-banner bad" data-gr="chat-error">Claude Code could not answer: {request.error ?? 'no reason given'}</div>}

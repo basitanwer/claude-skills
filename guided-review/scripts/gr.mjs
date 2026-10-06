@@ -486,6 +486,16 @@ function threadOf(c, r, questions) {
   t.replies = c.replies.filter((x) => !x.pending).map((x) => ({ author: x.author, text: x.text, new: fresh.has(c.replies.indexOf(x)) }))
   return t
 }
+/** What was said in a follow-up question's thread before it: the earlier questions of
+ *  the thread and their answers, in the order they were written. A question that got no
+ *  answer (it failed, or was cancelled) is there on its own. */
+function earlier(r, loaded) {
+  const root = r.threadId ?? r.id
+  const all = loaded?.state.requests ?? []
+  const at = all.findIndex((x) => x.id === r.id)
+  const before = new Set(all.slice(0, at < 0 ? all.length : at).filter((x) => (x.threadId ?? x.id) === root).map((x) => x.id))
+  return (loaded?.state.messages ?? []).filter((m) => before.has(m.requestId)).map((m) => ({ role: m.role, text: m.text }))
+}
 /** One request as a single JSON-able object (a line of `gr listen`). `loaded` is the
  *  review it belongs to, when the kind needs it. */
 function requestEvent(item, loaded) {
@@ -495,6 +505,8 @@ function requestEvent(item, loaded) {
   if (r.retried) ev.retried = true
   if (r.text) ev.text = r.text
   if (r.anchor) ev.anchor = { label: anchorLabel(r.anchor), ...(r.anchor.lineContent != null ? { line: r.anchor.lineContent } : {}) }
+  // a follow-up comes with its thread so far, so it can be answered in context
+  if (r.follows) { ev.follows = r.follows; if (loaded) ev.thread = earlier(r, loaded) }
   if (r.kind === 'walkthrough') ev.update = Boolean(r.update)
   if (r.kind === 'apply') {
     ev.commit = Boolean(r.commit); ev.editable = r.editable !== false
@@ -516,6 +528,11 @@ function printRequest(item, loaded) {
     out(r.update ? '  the reviewer asked for the walkthrough to be UPDATED for what changed since it was written' : '  the reviewer asked for a walkthrough of this comparison')
     if (r.text) out(`  steer: ${r.text}`)
   } else if (r.kind === 'question') {
+    if (r.follows) {
+      out(`  a follow-up to ${r.follows}; earlier in this thread:`)
+      for (const m of earlier(r, loaded)) out(`    ${m.role}: ${m.text.replace(/\n/g, '\n      ')}`)
+      out('  the reviewer now asks:')
+    }
     out(`  ${r.text}`)
     if (r.anchor) out(`  about: ${anchorLabel(r.anchor)}${r.anchor.lineContent != null ? ` — ${JSON.stringify(r.anchor.lineContent)}` : ''}`)
   } else if (r.kind === 'apply') {
@@ -980,7 +997,8 @@ const commands = {
         // (one that went to another session and came back is: it is printed again)
         if (item.resumed && (item.yours || !OWNER) && delivered.has(key)) continue
         delivered.add(key)
-        if ((item.request.kind === 'apply' || item.request.kind === 'decisions') && !loaded.has(item.sessionId)) {
+        // (a follow-up question needs the review too: its thread so far is read from it)
+        if ((item.request.kind === 'apply' || item.request.kind === 'decisions' || item.request.follows) && !loaded.has(item.sessionId)) {
           loaded.set(item.sessionId, await rpcAt(port, 'loadSession', [item.sessionId]).catch(() => null))
         }
         emit(requestEvent(item, loaded.get(item.sessionId)))

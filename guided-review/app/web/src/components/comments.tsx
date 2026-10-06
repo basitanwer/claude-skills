@@ -1,8 +1,8 @@
-import { createContext, useContext, useState } from 'react'
+import { createContext, Fragment, useContext, useMemo, useState } from 'react'
 import type { AnchorInput, Comment } from '@shared/types'
 import { useStore } from '../store'
 import { focusAnchor, focusQuestion } from '../focus'
-import { ago, anchorLabel, ASK, focusable, hasPendingReply, isOpen } from '../util'
+import { ago, anchorLabel, ASK, askExchanges, askStatus, focusable, hasPendingReply, isOpen } from '../util'
 import { Icon, Md, Menu, MenuItem } from './common'
 
 /** Comments indexed by anchor key (see util.indexComments). */
@@ -35,38 +35,88 @@ export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
   return c.id.startsWith(ASK) ? <AskThread c={c} /> : <CommentThread c={c} showAnchor={showAnchor} />
 }
 
-/** A question the reviewer asked Claude Code about this spot, with the answer under it.
- *  The same exchange is in the Conversation tab; here it sits beside what it is about. */
+/** A question the reviewer asked Claude Code about this spot, with the answer under it,
+ *  and every follow-up asked from here with its answer: one thread per first question.
+ *  The same exchanges are in the Conversation tab; here they sit beside what they are about.
+ *  A follow-up is not a pending comment: like the question, it goes to Claude Code at once. */
 function AskThread({ c }: { c: Comment }) {
-  const request = useStore((s) => s.loaded?.state.requests.find((r) => r.id === c.id.slice(ASK.length)))
+  const root = c.id.slice(ASK.length)
+  const messages = useStore((s) => s.loaded?.state.messages)
+  const requests = useStore((s) => s.loaded?.state.requests)
+  const request = useStore((s) => s.request)
   const cancel = useStore((s) => s.cancelRequest)
-  const waiting = Boolean(request && isOpen(request)) && c.replies.length === 0
+  // what is being typed lives here, in a component keyed by the thread, so a refresh of the review does not lose it
+  const [mode, setMode] = useState<'view' | 'reply'>('view')
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const exchanges = useMemo(() => askExchanges(root, messages ?? [], requests ?? []), [root, messages, requests])
+  const last = exchanges.at(-1)
+  // one question at a time: while an exchange is with Claude Code, the next waits for its answer
+  const waiting = exchanges.some((x) => x.request && isOpen(x.request) && x.answers.length === 0)
+  const send = (body: string, follows: string, sent?: () => void): void => {
+    if (!body.trim() || busy) return
+    setBusy(true)
+    // what was typed stays if the server refuses, so the text is not lost
+    void request({ kind: 'question', text: body.trim(), follows }).then((r) => { setBusy(false); if (r) sent?.() })
+  }
+  const submit = (): void => { if (last) send(text, last.id, () => { setText(''); setMode('view') }) }
   return (
-    <div className="thread user ask" data-gr-ask={request?.id} data-gr-ask-status={c.replies.length ? 'answered' : request?.status ?? 'unknown'}>
-      <div className="thread-main">
-        <div className="thread-head">
-          <Who author="user" />
-          <span className="label note" title="A question to Claude Code, not a review comment: it is answered here and is not part of what you send with your review">Question</span>
-          <span className="muted">{ago(c.createdAt)}</span>
-          <span className="grow" />
-          <button className="link small nowrap" data-gr="ask-in-conversation" title="Show this question and its answer in the Conversation tab" onClick={() => focusQuestion(c.id.slice(ASK.length))}>In Conversation</button>
-        </div>
-        <div className="thread-body pre-wrap">{c.text}</div>
-      </div>
-      {c.replies.map((r, i) => (
-        <div key={i} className="thread-main reply agent" data-gr-reply="agent">
-          <div className="thread-head"><Who author="agent" /><span className="muted">{ago(r.at)}</span></div>
-          <Md text={r.text} className="thread-body" />
-        </div>
-      ))}
-      {waiting && request && (
-        <div className="thread-main reply waiting" data-gr="with-claude">
-          <span className="spinner" /><span className="muted">{request.status === 'pending' ? 'Waiting for Claude Code to pick this up' : 'Claude Code is answering'} — the answer will appear here</span>
-          <span className="grow" /><button className="link small" onClick={() => void cancel(request.id)}>Cancel</button>
+    <div className="thread user ask" data-gr-ask={root} data-gr-ask-status={last ? askStatus(last) : 'unknown'}>
+      {exchanges.map((x, i) => {
+        const st = askStatus(x)
+        return (
+          <Fragment key={x.id}>
+            <div className={'thread-main' + (i ? ' reply user' : '')} data-gr-ask-question={x.id}>
+              <div className="thread-head">
+                <Who author="user" />
+                {i === 0 && <span className="label note" title="A question to Claude Code, not a review comment: it is answered here and is not part of what you send with your review">Question</span>}
+                <span className="muted">{ago(x.at)}</span>
+                <span className="grow" />
+                {i === 0 && <button className="link small nowrap" data-gr="ask-in-conversation" title="Show this question and its answer in the Conversation tab" onClick={() => focusQuestion(root)}>In Conversation</button>}
+              </div>
+              <div className="thread-body pre-wrap">{x.text}</div>
+            </div>
+            {x.answers.map((a) => (
+              <div key={a.id} className="thread-main reply agent" data-gr-reply="agent">
+                <div className="thread-head"><Who author="agent" /><span className="muted">{ago(a.at)}</span></div>
+                <Md text={a.text} className="thread-body" />
+              </div>
+            ))}
+            {(st === 'pending' || st === 'running') && (
+              <div className="thread-main reply waiting" data-gr="with-claude">
+                <span className="spinner" /><span className="muted">{st === 'pending' ? 'Waiting for Claude Code to pick this up' : 'Claude Code is answering'} — the answer will appear here</span>
+                <span className="grow" /><button className="link small" onClick={() => void cancel(x.id)}>Cancel</button>
+              </div>
+            )}
+            {(st === 'failed' || st === 'cancelled') && (
+              <div className={'thread-main reply waiting ' + st} data-gr="ask-ended">
+                {st === 'failed' ? <span className="ask-reason">Claude Code could not answer: {x.request?.error ?? 'no reason given'}</span> : <span className="muted">Cancelled.</span>}
+                {/* the latest exchange only: an earlier one was already asked again, or followed by something else */}
+                {x === last && <button className="btn sm nowrap" data-gr="ask-again" disabled={busy} title="Send the same question to Claude Code again, in this thread" onClick={() => send(x.text, x.id)}>Ask again</button>}
+              </div>
+            )}
+          </Fragment>
+        )
+      })}
+      {last && !waiting && (
+        <div className="thread-foot">
+          {mode === 'view' ? (
+            <input name="gr-field" className="reply-stub" data-gr="ask-follow-up" placeholder="Ask a follow-up…" aria-label="Ask a follow-up" readOnly onFocus={() => setMode('reply')} />
+          ) : (
+            <>
+              <textarea name="gr-text" autoFocus value={text} rows={3} placeholder="Ask a follow-up…" aria-label="Ask a follow-up"
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit(); if (e.key === 'Escape') setMode('view') }}
+              />
+              <div className="row gap end">
+                <span className="muted small grow">Goes to Claude Code now, with this thread.</span>
+                <button className="btn sm" onClick={() => setMode('view')}>Cancel</button>
+                <button className="btn sm primary" data-gr="ask-send" disabled={!text.trim() || busy} title="Ask Claude Code in this thread (⌘/Ctrl + Enter). It is delivered when Claude Code is listening; the answer appears here and in Conversation." onClick={submit}>Ask Claude Code</button>
+              </div>
+            </>
+          )}
         </div>
       )}
-      {c.replies.length === 0 && request?.status === 'failed' && <div className="thread-main reply waiting"><span className="muted">Claude Code could not answer: {request.error ?? 'no reason given'}</span></div>}
-      {c.replies.length === 0 && request?.status === 'cancelled' && <div className="thread-main reply waiting"><span className="muted">Cancelled.</span></div>}
     </div>
   )
 }

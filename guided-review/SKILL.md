@@ -48,7 +48,7 @@ Pass the user's argument to `gr review` unchanged. With no argument, ask what to
 
    | Kind | What the reviewer did | Do this |
    |---|---|---|
-   | `question` | Asked something, possibly about a specific line | Investigate, then `gr answer <id> --text "…"`; add `--file P --line N` to point at the code you cite. |
+   | `question` | Asked something, possibly about a specific line | Investigate, then `gr answer <id> --text "…"`; add `--file P --line N` to point at the code you cite. A follow-up carries `follows` and `thread` (the exchange so far): answer it in that context. |
    | `walkthrough` | Asked for a walkthrough, or an update after changes | Step 3 (for an update, read `gr drift` first), then `gr annotate --file <json> --request <id>`. |
    | `apply` | Sent their pending comments and thread replies | For each item: a question or a discussion point gets `gr reply <commentId> --text "…"` in that thread; a change request is step 7. Then `gr done <id>`. |
    | `decisions` | Answered the walkthrough's open questions | Fold the answers into the walkthrough (`gr annotate`), `gr resolve` each, then `gr done <id>`. |

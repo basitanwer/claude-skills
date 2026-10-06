@@ -209,19 +209,37 @@ export function indexComments(comments: Comment[]): Map<string, Comment[]> {
 export const ASK = 'ask:'
 /** Questions the reviewer asked about a specific spot ("Ask Claude Code" on a line, a
  *  file, a section), shaped as threads so they show at that spot as well as in the
- *  conversation: the question, then Claude's answer as its reply. Read-only. */
+ *  conversation: the question, then as its replies Claude's answer and every follow-up
+ *  asked from the thread with its answer, in order. One thread per first question, at
+ *  that question's spot (a follow-up carries the same anchor and must not show twice). */
 export function askThreads(messages: Message[]): Comment[] {
-  const out: Comment[] = []
+  const out = new Map<string, Comment>()
+  const threadOf = new Map<string, string>()
   for (const m of messages) {
-    if (m.role !== 'user' || !m.anchor || !m.requestId) continue
-    const answers = messages.filter((a) => a.role === 'agent' && a.requestId === m.requestId)
-    out.push({
-      id: ASK + m.requestId, anchor: m.anchor, author: 'user', text: m.text, status: 'note', createdAt: m.at, iteration: 0,
-      replies: answers.map((a) => ({ author: 'agent', text: a.text, at: a.at }))
-    })
+    if (!m.requestId) continue
+    if (m.role === 'agent') { out.get(threadOf.get(m.requestId) ?? '')?.replies.push({ author: 'agent', text: m.text, at: m.at }); continue }
+    const root = m.threadId ?? m.requestId
+    threadOf.set(m.requestId, root)
+    const t = out.get(root)
+    if (t) t.replies.push({ author: 'user', text: m.text, at: m.at })
+    else if (m.anchor && !m.threadId) out.set(root, { id: ASK + root, anchor: m.anchor, author: 'user', text: m.text, status: 'note', createdAt: m.at, iteration: 0, replies: [] })
   }
+  return [...out.values()]
+}
+/** One question of a Question thread and what came back for it. */
+export interface AskExchange { id: string; text: string; at: string; request?: ReviewRequest; answers: Message[] }
+/** A Question thread as its exchanges, oldest first: the first question (request `root`)
+ *  and every follow-up. A follow-up just sent is known as a request a moment before its
+ *  message arrives with the next refresh, so those are included from the request. */
+export function askExchanges(root: string, messages: Message[], requests: ReviewRequest[]): AskExchange[] {
+  const mine = requests.filter((r) => r.kind === 'question' && (r.threadId ?? r.id) === root)
+  const asked = messages.filter((m) => m.role === 'user' && m.requestId && (m.threadId ?? m.requestId) === root)
+  const out: AskExchange[] = asked.map((m) => ({ id: m.requestId!, text: m.text, at: m.at, request: mine.find((r) => r.id === m.requestId), answers: messages.filter((a) => a.role === 'agent' && a.requestId === m.requestId) }))
+  for (const r of mine) if (!out.some((x) => x.id === r.id)) out.push({ id: r.id, text: r.text ?? '', at: r.createdAt, request: r, answers: [] })
   return out
 }
+/** Where an exchange stands: answered, or what became of its request. */
+export const askStatus = (x: AskExchange): 'answered' | ReviewRequest['status'] | 'unknown' => (x.answers.length ? 'answered' : x.request?.status ?? 'unknown')
 
 // ── requests ──────────────────────────────────────────────────
 export const isOpen = (r: ReviewRequest): boolean => r.status === 'pending' || r.status === 'running'
