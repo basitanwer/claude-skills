@@ -17,3 +17,7 @@ ln -s ~/claude-skills/guided-review ~/.claude/skills/guided-review
 ```
 
 `guided-review` needs Node 20 or newer and git. Its web UI ships built (`app/web/dist`), so there is nothing to install; `scripts/install.sh --rebuild` rebuilds it after changing `app/web`.
+
+## License
+
+[MIT](LICENSE). `guided-review` includes two small files and a data model derived from [Limn](https://github.com/glebmish/limn) (MIT); see `guided-review/app/NOTICE.md`.
