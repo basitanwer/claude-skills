@@ -219,6 +219,59 @@ export async function makeFocus(loaded, target, read) {
   throw new Error('a focus target is a diff line, a file, a section, or the summary')
 }
 
+/** How many places a resolution names. A fix that touches more is read as a whole diff,
+ *  not chip by chip. */
+export const MAX_CHANGED = 20
+/** The lines a fix changed, as the session named them, checked the way an anchor is: the
+ *  file is part of the diff (a rename by either path), and the lines exist on the compare
+ *  side as it is now, uncommitted edits included. Only the file and the line numbers are
+ *  taken from the caller; the text of the first line is copied from git.
+ *  @param {LoadedReview} loaded @param {any} input @param {ReturnType<typeof sideReader>} read
+ *  @returns {Promise<import('../shared/types.ts').ChangedRange[]>} */
+export async function makeChanged(loaded, input, read) {
+  if (!Array.isArray(input)) throw new Error('changed is a list of { file, start, end }')
+  if (input.length > MAX_CHANGED) throw new Error(`a resolution names at most ${MAX_CHANGED} changed ranges, got ${input.length}: merge neighbouring ones, or name the ones that matter`)
+  const out = []
+  for (const r of input) {
+    const start = Number(r?.start); const end = r?.end == null ? start : Number(r.end)
+    if (typeof r?.file !== 'string' || !r.file || !Number.isInteger(start) || start < 1 || !Number.isInteger(end) || end < 1) throw new Error(`changed ${JSON.stringify(r)}: a range is { file, start, end } with line numbers from 1`)
+    const name = `changed ${r.file}:${start}${end === start ? '' : `-${end}`}`
+    if (end < start) throw new Error(`${name}: the range ends before it starts`)
+    let f
+    try { f = findFile(loaded.files, r.file) } catch (err) { throw new Error(`${name}: ${err instanceof Error ? err.message : err}`) }
+    if (f.binary) throw new Error(`${name}: ${f.path} is binary: it has no lines`)
+    const full = await read(f, 'new')
+    if (!full) throw new Error(`${name}: ${f.path} has no lines on the compare side (${f.status})`)
+    if (end > full.length) throw new Error(`${name}: ${f.path} has ${full.length} lines on the compare side; line ${start > full.length ? start : end} does not exist`)
+    out.push({ file: f.path, start, end, lineContent: full[start - 1] })
+  }
+  return out
+}
+/** The same for a fix that was committed and whose lines nobody named: the runs of lines
+ *  the commit added (against its first parent) in files that are part of the review. A run
+ *  is kept only where the compare side still reads as the commit left it, since a later
+ *  commit or an uncommitted edit may have moved the lines. `more`: runs beyond the cap.
+ *  @param {string} repo @param {LoadedReview} loaded @param {string} sha @param {ReturnType<typeof sideReader>} read */
+export async function changedByCommit(repo, loaded, sha, read) {
+  const parent = (await tryGit(repo, ['rev-parse', '--verify', '--quiet', `${sha}^`]))?.trim() || EMPTY_TREE
+  /** @type {import('../shared/types.ts').ChangedRange[]} */
+  const out = []
+  for (const cf of await diffTrees(repo, parent, sha)) {
+    const f = loaded.files.find((x) => x.path === cf.path) ?? loaded.files.find((x) => x.oldPath === cf.path)
+    if (!f || f.binary) continue
+    const added = new Map(cf.hunks.flatMap((h) => h.lines.filter((l) => l.kind === 'add').map((l) => [/** @type {number} */ (l.new), l.text])))
+    const full = added.size ? await read(f, 'new') : null
+    if (!full) continue
+    const nums = [...added.keys()].sort((a, b) => a - b)
+    for (let i = 0; i < nums.length; i++) {
+      let j = i; while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++
+      if (full[nums[i] - 1] === added.get(nums[i]) && full[nums[j] - 1] === added.get(nums[j])) out.push({ file: f.path, start: nums[i], end: nums[j], lineContent: full[nums[i] - 1] })
+      i = j
+    }
+  }
+  return { changed: out.slice(0, MAX_CHANGED), more: Math.max(0, out.length - MAX_CHANGED) }
+}
+
 /** Keep comments on the line they were written on as the code moves.
  *  A line is recognised by its exact text (falling back to the same text ignoring
  *  whitespace); identical lines are told apart by their neighbours, then by

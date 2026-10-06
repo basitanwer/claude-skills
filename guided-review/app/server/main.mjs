@@ -13,8 +13,8 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { Store, emptyState, now } from './store.mjs'
-import { approvalKey, approvedState, artifactRole, assemble, drift, makeAnchor, makeFocus, readAt, reconcile, resolveInput, sideReader, signatureOf } from './review.mjs'
-import { assertSafeRef, branches, currentBranch, defaultBase, log, primaryRepo, statusEntries, tags, tryGit, worktrees } from './git.mjs'
+import { approvalKey, approvedState, artifactRole, assemble, changedByCommit, drift, makeAnchor, makeChanged, makeFocus, readAt, reconcile, resolveInput, sideReader, signatureOf } from './review.mjs'
+import { assertSafeRef, branches, commitOf, currentBranch, defaultBase, log, primaryRepo, statusEntries, tags, tryGit, worktrees } from './git.mjs'
 
 /** @typedef {import('./store.mjs').Session} Session */
 /** @typedef {import('../shared/types.ts').ReviewRequest} ReviewRequest */
@@ -401,16 +401,17 @@ const api = {
     const s = store.get(id)
     const c = s.state.comments.find((x) => x.id === cid)
     if (!c) throw new Error(`no comment ${cid}`)
+    // checked in full before anything is applied: a refused range leaves the comment as it was
+    const resolution = patch?.resolution ? await resolutionOf(s, patch.resolution) : null
     if (typeof patch?.text === 'string' && patch.text.trim()) c.text = patch.text.trim()
     if (patch?.reply?.text) {
       const author = patch.reply.author === 'agent' ? 'agent' : 'user'
       // a reviewer's reply waits, like a new comment, until they send their review
       c.replies.push({ author, text: String(patch.reply.text), at: now(), ...(author === 'user' ? { pending: true } : {}) })
     }
-    if (patch?.resolution) {
-      if (!['addressed', 'reworked', 'skipped'].includes(patch.resolution.verdict)) throw new Error('verdict must be addressed, reworked or skipped')
+    if (resolution) {
       c.status = 'resolved'
-      c.resolution = { verdict: patch.resolution.verdict, note: String(patch.resolution.note ?? ''), ...(patch.resolution.commit ? { commit: String(patch.resolution.commit) } : {}), at: now() }
+      c.resolution = resolution
     } else if (patch?.status) {
       if (!['note', 'queued', 'resolved', 'answered'].includes(patch.status)) throw new Error(`cannot set status ${patch.status}`)
       if (patch.status === 'answered' && !c.replies.some((x) => x.author === 'agent')) throw new Error('only a comment Claude Code replied to can be marked answered')
@@ -659,6 +660,29 @@ const api = {
     push('ui:action', { sessionId: id, action: checked })
     return { tabs: tabsOf(id) }
   })
+}
+/** The outcome a session records for a comment, with where the fix is: the ranges it
+ *  named, validated against git (one that is not there refuses the whole outcome), or
+ *  failing that the lines the commit it names added. A review is assembled only when
+ *  there is something to look up, so an outcome with neither costs what it did.
+ *  @param {Session} s @param {any} input @returns {Promise<NonNullable<import('../shared/types.ts').Comment['resolution']>>} */
+async function resolutionOf(s, input) {
+  if (!['addressed', 'reworked', 'skipped'].includes(input.verdict)) throw new Error('verdict must be addressed, reworked or skipped')
+  const commit = input.commit ? String(input.commit) : ''
+  const named = input.changed != null && !(Array.isArray(input.changed) && !input.changed.length)
+  /** @type {{ changed: import('../shared/types.ts').ChangedRange[], more: number }} */
+  let where = { changed: [], more: 0 }
+  if (named || commit) {
+    const loaded = await load(s)
+    const read = sideReader(s.repo, loaded)
+    if (named) where.changed = await makeChanged(loaded, input.changed, read)
+    else {
+      // a commit this repository does not have is recorded as given, as before, with no lines
+      const sha = /^-|[\0\n]/.test(commit) ? null : await commitOf(s.repo, commit)
+      if (sha) where = await changedByCommit(s.repo, loaded, sha, read)
+    }
+  }
+  return { verdict: input.verdict, note: String(input.note ?? ''), ...(commit ? { commit } : {}), ...(where.changed.length ? { changed: where.changed } : {}), ...(where.more ? { changedMore: where.more } : {}), at: now() }
 }
 /** Validate a UI action; focus and tour targets must exist in a changed file.
  *  @param {Session} s @param {import('../shared/types.ts').LoadedReview} loaded @param {any} a */

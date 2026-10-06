@@ -43,7 +43,7 @@ const fail = (msg, code) => { throw new Fail(msg, code) }
 const BOOL = new Set(['working-tree', 'resume', 'new', 'no-open', 'json', 'stat', 'queued', 'summary', 'title', 'all', 'unset',
   'confirmed-by-user', 'freeze', 'direct', 'force', 'full', 'list', 'include-archived', 'loop', 'on-change', 'help'])
 const VALUE = new Set(['repo', 'session', 'port', 'base', 'file', 'line', 'side', 'expect', 'text', 'as', 'section', 'question',
-  'artifact', 'step', 'status', 'verdict', 'note', 'sha', 'timeout', 'stop', 'request', 'role', 'owner'])
+  'artifact', 'step', 'status', 'verdict', 'note', 'sha', 'changed', 'timeout', 'stop', 'request', 'role', 'owner'])
 function parseArgs(argv) {
   const pos = []; const opt = {}
   for (let i = 0; i < argv.length; i++) {
@@ -57,7 +57,7 @@ function parseArgs(argv) {
       if (eq > 0) val = a.slice(eq + 1)
       else if (BOOL.has(key)) val = true
       else { val = argv[++i]; if (val === undefined) fail(`--${key} needs a value`) }
-      if (key === 'stop') (opt.stop ??= []).push(val)
+      if (key === 'stop' || key === 'changed') (opt[key] ??= []).push(val)
       else opt[key] = val
     } else pos.push(a)
   }
@@ -395,6 +395,23 @@ function stopsFrom(opt, { jsonFile = false } = {}) {
   }
   return toStops(opt.stop)
 }
+/** Where a fix is: "path:line" or "path:start-end" strings (the --changed flag), or
+ *  { file, start, end } objects. Only the form is checked here; the server checks the
+ *  lines against git. */
+function toChanged(list) {
+  return [list].flat().map((x) => {
+    const m = typeof x === 'string' ? x.trim().match(/^(.+):(\d+)(?:[-–](\d+))?$/) : null
+    if (m) return { file: m[1], start: Number(m[2]), end: Number(m[3] ?? m[2]) }
+    if (typeof x !== 'object' || !x || typeof x.file !== 'string' || x.start == null) fail(`changed range ${JSON.stringify(x)} must be "path:line" or "path:start-end"${typeof x === 'string' ? '' : ', or { file, start, end }'}`)
+    return { file: x.file, start: Number(x.start), end: Number(x.end ?? x.start) }
+  })
+}
+const rangeLabel = (r) => `${r.file}:${r.start}${r.end > r.start ? `-${r.end}` : ''}`
+/** The recorded ranges of a resolution in a few words: the first three, and how many more. */
+function changedLabel(res) {
+  const more = Math.max(0, res.changed.length - 3) + (res.changedMore ?? 0)
+  return `${res.changed.slice(0, 3).map(rangeLabel).join(', ')}${more ? ` +${more} more` : ''}`
+}
 const anchorLabel = (a) => a.kind === 'diff' ? `${a.file}:${a.line}${a.side === 'old' ? ' (old)' : ''}` : a.kind === 'file' ? a.file
   : a.kind === 'section' ? `section ${a.sectionId}` : a.kind === 'artifact' ? `${a.path}:${a.line}` : a.kind === 'question' ? `question ${a.questionId}`
     : a.kind === 'plan-step' ? `plan step ${a.stepN}` : a.kind === 'summary' ? 'the summary' : a.kind === 'title' ? 'the title'
@@ -417,7 +434,7 @@ function newReplies(c) {
 }
 /** `fresh`: indexes of replies to mark as new (see newReplies). */
 function fmtComment(c, fresh) {
-  const res = c.resolution ? ` → ${c.resolution.verdict}: ${c.resolution.note}${c.resolution.commit ? ` (${short(c.resolution.commit)})` : ''}` : ''
+  const res = c.resolution ? ` → ${c.resolution.verdict}: ${c.resolution.note}${c.resolution.commit ? ` (${short(c.resolution.commit)})` : ''}${c.resolution.changed?.length ? ` · changed: ${changedLabel(c.resolution)}` : ''}` : ''
   const stale = (c.status === 'outdated' || c.lineGone) && c.anchor.lineContent != null ? `\n    stale anchor — the line it was written on is gone: ${JSON.stringify(c.anchor.lineContent)}` : ''
   const replies = c.replies.map((r, i) => `\n    ↳ ${r.author}: ${r.text}${r.pending ? '  (pending)' : ''}${fresh?.has(i) ? '  ← NEW' : ''}`).join('')
   return `[${c.id}] ${c.status} · ${c.author} · ${anchorLabel(c.anchor)}\n    ${c.text}${res}${stale}${replies}`
@@ -465,13 +482,15 @@ function guidance(r, s) {
   if (r.kind === 'decisions') return [`these are decisions, not code changes: update the walkthrough (gr annotate --file <json> ${S}), gr resolve each (${S}), then: gr done ${r.id} ${S}`]
   const steps = []
   const resolve = `gr resolve <commentId> ${S} --verdict addressed|reworked|skipped --note "…"`
+  // an edit is recorded with where it is, so the reviewer can go straight to the fix
+  const changed = `${resolve} --changed "path:start-end" (the lines you changed for that comment, as they are numbered now; repeat --changed for each place)`
   if (r.editable === false) {
     steps.push(`this comparison cannot be edited (it ends at a fixed commit, or its branch is not checked out): do not change files; answer in the threads with gr reply <commentId> ${S} --text "…" (a comment you reply to shows as answered); only for a change request you cannot make, also record it with: ${resolve}; then: gr done ${r.id} ${S}`)
   } else {
-    steps.push(`reply in threads with: gr reply <commentId> ${S} --text "…"; for a change request make the edits, record each with: ${resolve}, then: gr done ${r.id} ${S}`)
-    steps.push(r.commit ? 'the reviewer asked for the edits to be committed: commit only your own edits and pass --sha <commit> to gr resolve' : 'do NOT commit: leave the edits uncommitted in the working tree')
+    steps.push(`reply in threads with: gr reply <commentId> ${S} --text "…"; for a change request make the edits, record each with: ${changed}, then: gr done ${r.id} ${S}`)
+    steps.push(r.commit ? 'the reviewer asked for the edits to be committed: commit only your own edits and pass --sha <commit> to gr resolve (keep --changed as well when the commit holds more than that comment\'s fix)' : 'do NOT commit: leave the edits uncommitted in the working tree')
   }
-  steps.push(`several replies and resolutions can go in one call: gr batch ${S} --file ops.json`)
+  steps.push(`several replies and resolutions can go in one call: gr batch ${S} --file ops.json${r.editable === false ? '' : ' (a resolve operation takes "changed": ["path:start-end"])'}`)
   return steps
 }
 /** A thread as a request delivers it: `because` says why it was sent, and each reply
@@ -592,15 +611,22 @@ const builders = {
     }
   },
   async resolve(o, ctx) {
-    if (!o.id || !['addressed', 'reworked', 'skipped'].includes(o.verdict) || o.note == null) fail('usage: gr resolve <commentId> --verdict addressed|reworked|skipped --note "what was done" [--sha COMMIT]')
+    if (!o.id || !['addressed', 'reworked', 'skipped'].includes(o.verdict) || o.note == null) fail('usage: gr resolve <commentId> --verdict addressed|reworked|skipped --note "what was done" [--changed "path:start-end" …] [--sha COMMIT]')
+    const changed = o.changed == null ? [] : toChanged(o.changed)
     let commit
     if (o.sha) {
       const repo = await ctx.repo()
       commit = commitSha(repo, String(o.sha)); if (!commit) fail(`--sha ${o.sha} is not a commit in ${repo}`)
     }
     return {
-      channel: 'commentUpdate', args: [String(o.id), { resolution: { verdict: o.verdict, note: String(o.note), ...(commit ? { commit } : {}) } }],
-      lines: (c) => [`resolved ${o.id} (${anchorLabel(c.anchor)}) as ${o.verdict}: ${o.note}`]
+      channel: 'commentUpdate', args: [String(o.id), { resolution: { verdict: o.verdict, note: String(o.note), ...(commit ? { commit } : {}), ...(changed.length ? { changed } : {}) } }],
+      lines: (c) => {
+        const res = c.resolution; const derived = commit && !changed.length
+        return [`resolved ${o.id} (${anchorLabel(c.anchor)}) as ${o.verdict}: ${o.note}`,
+          ...(res?.changed?.length ? [`  changed${derived ? `, taken from commit ${short(commit)}` : ''}: ${res.changed.map(rangeLabel).join(', ')}`] : []),
+          ...(res?.changedMore ? [`  ${res.changedMore} more range(s) of that commit are not recorded (at most ${res.changed.length} are kept): name the ones that matter with --changed`] : []),
+          ...(derived && !res?.changed?.length ? [`  no changed lines recorded: commit ${short(commit)} added no lines that are part of this review as it is now (name them with --changed)`] : [])]
+      }
     }
   },
   reopen(o) {
@@ -647,7 +673,7 @@ const builders = {
       lines: (r, comments) => {
         const mine = (comments ?? []).filter((c) => r.commentIds?.includes(c.id))
         return [`request ${o.request} done`, ...(mine.length ? ['resolutions:'] : []),
-          ...mine.map((c) => (c.resolution ? `  [${c.id}] ${c.resolution.verdict} — ${c.resolution.note}`
+          ...mine.map((c) => (c.resolution ? `  [${c.id}] ${c.resolution.verdict} — ${c.resolution.note}${c.resolution.changed?.length ? ` · changed: ${changedLabel(c.resolution)}` : ''}`
             : r.replyIds?.includes(c.id) ? `  [${c.id}] ${c.replies.at(-1)?.author === 'agent' ? 'replied' : 'NOT answered'} (${c.status})`
               : c.status === 'answered' ? `  [${c.id}] replied (answered: no longer pending)`
                 : `  [${c.id}] NOT handled (back to ${c.status})`))]

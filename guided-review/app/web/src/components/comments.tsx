@@ -1,8 +1,8 @@
 import { createContext, Fragment, useContext, useMemo, useState } from 'react'
 import type { AnchorInput, Comment } from '@shared/types'
 import { useStore } from '../store'
-import { focusAnchor, focusQuestion } from '../focus'
-import { ago, anchorLabel, ASK, askExchanges, askStatus, focusable, hasPendingReply, isOpen } from '../util'
+import { focusAnchor, focusChanged, focusQuestion } from '../focus'
+import { ago, anchorLabel, ASK, askExchanges, askStatus, baseName, focusable, hasPendingReply, isOpen, plural } from '../util'
 import { Icon, Md, Menu, MenuItem } from './common'
 
 /** Comments indexed by anchor key (see util.indexComments). */
@@ -160,13 +160,17 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
     setText('')
   }
   const cls = 'thread ' + c.author + ' ' + st.cls + (pendingReply ? ' pending' : '')
+  // where the fix is, when the session said so: one chip per range, each a jump to those lines
+  const changed = c.resolution?.changed ?? []
+  const places = changed.length + (c.resolution?.changedMore ?? 0)
   if (!open) {
     return (
       <div className={cls + ' folded'} data-gr-comment={c.id} data-gr-status={c.status} data-gr-folded="true">
-        <div className="thread-main thread-head">
+        <div className={'thread-main thread-head' + (places > 0 ? ' has-changes' : '')}>
           <Who author={c.author} />
           <span className={'label ' + st.cls} title={st.title}>{st.text}{c.resolution ? ` · ${c.resolution.verdict}` : ''}</span>
           <span className="clip grow muted">{c.resolution?.note || c.text}</span>
+          {places > 0 && <span className="muted small nowrap" data-gr="changed-count" title="Places in the code Claude Code changed for this comment: show the thread to go to them">· {plural(places, 'change')}</span>}
           <button className="link small nowrap" data-gr="show-resolved" onClick={() => setToggled(true)}>Show resolved</button>
         </div>
       </div>
@@ -211,6 +215,16 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
             <span><strong>{c.resolution.verdict}</strong>{c.resolution.note ? ` — ${c.resolution.note}` : ''}</span>
             {c.resolution.commit && <span className="mono muted" title="The commit that addressed it">{c.resolution.commit.slice(0, 7)}</span>}
             <span className="muted">{ago(c.resolution.at)}</span>
+            {changed.length > 0 && (
+              <span className="changed-list" data-gr="changed">
+                <span className="muted small">Changed</span>
+                {changed.map((r, i) => {
+                  const lines = r.end > r.start ? `${r.start}–${r.end}` : `${r.start}`
+                  return <button key={i} className="ref-chip mono link-chip" data-gr="changed-chip" title={`${r.file}:${lines} — show ${r.end > r.start ? 'these lines' : 'this line'} in Files changed`} onClick={() => void focusChanged(r)}>{baseName(r.file)}:{lines}</button>
+                })}
+                {places > changed.length && <span className="muted small" title="The commit changed more places than a resolution keeps">+{places - changed.length} more{c.resolution.commit ? ` in ${c.resolution.commit.slice(0, 7)}` : ''}</span>}
+              </span>
+            )}
           </div>
         )}
       </div>

@@ -436,3 +436,12 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .thread.ask .thread-main.reply.failed, .thread.ask .thread-main.reply.cancelled { flex-wrap: wrap; } .thread.ask .thread-main.reply > .btn { margin-left: auto; }
 .ask-reason { color: var(--bad); overflow-wrap: anywhere; min-width: 0; flex: 1 1 220px; }   /* a long reason wraps beside the button, not above it */
 .ask-follows .link { font-size: inherit; overflow-wrap: anywhere; }
+/* changed lines of a resolution */
+.changed-list { flex-basis: 100%; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; min-width: 0; }
+.changed-list .ref-chip { background: var(--panel); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+/* the folded line names the count; where a thread is too narrow for all of it, "Show resolved" drops to a second line */
+.thread.folded .thread-head.has-changes { flex-wrap: wrap; } .thread.folded .has-changes .clip { flex-basis: 0; } .thread.folded .has-changes [data-gr="show-resolved"] { margin-left: auto; }
+.gr-flash-range { animation: flash-range 1.8s ease-out; }
+@keyframes flash-range { 0%, 45% { background-color: var(--flash); box-shadow: inset 3px 0 0 var(--accent); } 100% { box-shadow: inset 3px 0 0 transparent; } }
+/* without motion the range is still marked: held, then gone */
+@media (prefers-reduced-motion: reduce) { .gr-flash-range { animation: none; background-color: var(--flash) !important; box-shadow: inset 3px 0 0 var(--accent); } }

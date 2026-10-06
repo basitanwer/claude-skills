@@ -81,6 +81,7 @@ Requested for this skill and not in Limn.
 | A6 | Working-tree-only review, including a detached `HEAD` | `review.mjs` (`worktree` side) | T sem; UI |
 | A7 | Direct two-endpoint comparison (`--direct`) | `review.mjs`, `gr.mjs` | T sem, loop |
 | A8 | Apply leaves edits uncommitted unless the request or the user says to commit | request `commit` flag, `SKILL.md` | T loop (HEAD unchanged); UI |
+| A8a | A resolution records where the fix is: `gr resolve --changed "path:start-end"` (or the lines of `--sha`'s commit), validated against git like an anchor; the page shows a chip per range that jumps to the lines and flashes them, folding in newer code first | `review.mjs` `makeChanged` / `changedByCommit`, `main.mjs` `commentUpdate`, `gr.mjs`, UI (`focusChanged`) | T (`changed.test.mjs`, 10 tests); UI + gr |
 | A9 | Server-side anchor validation with exact text copied from git, for any line of a changed file; `--expect` guard | `review.mjs` `makeAnchor` | T loop, sem, filelines |
 | A10 | Approval cannot be given by the agent on its own | `gr approve` refuses without `--confirmed-by-user`; the UI's Approve is disabled while unseen changes are pending | T loop; UI |
 | A11 | Comparison semantics reported on open | `gr review` notes | T sem |

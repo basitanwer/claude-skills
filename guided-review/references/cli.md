@@ -82,7 +82,7 @@ Common options: `--repo DIR` (default: cwd), `--session N` (default: the review 
 | `artifact add PATH --role spec\|plan` · `artifact remove PATH` · `artifact list` | Attach or detach spec/plan files the review is judged against. |
 | `comment <anchor> --text T [--expect TEXT] [--as user] [--queued]` | Add a comment. From this session it is a `note`; `--queued` or `--as user` puts it in the reviewer's queue. |
 | `comments [--status note\|queued\|sent\|answered\|resolved\|outdated]` | List comments. |
-| `reply ID --text T` · `resolve ID --verdict addressed\|reworked\|skipped --note T [--sha C]` · `reopen ID` · `delete-comment ID` | Manage a comment thread and its resolution. |
+| `reply ID --text T` · `resolve ID --verdict addressed\|reworked\|skipped --note T [--changed "path:start-end" …] [--sha C]` · `reopen ID` · `delete-comment ID` | Manage a comment thread and its resolution. `--changed` (repeatable; `path:line` or `path:start-end`) names the lines edited for the comment, which the page offers as jumps to the fix: see [Where the fix is](#requests-from-the-reviewer). |
 | `focus <anchor>` | Scroll every open tab of this review to a spot and highlight it. Opens a tab if none is open. |
 | `tour --stop "path:line[:old] \| note" …` or `--file stops.json` | A 2–8 stop walkthrough card in the UI. Stops may also be `section:ID`, a bare path, or `summary`. `--loop` to cycle. |
 | `say "text"` | Show a transient status line in the UI. |
@@ -104,7 +104,7 @@ The page cannot do agent work itself. What the reviewer does there that needs Cl
 |---|---|---|---|
 | `walkthrough` | Ask for / Update walkthrough | optional steer; `update` flag | `gr annotate --file F --request ID` |
 | `question` | The Conversation box, "Ask Claude Code" on a line, or a follow-up typed in a Question thread | the question, optional anchor with the line's text; for a follow-up also `follows` and the `thread` so far | `gr answer ID --text "…"` (an anchor or `--stop`s attach clickable focus/tour chips; the first one also plays live) |
-| `apply` | Review ▾ → Send | every pending comment and every thread with a pending reply; optional note; `commit`; `editable` | `gr reply` / edits + `gr resolve` per item, then `gr done ID` |
+| `apply` | Review ▾ → Send | every pending comment and every thread with a pending reply; optional note; `commit`; `editable` | `gr reply` / edits + `gr resolve` per item (with `--changed` for the lines edited), then `gr done ID` |
 | `decisions` | Answering the walkthrough's open questions | the answer comments | updated walkthrough, `gr resolve` per answer, then `gr done ID` |
 
 Lifecycle: `pending` → `running` (claimed by a listener) → `done` | `failed` | `cancelled`.
@@ -127,6 +127,7 @@ Lifecycle: `pending` → `running` (claimed by a listener) → `done` | `failed`
 - **Stuck requests.** If a running request shows no progress for five minutes, or sooner when no session is reachable, the page offers "Send again". That clears the request's owner and puts it back in the queue; it is delivered with `"retried": true`, to the session that had it if that session is listening, otherwise to whichever listener asks first.
 - **Failure.** `gr fail ID --text "why"` ends a request with a reason the page shows.
 - **Comments without an outcome.** When an apply or decisions request ends in any way, a comment still `sent` goes one of two ways. If the request was an apply and Claude Code replied to the comment during it, the comment becomes `answered`: an open thread that is no longer waiting to be sent (the reviewer can reply again, or resolve it). One it never touched returns to pending, so nothing is lost. The same holds for a reply: a thread sent only for the reviewer's reply, and neither answered nor resolved, has that reply pending again (unless a later request that is still open already carries the thread). Reply before finishing: a `gr reply` made after `gr done` does not clear a reply that `done` has just given back.
+- **Where the fix is.** `gr resolve --changed "path:start-end"` (repeat it for each place; `path:line` for one line) records the new-side lines the session edited for that comment. The page shows one chip per range under the resolution; a click goes to those lines in Files changed and flashes them, first folding in newer code when the code changed since the page loaded it (and leaving a single-commit view), and a folded resolved thread says how many places changed. The server checks each range the way it checks an anchor: the file must be part of the diff (a rename by either path) and the lines must exist on the compare side as it is now, uncommitted edits included when the compare side is a checked-out branch; the text of the first line is copied from git. A range that is not there refuses the whole resolution, naming the range. At most 20 ranges. With `--sha` and no `--changed`, the ranges are the runs of lines that commit added (against its first parent) in files of the review, where the compare side still reads as the commit left them; if it has more than 20, the first 20 are kept and `gr resolve` says how many were left out. An explicit `--changed` always wins, which is what to pass when one commit holds the fixes for several comments. A fix that only removes lines has no lines to name. The line numbers are stored as they were when the fix was recorded and are not re-anchored, so a later edit above them shifts what they point at (the page says so when the first line no longer reads as recorded).
 - **Edits and permissions.** Edits are made by this Claude Code session with its normal tools, so Claude Code's own permission prompts and settings apply; the skill additionally has the session confirm in the terminal before the first edit a request asks for. A request on a fixed commit has `editable: false`: it can be answered but not edited.
 - **Presence.** The page shows whether a session will act on what the reviewer asks: *working* while a live session holds a request, or for two minutes after one handled a request; *listening* while `gr listen` or `gr wait` is connected; otherwise *not attached*, including when a request is still claimed by a session that is gone. A session that only reads the review or posts comments with `gr` does not make a review look attended: that says nothing about whether a request would be picked up. (Any call from the session that holds a request does show that this session is still there.) Requests made while nothing is attached wait.
 - **Notifications.** Completing a request or storing a walkthrough notifies the reviewer: a browser notification when the tab is in the background, or a macOS banner when no tab is open on that review.
@@ -137,13 +138,13 @@ Lifecycle: `pending` → `running` (claimed by a listener) → `done` | `failed`
 [
   {"op": "comment", "file": "src/a.ts", "line": 12, "expect": "retry(", "text": "Unbounded retry."},
   {"op": "reply", "id": "c4", "text": "It is called from two places; both pass a budget."},
-  {"op": "resolve", "id": "c7", "verdict": "addressed", "note": "Capped at 5."},
+  {"op": "resolve", "id": "c7", "verdict": "addressed", "note": "Capped at 5.", "changed": ["src/a.ts:12-18"]},
   {"op": "answer", "request": "r3", "text": "Because …", "file": "src/a.ts", "line": 12},
   {"op": "done", "request": "r5"}
 ]
 ```
 
-Operations: `comment`, `reply`, `resolve`, `reopen`, `delete-comment`, `answer`, `note`, `progress`, `done`, `fail`, `annotate` (`walkthrough` object), `focus`, `viewed`.
+Operations: `comment`, `reply`, `resolve`, `reopen`, `delete-comment`, `answer`, `note`, `progress`, `done`, `fail`, `annotate` (`walkthrough` object), `focus`, `viewed`. A `resolve` operation takes `changed` as an array of `"path:start-end"` strings or `{"file", "start", "end"}` objects.
 
 ## Anchors
 

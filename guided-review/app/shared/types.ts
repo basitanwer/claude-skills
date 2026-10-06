@@ -132,6 +132,10 @@ export interface CommentReply {
   /** a reviewer's reply that has not been sent to Claude Code yet */
   pending?: boolean
 }
+/** Lines of the compare side that were changed for a comment, numbered as they were when
+ *  its outcome was recorded (a later edit can shift them; they are not re-anchored).
+ *  `lineContent` is the text of line `start`, copied from git. */
+export interface ChangedRange { file: string; start: number; end: number; lineContent: string }
 export interface Comment {
   id: string
   anchor: CommentAnchor
@@ -145,7 +149,14 @@ export interface Comment {
   status: 'note' | 'queued' | 'sent' | 'answered' | 'resolved' | 'outdated'
   /** for note/resolved comments on a line that no longer exists */
   lineGone?: boolean
-  resolution?: { verdict: 'addressed' | 'reworked' | 'skipped'; note: string; commit?: string; at: string }
+  resolution?: {
+    verdict: 'addressed' | 'reworked' | 'skipped'; note: string; commit?: string
+    /** where the fix is: the ranges the session named, or else the ones `commit` added */
+    changed?: ChangedRange[]
+    /** how many more ranges `commit` has than the cap let `changed` keep */
+    changedMore?: number
+    at: string
+  }
   replies: CommentReply[]
   createdAt: string
   /** walkthrough iteration current when the comment was written */
@@ -312,7 +323,8 @@ export interface UiStatePatch {
 export interface CommentPatch {
   text?: string
   status?: Comment['status']
-  resolution?: { verdict: 'addressed' | 'reworked' | 'skipped'; note: string; commit?: string }
+  /** `changed`: the server checks each range against git, like an anchor, and refuses one that is not there */
+  resolution?: { verdict: 'addressed' | 'reworked' | 'skipped'; note: string; commit?: string; changed?: { file: string; start: number; end?: number }[] }
   reply?: { author: 'user' | 'agent'; text: string }
 }
 export interface ServerInfo {

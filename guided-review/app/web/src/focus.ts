@@ -1,4 +1,4 @@
-import type { FocusTarget, TourStop } from '@shared/types'
+import type { ChangedRange, FocusTarget, TourStop } from '@shared/types'
 import { useStore } from './store'
 import { baseName, cssq, type Tab } from './util'
 
@@ -230,4 +230,56 @@ export function showSection(id: string | null): void {
   }
   window.requestAnimationFrame(place)
   window.setTimeout(place, 150)       // once more, after late layout
+}
+
+/** one toast about a changed range at a time */
+const CHANGED_KEY = 'changed-range'
+/** Go to the lines a resolution says were changed for a comment, and flash all of them.
+ *  The numbers are those of the whole comparison when the fix was recorded, and the fix is
+ *  shown in the code as it is now, so whatever else is on screen gives way first: a page
+ *  whose code is behind (the "this comparison changed" banner is up) folds the new code
+ *  in, and a commit view (another diff, where the same numbers are other lines) is left.
+ *  The numbers are not re-anchored, so what cannot be shown is said: a file that left the
+ *  comparison, lines that are no longer there, a first line that reads differently now.
+ *  A jump like any other the reviewer did not aim themselves: `focusAnchor` leaves the
+ *  way back. */
+export async function focusChanged(r: ChangedRange): Promise<void> {
+  const lines = r.end > r.start ? `lines ${r.start}–${r.end}` : `line ${r.start}`
+  const was = useStore.getState()
+  if (was.view.commit) await was.setView({ commit: undefined })
+  else if (was.drift) await was.reload()
+  const st = useStore.getState()
+  const say = (text: string): void => st.toast(text, 'info', undefined, { key: CHANGED_KEY })
+  const file = st.loaded?.files.find((f) => f.path === r.file || f.oldPath === r.file)
+  if (!file) { say(`${r.file} is no longer part of this comparison, so ${lines} cannot be shown.`); return }
+  focusAnchor({ kind: 'diff', file: file.path, side: 'new', line: r.start })
+  const first = `[data-gr-line="${cssq(`${file.path}:new:${r.start}`)}"]`
+  let tries = 0
+  const tick = (): void => {
+    if (find([first])) {
+      // focusAnchor has scrolled to the first line by now, or does at its next look
+      window.setTimeout(() => flashRange(file.path, r), 60)
+      // a later edit shifted or rewrote the lines
+      const now = file.hunks.flatMap((h) => h.lines).find((l) => l.new === r.start)?.text
+      if (now !== undefined && now !== r.lineContent) say(`${baseName(file.path)} changed after this fix was recorded: ${lines} may no longer be the fix.`)
+    } else if (tries++ < 50) window.setTimeout(tick, 40)
+    // focusAnchor has fallen back to the file by now
+    else say(`${lines[0].toUpperCase()}${lines.slice(1)} of ${baseName(file.path)} ${r.end > r.start ? 'are' : 'is'} not there any more: the file changed after this fix was recorded.`)
+  }
+  window.requestAnimationFrame(tick)
+}
+/** Flash every line of a range that is on the page, and bring the range into the window:
+ *  centred when it fits, else with its first line near the top. */
+function flashRange(file: string, r: ChangedRange): void {
+  const els = [...document.querySelectorAll<HTMLElement>(`[data-gr-file="${cssq(file)}"] [data-new]`)].filter((el) => { const n = Number(el.dataset.new); return n >= r.start && n <= r.end })
+  if (!els.length) return
+  const top = els[0].getBoundingClientRect().top; const bottom = els[els.length - 1].getBoundingClientRect().bottom
+  const room = window.innerHeight
+  window.scrollBy({ top: bottom - top < room * 0.6 ? (top + bottom - room) / 2 : top - room * 0.3 })
+  for (const el of els) {
+    el.classList.remove('gr-flash', 'gr-flash-range')
+    void el.offsetWidth               // restart the animation on a repeat click
+    el.classList.add('gr-flash-range')
+    window.setTimeout(() => el.classList.remove('gr-flash-range'), 1800)
+  }
 }
