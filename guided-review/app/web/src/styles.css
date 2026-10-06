@@ -237,6 +237,10 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .tree-row:hover, .tree-row.on { background: var(--bg-sunk); }
 .tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-row.dir .folder { color: var(--accent); } .tree-row.sec { font-weight: 600; margin-top: 6px; }
+/* the chevron slot: 12px wide plus 4px to the icon, which is one indent step (TREE_STEP) */
+.tree-chev { flex: none; width: 12px; height: 12px; margin-right: -2px; }
+.tree-row.dir .tree-chev { color: var(--muted); }
+.tree-status { flex: none; font-size: 11px; font-weight: 600; width: 12px; text-align: center; } .tree-name.gone { text-decoration: line-through; color: var(--muted); }
 .tree-dot { font-size: 11px; color: var(--muted); border: 1px solid var(--border-strong); border-radius: 2em; padding: 0 5px; line-height: 14px; }
 .tree-viewed { color: var(--ok); } .tree-changed { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
 .files-list { min-width: 0; }

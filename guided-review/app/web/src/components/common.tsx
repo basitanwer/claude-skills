@@ -96,6 +96,60 @@ export function Icon({ name, size = 16, className }: { name: keyof typeof PATHS 
   )
 }
 
+// ── file-type icons (16px) ────────────────────────────────────
+// A two-letter badge for a language, a coloured glyph for markup, data and scripts, and
+// the plain file icon for everything else. The colours are fixed, not theme tokens: each
+// was picked to read on both the light and the dark background.
+const BADGES: Record<string, [label: string, bg: string, fg: string]> = {
+  js: ['JS', '#f0db4f', '#323330'], ts: ['TS', '#3178c6', '#fff'], py: ['PY', '#3572a5', '#fff'], go: ['GO', '#00a4cc', '#fff'],
+  rs: ['RS', '#c8643a', '#fff'], rb: ['RB', '#cc342d', '#fff']
+}
+const GLYPHS: Record<string, [color: string, d: string]> = {
+  css: ['#4a90d9', 'M6 2.5L4.5 13.5M11.5 2.5L10 13.5M2.5 6h11M2 10h11'],
+  html: ['#e4572e', 'M5 4.5L1.5 8 5 11.5M11 4.5L14.5 8 11 11.5M9.25 3L6.75 13'],
+  json: ['#c99a1c', 'M6 2.5c-1.5 0-2 .7-2 2v1.8c0 .9-.5 1.7-1.5 1.7 1 0 1.5.8 1.5 1.7v1.8c0 1.3.5 2 2 2M10 2.5c1.5 0 2 .7 2 2v1.8c0 .9.5 1.7 1.5 1.7-1 0-1.5.8-1.5 1.7v1.8c0 1.3-.5 2-2 2'],
+  md: ['#519aba', 'M1.5 11V5l2.75 3L7 5v6M12 5v6M9.75 8.75L12 11l2.25-2.25'],
+  sh: ['#4eaa25', 'M2.5 4.5l4 3.5-4 3.5M8.5 12h5'],
+  conf: ['#a074c4', 'M2 4.5h6M11 4.5h3M2 11.5h3M8 11.5h6M9.5 3a1.5 1.5 0 100 3 1.5 1.5 0 000-3zM6.5 10a1.5 1.5 0 100 3 1.5 1.5 0 000-3z'],
+  img: ['#a074c4', 'M2 3h12v10H2zM2 11l3.5-3.5L8 10l2-2 4 4M10.5 5.25a.75.75 0 100 1.5.75.75 0 000-1.5z']
+}
+/** The React mark, for .jsx and .tsx. */
+const ATOMS: Record<string, string> = { jsx: '#149eca', tsx: '#3178c6' }
+const KINDS: Record<string, string> = {
+  mjs: 'js', cjs: 'js', mts: 'ts', cts: 'ts', scss: 'css', sass: 'css', less: 'css', htm: 'html', vue: 'html', svelte: 'html', xml: 'html',
+  jsonc: 'json', json5: 'json', markdown: 'md', mdx: 'md', bash: 'sh', zsh: 'sh', fish: 'sh', yml: 'conf', yaml: 'conf', toml: 'conf', ini: 'conf', env: 'conf',
+  png: 'img', jpg: 'img', jpeg: 'img', gif: 'img', webp: 'img', svg: 'img', ico: 'img'
+}
+export function FileIcon({ path, size = 16, className }: { path: string; size?: number; className?: string }) {
+  const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
+  const kind = KINDS[ext] ?? ext
+  const cls = 'ico' + (className ? ' ' + className : '')
+  const badge = BADGES[kind]
+  if (badge) {
+    return (
+      <svg className={cls} width={size} height={size} viewBox="0 0 16 16" aria-hidden="true" data-gr-filetype={kind}>
+        <rect x="1" y="1" width="14" height="14" rx="3" fill={badge[1]} />
+        <text x="8" y="11.1" textAnchor="middle" fontSize="7.6" fontWeight="700" fontFamily="system-ui, -apple-system, 'Segoe UI', sans-serif" fill={badge[2]}>{badge[0]}</text>
+      </svg>
+    )
+  }
+  if (ATOMS[kind]) {
+    return (
+      <svg className={cls} width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={ATOMS[kind]} strokeWidth="1" aria-hidden="true" data-gr-filetype={kind}>
+        {[0, 60, 120].map((a) => <ellipse key={a} cx="8" cy="8" rx="6.75" ry="2.6" transform={`rotate(${a} 8 8)`} />)}
+        <circle cx="8" cy="8" r="1.2" fill={ATOMS[kind]} stroke="none" />
+      </svg>
+    )
+  }
+  const glyph = GLYPHS[kind]
+  if (!glyph) return <Icon name="file" size={size} className={'muted' + (className ? ' ' + className : '')} />
+  return (
+    <svg className={cls} width={size} height={size} viewBox="0 0 16 16" fill="none" stroke={glyph[0]} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" data-gr-filetype={kind}>
+      <path d={glyph[1]} />
+    </svg>
+  )
+}
+
 /** GitHub's five-block diffstat: green and red in proportion, grey for the rest. */
 export function DiffStat({ add, del, blocksOnly }: { add: number; del: number; blocksOnly?: boolean }) {
   const total = add + del

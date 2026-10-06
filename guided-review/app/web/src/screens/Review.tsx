@@ -9,7 +9,7 @@ import {
   pendingThreads, plural, requestTitle, routeHash, short, SIDE_KIND,
   sinceActive, symLabel, targetLabel, type DiffMode, type Tab
 } from '../util'
-import { AwayHint, CopyButton, DiffStat, Icon, Md, Menu, MenuItem, PresenceDot, currentTheme, setTheme } from '../components/common'
+import { AwayHint, CopyButton, DiffStat, FileIcon, Icon, Md, Menu, MenuItem, PresenceDot, currentTheme, setTheme } from '../components/common'
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
 import { FileBox, hoveredLine } from '../components/diff'
 import { TopBar } from './Home'
@@ -305,11 +305,18 @@ function buildTree(files: FileDiff[]): DirNode {
 /** Files in the order the tree shows them: folders first, depth-first. */
 const treeOrder = (n: DirNode): FileDiff[] => [...n.dirs.flatMap(treeOrder), ...n.files]
 
-function TreeFile({ file, depth, comments, showDir }: { file: FileDiff; depth: number; comments: number; showDir?: boolean }) {
+/** How far each level of the tree is indented: the width of a chevron and the gap after
+ *  it, so a row's chevron (or a file's empty chevron slot) sits under its parent's folder icon. */
+const TREE_STEP = 16
+const STATUS_MARK: Record<FileDiff['status'], string> = { added: 'A', deleted: 'D', renamed: 'R', modified: '' }
+/** `nested`: the row is in the folder tree, so it keeps an empty slot where a folder has its chevron. */
+function TreeFile({ file, depth, comments, showDir, nested }: { file: FileDiff; depth: number; comments: number; showDir?: boolean; nested?: boolean }) {
   return (
-    <button className="tree-row leaf" style={{ paddingLeft: `${8 + depth * 14}px` }} title={file.path} data-gr-tree-file={file.path} onClick={() => focusAnchor({ kind: 'file', file: file.path })}>
-      <Icon name="file" className={'st-' + file.status} />
-      <span className="tree-name">{baseName(file.path)}{showDir && file.path.includes('/') && <span className="muted small"> {file.path.slice(0, file.path.lastIndexOf('/'))}</span>}</span>
+    <button className="tree-row leaf" style={{ paddingLeft: `${8 + depth * TREE_STEP}px` }} title={`${file.path} (${file.status})`} data-gr-tree-file={file.path} data-gr-status={file.status} onClick={() => focusAnchor({ kind: 'file', file: file.path })}>
+      {nested && <span className="tree-chev" />}
+      <FileIcon path={file.path} />
+      <span className={'tree-name' + (file.status === 'deleted' ? ' gone' : '')}>{baseName(file.path)}{showDir && file.path.includes('/') && <span className="muted small"> {file.path.slice(0, file.path.lastIndexOf('/'))}</span>}</span>
+      {STATUS_MARK[file.status] && <span className={'tree-status st-' + file.status}>{STATUS_MARK[file.status]}</span>}
       {comments > 0 && <span className="tree-dot" title={plural(comments, 'comment')}>{comments}</span>}
       {file.viewed === 'viewed' && <Icon name="check" size={12} className="tree-viewed" />}
       {file.viewed === 'changed' && <span className="tree-changed" title="Changed since last view" />}
@@ -320,11 +327,11 @@ function TreeDir({ node, depth, closed, toggle, counts }: { node: DirNode; depth
   const open = !closed.has(node.path)
   return (
     <>
-      <button className="tree-row dir" style={{ paddingLeft: `${8 + depth * 14}px` }} aria-expanded={open} title={node.path} data-gr-dir={node.path} onClick={() => toggle(node.path)}>
-        <Icon name={open ? 'chevDown' : 'chevRight'} size={12} /><Icon name="folder" className="folder" /><span className="tree-name">{node.name}</span>
+      <button className="tree-row dir" style={{ paddingLeft: `${8 + depth * TREE_STEP}px` }} aria-expanded={open} title={node.path} data-gr-dir={node.path} onClick={() => toggle(node.path)}>
+        <Icon name={open ? 'chevDown' : 'chevRight'} size={12} className="tree-chev" /><Icon name="folder" className="folder" /><span className="tree-name">{node.name}</span>
       </button>
       {open && node.dirs.map((d) => <TreeDir key={d.path} node={d} depth={depth + 1} closed={closed} toggle={toggle} counts={counts} />)}
-      {open && node.files.map((f) => <TreeFile key={f.path} file={f} depth={depth + 1} comments={counts.get(f.path) ?? 0} />)}
+      {open && node.files.map((f) => <TreeFile key={f.path} file={f} depth={depth + 1} comments={counts.get(f.path) ?? 0} nested />)}
     </>
   )
 }
@@ -505,7 +512,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
                     </div>
                   ))
                 : treeView === 'tree'
-                  ? <>{tree.dirs.map((d) => <TreeDir key={d.path} node={d} depth={0} closed={closed} toggle={toggleDir} counts={counts} />)}{tree.files.map((f) => <TreeFile key={f.path} file={f} depth={0} comments={counts.get(f.path) ?? 0} />)}</>
+                  ? <>{tree.dirs.map((d) => <TreeDir key={d.path} node={d} depth={0} closed={closed} toggle={toggleDir} counts={counts} />)}{tree.files.map((f) => <TreeFile key={f.path} file={f} depth={0} comments={counts.get(f.path) ?? 0} nested />)}</>
                   : visible.map((f) => <TreeFile key={f.path} file={f} depth={0} comments={counts.get(f.path) ?? 0} showDir />)}
             </div>
           </aside>
