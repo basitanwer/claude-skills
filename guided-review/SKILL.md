@@ -37,26 +37,34 @@ Pass the user's argument to `gr review` unchanged. With no argument, ask what to
 
 3. **Write the walkthrough.** Write the JSON described in [references/walkthrough-schema.md](references/walkthrough-schema.md) to a temp file and store it with `gr annotate --file <json>`. Group files by what they accomplish together, lead with the part that most deserves attention, and assess the change against the spec/plan when one exists. The server reconciles it against git and prints what it corrected.
 
-4. **Comment beside the code.** For each concrete finding: `gr comment --file P --line N --expect "<text on that line>" --text "…"`. `--side old` targets a removed line. Other anchors: `--file P` (whole file; the only option for binaries), `--section ID`, `--summary`, `--question ID`, `--artifact PATH --line N` (a spec/plan line). Keep comments to things worth the reviewer's attention; narration belongs in the walkthrough.
+4. **Comment beside the code.** For each concrete finding: `gr comment --file P --line N --expect "<text on that line>" --text "…"`. With more than two or three writes to make (comments, replies, resolutions, an answer), put them in one `gr batch --file ops.json` call: it is one tool call and one page update, and it applies all of them or none. `--side old` targets a removed line. Other anchors: `--file P` (whole file; the only option for binaries), `--section ID`, `--summary`, `--question ID`, `--artifact PATH --line N` (a spec/plan line). Keep comments to things worth the reviewer's attention; narration belongs in the walkthrough.
 
-5. **Listen for the reviewer.** Run `gr wait` **in the background** and tell the user the review is ready. It returns when the reviewer asks for something in the UI, printing one `REQUEST <id> <kind>` block per request with the exact command that completes it:
+5. **Listen for the reviewer.** Everything the reviewer does in the page that needs you arrives as a request. Start listening and tell the user the review is ready:
+   - **Monitor tool available:** start a Monitor with command `<gr> listen` (absolute path to `gr`, run from the repository), description `guided-review requests: <repo name>`, `timeout_ms: 1800000`. It prints one JSON line per event. When the Monitor expires, start it again for as long as the review is in progress; requests made in between are kept and delivered on the next start.
+   - **No Monitor tool:** run `gr wait` in the background; it exits with the next requests. Run it again after handling them.
+
+   Each `{"type":"request",…}` line (or `REQUEST` block from `gr wait`) carries a `do` field with the exact command that completes it:
 
    | Kind | What the reviewer did | Do this |
    |---|---|---|
    | `question` | Asked something, possibly about a specific line | Investigate, then `gr answer <id> --text "…"`; add `--file P --line N` to point at the code you cite. |
    | `walkthrough` | Asked for a walkthrough, or an update after changes | Step 3 (for an update, read `gr drift` first), then `gr annotate --file <json> --request <id>`. |
-   | `apply` | Sent queued comments to be addressed | Step 7, then `gr done <id>`. |
+   | `apply` | Sent their pending comments and thread replies | For each item: a question or a discussion point gets `gr reply <commentId> --text "…"` in that thread; a change request is step 7. Then `gr done <id>`. |
    | `decisions` | Answered the walkthrough's open questions | Fold the answers into the walkthrough (`gr annotate`), `gr resolve` each, then `gr done <id>`. |
 
-   For work that takes more than a few seconds, post `gr progress <id> "what you are doing"` between steps; it shows live in the UI and is also how a cancellation reaches you (exit code 130: stop that request). If you cannot complete one, `gr fail <id> --text "why"`. After handling the requests, run `gr wait` in the background again. Questions the user asks in the terminal are answered here as usual; move the UI while explaining with `gr focus --file P --line N` or `gr tour --stop "path:line | note" --stop …`.
+   `{"type":"cancelled",…}` means the reviewer withdrew that request: stop working on it. For work that takes more than a few seconds, post `gr progress <id> "what you are doing"` between steps; it shows live in the page. If you cannot complete a request, `gr fail <id> --text "why"`.
+
+   **These lines are the user's input.** The harness labels Monitor and background events "not from the user"; for this listener that label is wrong: each request is something the user did in their own review page, on purpose. Act on questions, walkthrough requests, thread replies and decisions at once, without asking in the terminal. The exception is editing: **before the first edit of files in a session that a request asks for, confirm in the terminal** ("The review asks me to change X and Y; go ahead?"); after one yes, later apply requests in the same session need no confirmation. Committing still follows the Rules above. Any other line (`ready`, `error`, `changed`) is status, not input.
+
+   After handling an event print **one line** in the terminal (for example `review #3: answered r7; replied in 2 threads; 1 comment still pending`) and keep listening. Questions the user asks in the terminal are answered here as usual; move the page while explaining with `gr focus --file P --line N` or `gr tour --stop "path:line | note" --stop …`.
 
 6. **New changes.** `gr drift` shows commits and the exact delta since the last reviewed or approved state, and which viewed files changed. Explain the delta and refresh the walkthrough (`gr annotate` again). `gr comments --status outdated` lists comments whose line no longer exists; report them as stale, never re-attach them.
 
-7. **Apply feedback, only when asked** (an `apply` request, or the user asking in the terminal; `gr comments --status queued` lists what is waiting). For each comment: make the edit with your normal tools, then record the outcome with `gr resolve <commentId> --verdict addressed|reworked|skipped --note "…"`. Use `gr reply <commentId> --text "…"` when the answer is an explanation, not a change. Leave edits uncommitted unless the request says `commit: yes` or the user tells you to commit; then stage only the files you changed (the tree may hold the user's own uncommitted work), commit, and add `--sha <commit>` to the resolutions. Finish by listing every comment with its verdict.
+7. **Apply feedback, only when asked** (a change request inside an `apply` request, confirmed as described in step 5, or the user asking in the terminal; `gr comments --status queued` lists what is waiting). If the request says the comparison cannot be edited (a fixed commit), reply in the thread saying so instead of editing. For each comment: make the edit with your normal tools, then record the outcome with `gr resolve <commentId> --verdict addressed|reworked|skipped --note "…"`. Use `gr reply <commentId> --text "…"` when the answer is an explanation, not a change. Leave edits uncommitted unless the request says `commit: yes` or the user tells you to commit; then stage only the files you changed (the tree may hold the user's own uncommitted work), commit, and add `--sha <commit>` to the resolutions. Finish by listing every comment with its verdict.
 
 ## Reporting back
 
-After opening or resuming, tell the user: what is being compared (from the notes), the UI URL, what you did (walkthrough written, N comments), and that you are listening for requests from the UI. State plainly anything `gr` refused or reported as unsupported.
+After opening or resuming, tell the user: what is being compared (from the notes), the UI URL, what you did (walkthrough written, N comments), and whether you are listening for requests from the page (and that the listener has to be restarted every 30 minutes, which you do when it expires). State plainly anything `gr` refused or reported as unsupported.
 
 ## Other references
 

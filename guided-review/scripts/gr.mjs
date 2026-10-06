@@ -210,34 +210,55 @@ function tailLog(n) {
 const real = (p) => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
 const sameHome = (info) => real(info.home) === real(HOME)
 let PORT = null
+/** Only one process starts the server at a time: a persistent listener reconnecting
+ *  and another `gr` call could otherwise both find the port free and start two
+ *  servers on one data directory. Returns a release function, or null if another
+ *  process's start was observed to finish first. */
+async function startLock(first) {
+  const lock = path.join(HOME, 'start.lock')
+  fs.mkdirSync(HOME, { recursive: true })
+  for (let i = 0; i < 150; i++) {
+    try { fs.writeFileSync(lock, String(process.pid), { flag: 'wx' }); return () => { try { fs.unlinkSync(lock) } catch { /* gone */ } } } catch { /* held by another gr */ }
+    try { if (Date.now() - fs.statSync(lock).mtimeMs > 20_000) fs.unlinkSync(lock) } catch { /* released meanwhile */ }
+    await sleep(100)
+    const info = await probe(Number(readState().port || first))
+    if (info && sameHome(info)) return null
+  }
+  return () => {}
+}
 async function ensureServer(opt = {}) {
   if (PORT) return PORT
-  const st = readState()
-  const first = Number(opt.port || process.env.GUIDED_REVIEW_PORT || st.port || 8791)
+  const first = Number(opt.port || process.env.GUIDED_REVIEW_PORT || readState().port || 8791)
+  const use = (port, info) => { PORT = port; writeState({ port, pid: info.pid }); return PORT }
   const running = await probe(first)
   if (running) {
     if (!sameHome(running)) fail(`a guided-review server on port ${first} uses a different data directory (${running.home}). Stop it or pick another --port.`)
-    PORT = first; writeState({ port: PORT, pid: running.pid })
-    return PORT
+    return use(first, running)
   }
   assertInstalled()
-  let port = first
-  for (let i = 0; i < 20; i++, port++) {
-    const taken = await fetch(baseUrl(port)).then(() => true, () => false)
-    if (!taken) break
-  }
-  fs.mkdirSync(HOME, { recursive: true })
-  const log = fs.openSync(LOG_FILE, 'a')
-  const env = { ...process.env, GUIDED_REVIEW_PORT: String(port), GUIDED_REVIEW_HOST: HOST, GUIDED_REVIEW_HOME: HOME }
-  const child = spawn(process.execPath, ['server/main.mjs'], { cwd: APP, env, detached: true, stdio: ['ignore', log, log] })
-  child.unref()
-  for (let i = 0; i < 100; i++) {
-    await sleep(100)
-    const info = await probe(port)
-    if (info) { PORT = port; writeState({ port, pid: info.pid }); return PORT }
-    if (child.exitCode != null) break
-  }
-  fail(`the review server did not start. Last log lines:\n${tailLog(15)}`)
+  const release = await startLock(first)
+  try {
+    // somebody else may have started it while this process waited for the lock
+    const theirs = Number(readState().port || first)
+    const info = await probe(theirs)
+    if (info && sameHome(info)) return use(theirs, info)
+    let port = first
+    for (let i = 0; i < 20; i++, port++) {
+      const taken = await fetch(baseUrl(port)).then(() => true, () => false)
+      if (!taken) break
+    }
+    const log = fs.openSync(LOG_FILE, 'a')
+    const env = { ...process.env, GUIDED_REVIEW_PORT: String(port), GUIDED_REVIEW_HOST: HOST, GUIDED_REVIEW_HOME: HOME }
+    const child = spawn(process.execPath, ['server/main.mjs'], { cwd: APP, env, detached: true, stdio: ['ignore', log, log] })
+    child.unref(); fs.closeSync(log)
+    for (let i = 0; i < 100; i++) {
+      await sleep(100)
+      const up = await probe(port)
+      if (up) return use(port, up)
+      if (child.exitCode != null) break
+    }
+    fail(`the review server did not start. Last log lines:\n${tailLog(15)}`)
+  } finally { release?.() }
 }
 async function rpc(channel, ...args) { return rpcAt(await ensureServer(), channel, args) }
 
@@ -346,14 +367,20 @@ function parseStop(s) {
     : m ? { kind: 'diff', file: m[1], line: Number(m[2]), side: m[3] || 'new' } : { kind: 'file', file: w }
   return { target, ...(note ? { note } : {}) }
 }
+/** A list of tour stops: "path:line | note" strings (the --stop flag), or objects
+ *  using the anchor field names ({ file, line, side, note }), or { target, note }. */
+function toStops(list) {
+  return (list ?? []).map((s) => (typeof s === 'string' ? parseStop(s)
+    : s?.target ? s : { target: anchorInput(s ?? {}) ?? fail(`a tour stop needs a target: ${JSON.stringify(s)}`), ...(s?.note ? { note: String(s.note) } : {}) }))
+}
 function stopsFrom(opt, { jsonFile = false } = {}) {
   if (jsonFile && opt.file && !opt.stop) {
     let raw
     try { raw = JSON.parse(fs.readFileSync(path.resolve(opt.file), 'utf8')) } catch (e) { fail(`cannot read tour JSON: ${e.message}`) }
     if (!Array.isArray(raw)) fail('a tour file is a JSON array of stops')
-    return raw.map((s) => (s?.target ? s : { target: anchorInput(s ?? {}) ?? fail(`a tour stop needs a target: ${JSON.stringify(s)}`), ...(s?.note ? { note: String(s.note) } : {}) }))
+    return toStops(raw)
   }
-  return (opt.stop ?? []).map(parseStop)
+  return toStops(opt.stop)
 }
 const anchorLabel = (a) => a.kind === 'diff' ? `${a.file}:${a.line}${a.side === 'old' ? ' (old)' : ''}` : a.kind === 'file' ? a.file
   : a.kind === 'section' ? `section ${a.sectionId}` : a.kind === 'artifact' ? `${a.path}:${a.line}` : a.kind === 'question' ? `question ${a.questionId}`
@@ -363,12 +390,27 @@ const anchorLabel = (a) => a.kind === 'diff' ? `${a.file}:${a.line}${a.side === 
 // ── output helpers ───────────────────────────────────────────
 const out = (s = '') => process.stdout.write(s + '\n')
 const printJson = (v) => out(JSON.stringify(v, null, 2))
-function fmtComment(c) {
+/** Which replies of a thread a request delivered: the reviewer's latest run of
+ *  replies, i.e. everything they wrote after Claude Code last spoke in the thread
+ *  (a reply still marked pending has not been sent, so it is not counted). */
+function newReplies(c) {
+  const fresh = new Set()
+  for (let i = c.replies.length - 1; i >= 0; i--) {
+    const x = c.replies[i]
+    if (x.author !== 'user') break
+    if (!x.pending) fresh.add(i)
+  }
+  return fresh
+}
+/** `fresh`: indexes of replies to mark as new (see newReplies). */
+function fmtComment(c, fresh) {
   const res = c.resolution ? ` → ${c.resolution.verdict}: ${c.resolution.note}${c.resolution.commit ? ` (${short(c.resolution.commit)})` : ''}` : ''
   const stale = (c.status === 'outdated' || c.lineGone) && c.anchor.lineContent != null ? `\n    stale anchor — the line it was written on is gone: ${JSON.stringify(c.anchor.lineContent)}` : ''
-  const replies = c.replies.map((r) => `\n    ↳ ${r.author}: ${r.text}`).join('')
+  const replies = c.replies.map((r, i) => `\n    ↳ ${r.author}: ${r.text}${r.pending ? '  (pending)' : ''}${fresh?.has(i) ? '  ← NEW' : ''}`).join('')
   return `[${c.id}] ${c.status} · ${c.author} · ${anchorLabel(c.anchor)}\n    ${c.text}${res}${stale}${replies}`
 }
+/** What the reviewer has written but not sent yet: queued comments and threads with an unsent reply. */
+const pendingCount = (comments) => comments.filter((c) => c.status === 'queued' || c.replies.some((r) => r.pending)).length
 function printHunks(hunks, { labels = true } = {}) {
   for (const h of hunks) {
     out(`${h.range}${h.header ? ` ${h.header}` : ''}`)
@@ -399,34 +441,83 @@ function fmtRequest(r) {
   const last = r.progress.at(-1)
   return `[${r.id}] ${r.kind} · ${r.status} · ${r.finishedAt ? `finished ${r.finishedAt}` : `created ${r.createdAt}`}${r.text ? `\n    ${r.text}` : ''}${r.commentIds?.length ? `\n    comments: ${r.commentIds.join(', ')}` : ''}${last ? `\n    progress: ${last.text}` : ''}${r.error ? `\n    error: ${r.error}` : ''}`
 }
-/** Everything the session needs to act on a request it just claimed. */
-function printRequest(r, loaded) {
-  const comments = loaded.state.comments.filter((c) => r.commentIds?.includes(c.id))
-  out(`REQUEST ${r.id} ${r.kind}${r.update ? ' (update)' : ''}`)
+// ── requests: what a claimed request means and how to complete it ──
+/** The steps that complete a request, with the exact commands (always with --session). */
+function guidance(r, s) {
+  const S = `--session ${s}`
+  if (r.kind === 'question') return [`answer with: gr answer ${r.id} ${S} --text "…" [--file P --line N]`]
   if (r.kind === 'walkthrough') {
-    out(r.update ? '  the reviewer asked for the walkthrough to be UPDATED for what changed since it was written (see: gr drift)' : '  the reviewer asked for a walkthrough of this comparison')
+    return [`write the walkthrough${r.update ? ` (an update: see gr drift ${S})` : ''}, then: gr annotate --file <json> --request ${r.id} ${S}`]
+  }
+  if (r.kind === 'decisions') return [`these are decisions, not code changes: update the walkthrough (gr annotate --file <json> ${S}), gr resolve each (${S}), then: gr done ${r.id} ${S}`]
+  const steps = []
+  const resolve = `gr resolve <commentId> ${S} --verdict addressed|reworked|skipped --note "…"`
+  if (r.editable === false) {
+    steps.push(`this comparison cannot be edited (it ends at a fixed commit, or its branch is not checked out): do not change files; answer in the threads with gr reply <commentId> ${S} --text "…", record each comment with: ${resolve}, then: gr done ${r.id} ${S}`)
+  } else {
+    steps.push(`reply in threads with: gr reply <commentId> ${S} --text "…"; for a change request make the edits, record each with: ${resolve}, then: gr done ${r.id} ${S}`)
+    steps.push(r.commit ? 'the reviewer asked for the edits to be committed: commit only your own edits and pass --sha <commit> to gr resolve' : 'do NOT commit: leave the edits uncommitted in the working tree')
+  }
+  steps.push(`several replies and resolutions can go in one call: gr batch ${S} --file ops.json`)
+  return steps
+}
+/** A thread as a request delivers it: `because` says why it was sent, and each reply
+ *  says whether it is new. */
+function threadOf(c, r, questions) {
+  const fresh = newReplies(c)
+  const t = { id: c.id, status: c.status, author: c.author, where: anchorLabel(c.anchor) }
+  if (c.anchor.lineContent != null) t.line = c.anchor.lineContent
+  if (r.kind === 'apply') t.because = r.replyIds?.includes(c.id) ? 'new reply' : 'new comment'
+  if (c.anchor.kind === 'question') t.question = questions?.find((q) => q.id === c.anchor.questionId)?.text ?? null
+  t.text = c.text
+  t.replies = c.replies.filter((x) => !x.pending).map((x) => ({ author: x.author, text: x.text, new: fresh.has(c.replies.indexOf(x)) }))
+  return t
+}
+/** One request as a single JSON-able object (a line of `gr listen`). `loaded` is the
+ *  review it belongs to, when the kind needs it. */
+function requestEvent(item, loaded) {
+  const r = item.request; const s = item.sessionId
+  const ev = { type: 'request', session: s, id: r.id, kind: r.kind, resumed: Boolean(item.resumed) }
+  if (r.text) ev.text = r.text
+  if (r.anchor) ev.anchor = { label: anchorLabel(r.anchor), ...(r.anchor.lineContent != null ? { line: r.anchor.lineContent } : {}) }
+  if (r.kind === 'walkthrough') ev.update = Boolean(r.update)
+  if (r.kind === 'apply') {
+    ev.commit = Boolean(r.commit); ev.editable = r.editable !== false
+    if (ev.editable && loaded?.apply.workdir) ev.workdir = loaded.apply.workdir
+  }
+  if (item.comments?.length) ev.comments = item.comments.map((c) => threadOf(c, r, loaded?.state.walkthrough?.questions))
+  ev.do = guidance(r, s).join(' · ')
+  return ev
+}
+/** The same request for a person reading `gr wait`. */
+function printRequest(item, loaded) {
+  const r = item.request; const s = item.sessionId
+  out(`REQUEST ${r.id} ${r.kind}${r.update ? ' (update)' : ''}`)
+  out(`  review #${s}${loaded ? `: ${pairLabel(loaded.session.pair, loaded.session.direct)}` : ''}`)
+  if (item.resumed) out('  (resumed: claimed earlier and never finished)')
+  if (r.kind === 'walkthrough') {
+    out(r.update ? '  the reviewer asked for the walkthrough to be UPDATED for what changed since it was written' : '  the reviewer asked for a walkthrough of this comparison')
     if (r.text) out(`  steer: ${r.text}`)
-    out(`  write the walkthrough, then: gr annotate --file <json> --request ${r.id}`)
   } else if (r.kind === 'question') {
     out(`  ${r.text}`)
     if (r.anchor) out(`  about: ${anchorLabel(r.anchor)}${r.anchor.lineContent != null ? ` — ${JSON.stringify(r.anchor.lineContent)}` : ''}`)
-    out(`  answer with: gr answer ${r.id} --text "…" [--file P --line N]`)
   } else if (r.kind === 'apply') {
     out(`  commit: ${r.commit ? 'yes' : 'no'}`)
     if (r.text) out(`  steer: ${r.text}`)
-    if (loaded.apply.workdir) out(`  edit in: ${loaded.apply.workdir}`)
-    for (const c of comments) out(fmtComment(c).replace(/^/gm, '  '))
-    out(`  make the edits, record each with: gr resolve <commentId> --verdict addressed|reworked|skipped --note "…", then: gr done ${r.id}`)
-    out(r.commit ? '  the reviewer asked for the edits to be committed: commit only your own edits and pass --sha <commit> to gr resolve' : '  do NOT commit: leave the edits uncommitted in the working tree')
+    if (r.editable !== false && loaded?.apply.workdir) out(`  edit in: ${loaded.apply.workdir}`)
+    for (const c of item.comments ?? []) {
+      out(`  ${r.replyIds?.includes(c.id) ? 'new reply in this thread:' : 'new comment:'}`)
+      out(fmtComment(c, newReplies(c)).replace(/^/gm, '  '))
+    }
   } else {
-    const qs = loaded.state.walkthrough?.questions ?? []
-    for (const c of comments) {
+    const qs = loaded?.state.walkthrough?.questions ?? []
+    for (const c of item.comments ?? []) {
       const q = qs.find((x) => x.id === c.anchor.questionId)
       out(`  [${c.id}] question ${c.anchor.questionId ?? '?'}: ${q?.text ?? '(question no longer in the walkthrough)'}\n      answer: ${c.text}`)
     }
-    out(`  these are decisions, not code changes: update the walkthrough (gr annotate), gr resolve each, then: gr done ${r.id}`)
   }
-  if (r.kind !== 'question') out(`  during long work, report with: gr progress ${r.id} "…" (it exits 130 if the reviewer cancelled)`)
+  for (const line of guidance(r, s)) out(`  ${line}`)
+  if (r.kind !== 'question') out(`  during long work, report with: gr progress ${r.id} --session ${s} "…" (it exits 130 if the reviewer cancelled)`)
 }
 /** A request-scoped call: a server-side "cancelled" becomes exit code 130. */
 async function forRequest(id, fn) {
@@ -439,6 +530,134 @@ async function forRequest(id, fn) {
   }
 }
 const REMOVED = 'there is no review engine any more: the reviewer\'s requests arrive through `gr wait`'
+
+// ── writes: one builder per operation, shared by the single commands and `gr batch` ──
+// A builder takes CLI-style fields (`o`: the same names as the flags, which is also
+// the vocabulary of a batch file) and returns one server call:
+//   { channel, args (after the session id), request? (the request it belongs to),
+//     lines(result) → what to print }
+const FOCUSABLE = ['diff', 'file', 'section', 'summary']
+const builders = {
+  comment(o) {
+    if (!o.text) fail('usage: gr comment --file P --line N [--side new|old] [--expect "text on that line"] --text "…"')
+    const author = o.as === 'user' ? 'user' : 'agent'
+    return {
+      channel: 'commentAdd', args: [{ anchor: needAnchor(o), text: String(o.text), author, status: o.queued || author === 'user' ? 'queued' : 'note' }],
+      lines: (c) => [`comment ${c.id} on ${anchorLabel(c.anchor)}${c.anchor.lineContent != null ? ` — anchored to: ${JSON.stringify(c.anchor.lineContent)}` : ''}`]
+    }
+  },
+  reply(o) {
+    if (!o.id || !o.text) fail('usage: gr reply <commentId> --text "…"')
+    return {
+      channel: 'commentUpdate', args: [String(o.id), { reply: { author: o.as === 'user' ? 'user' : 'agent', text: String(o.text) } }],
+      lines: (c) => [`replied to ${o.id} (${anchorLabel(c.anchor)})`]
+    }
+  },
+  async resolve(o, ctx) {
+    if (!o.id || !['addressed', 'reworked', 'skipped'].includes(o.verdict) || o.note == null) fail('usage: gr resolve <commentId> --verdict addressed|reworked|skipped --note "what was done" [--sha COMMIT]')
+    let commit
+    if (o.sha) {
+      const repo = await ctx.repo()
+      commit = commitSha(repo, String(o.sha)); if (!commit) fail(`--sha ${o.sha} is not a commit in ${repo}`)
+    }
+    return {
+      channel: 'commentUpdate', args: [String(o.id), { resolution: { verdict: o.verdict, note: String(o.note), ...(commit ? { commit } : {}) } }],
+      lines: (c) => [`resolved ${o.id} (${anchorLabel(c.anchor)}) as ${o.verdict}: ${o.note}`]
+    }
+  },
+  reopen(o) {
+    if (!o.id) fail('usage: gr reopen <commentId>')
+    return { channel: 'commentUpdate', args: [String(o.id), { status: 'queued' }], lines: (c) => [`reopened ${c.id}`] }
+  },
+  'delete-comment'(o) {
+    if (!o.id) fail('usage: gr delete-comment <commentId>')
+    return { channel: 'commentDelete', args: [String(o.id)], lines: () => [`deleted ${o.id}`] }
+  },
+  answer(o) {
+    if (!o.request || !o.text) fail('usage: gr answer <requestId> --text "…" [--file P --line N] [--stop "path:line | note" …]')
+    const actions = []
+    const a = anchorInput(o)
+    if (a) {
+      if (!FOCUSABLE.includes(a.kind)) fail('an answer can point at a line, a file, a section, or the summary')
+      actions.push({ kind: 'focus', target: a })
+    }
+    const stops = toStops(o.stops)
+    if (stops.length === 1) fail('a tour needs at least 2 stops (use --file P --line N to point at one place)')
+    if (stops.length) actions.push({ kind: 'tour', stops })
+    return {
+      channel: 'messagePost', args: [{ text: String(o.text), requestId: String(o.request), ...(actions.length ? { actions } : {}) }], request: String(o.request),
+      lines: () => [`answered request ${o.request}${actions.length ? ` (with ${actions.map((x) => x.kind).join(' + ')})` : ''}`]
+    }
+  },
+  note(o) {
+    if (!o.text) fail('usage: gr note "text" [--file P --line N]')
+    const a = anchorInput(o)
+    if (a && !FOCUSABLE.includes(a.kind)) fail('a note can point at a line, a file, a section, or the summary')
+    return {
+      channel: 'messagePost', args: [{ text: String(o.text), ...(a ? { actions: [{ kind: 'focus', target: a }] } : {}) }],
+      lines: (m) => [`posted to the review conversation (${m.id})`]
+    }
+  },
+  progress(o) {
+    if (!o.request || !o.text) fail('usage: gr progress <requestId> "what you are doing"')
+    return { channel: 'requestUpdate', args: [String(o.request), { progress: String(o.text) }], request: String(o.request), lines: () => [`progress shown for request ${o.request}`] }
+  },
+  done(o) {
+    if (!o.request) fail('usage: gr done <requestId> [--text "final note"]')
+    return {
+      channel: 'requestUpdate', args: [String(o.request), { ...(o.text ? { progress: String(o.text) } : {}), status: 'done' }], request: String(o.request),
+      lines: (r, comments) => {
+        const mine = (comments ?? []).filter((c) => r.commentIds?.includes(c.id))
+        return [`request ${o.request} done`, ...(mine.length ? ['resolutions:'] : []),
+          ...mine.map((c) => (c.resolution ? `  [${c.id}] ${c.resolution.verdict} — ${c.resolution.note}`
+            : r.replyIds?.includes(c.id) ? `  [${c.id}] ${c.replies.at(-1)?.author === 'agent' ? 'replied' : 'NOT answered'} (${c.status})`
+              : `  [${c.id}] NOT handled (back to ${c.status})`))]
+      },
+      needsComments: true
+    }
+  },
+  fail(o) {
+    if (!o.request || !o.text) fail('usage: gr fail <requestId> --text "why it could not be done"')
+    return { channel: 'requestUpdate', args: [String(o.request), { status: 'failed', error: String(o.text) }], request: String(o.request), lines: () => [`request ${o.request} marked failed: ${o.text}`] }
+  },
+  annotate(o) {
+    if (!o.walkthrough || typeof o.walkthrough !== 'object') fail('usage: gr annotate --file walkthrough.json [--request ID]   (schema: references/walkthrough-schema.md; "-" reads stdin)')
+    return {
+      channel: 'annotate', args: [o.walkthrough, ...(o.request ? [String(o.request)] : [])], ...(o.request ? { request: String(o.request) } : {}),
+      lines: (res) => [`walkthrough stored: ${res.sections} section(s)${o.request ? ` (request ${o.request} done)` : ''}`, ...res.warnings.map((w) => `corrected against git: ${w}`)]
+    }
+  },
+  focus(o) {
+    const target = focusInput(o)
+    return {
+      channel: 'uiAction', args: [{ kind: 'focus', target }], target,
+      lines: (res) => [res.tabs ? `focused ${anchorLabel(target)} in ${res.tabs} open tab(s)` : `no review tab is open, so nobody saw the focus on ${anchorLabel(target)}`]
+    }
+  },
+  viewed(o) {
+    if (!o.file) fail('usage: gr viewed --file P [--unset]')
+    return {
+      channel: 'setViewed', args: [String(o.file), !o.unset],
+      lines: (st) => { const mark = st.viewedAt[o.file]; return [`${o.file}: ${o.unset ? 'not viewed' : `viewed${mark ? ` at ${short(mark.sha)}` : ''}`}`] }
+    }
+  }
+}
+const once = (fn) => { let v; return () => (v ??= fn()) }
+/** Run one operation as its own command. */
+async function runOp(name, o, opt) {
+  const sessionId = await currentSession(opt)
+  const ctx = { repo: once(async () => (await rpc('loadSession', sessionId)).session.repo) }
+  const op = await builders[name](o, ctx)
+  const res = await forRequest(op.request, () => rpc(op.channel, sessionId, ...op.args))
+  return { sessionId, op, res }
+}
+/** …and print what it did (or the raw result with --json). */
+async function runAndPrint(name, o, opt) {
+  const { sessionId, op, res } = await runOp(name, o, opt)
+  if (opt.json) return printJson(res)
+  const comments = op.needsComments && res.commentIds?.length ? (await rpc('loadSession', sessionId)).state.comments : null
+  for (const l of op.lines(res, comments)) out(l)
+}
 
 // ── commands ─────────────────────────────────────────────────
 const commands = {
@@ -535,10 +754,10 @@ const commands = {
     out(`walkthrough: ${st.walkthrough ? `"${st.walkthrough.title}" (${st.walkthrough.sections.length} sections)` : 'none yet'} · comments: ${info.comments} (${info.openComments} open, ${info.staleComments} stale) · ${info.approved ? 'approved' : 'not approved'}`)
     if (info.newSinceReview) out(`NEW SINCE LAST REVIEW: the code changed since the ${loaded.since.kind} state ${short(loaded.since.sha)} — see: gr drift`)
     if (loaded.refMissing) out(`WARNING: the ${loaded.refMissing.side} ref ${loaded.refMissing.symbol} no longer resolves`)
-    if (info.pendingRequests) out(`${info.pendingRequests} request(s) from the reviewer are waiting — run: gr wait`)
+    if (info.pendingRequests) out(`${info.pendingRequests} request(s) from the reviewer are waiting — gr listen (or gr wait) delivers them`)
     for (const n of notes) out(`note: ${n}`)
     out(`${opened ? 'Opened in your browser' : 'UI'}: ${url}`)
-    out('next: run "gr wait" in the background to receive requests the reviewer makes in the UI')
+    out('next: start "gr listen" as a background Monitor to receive what the reviewer asks for in the UI (fallback when a Monitor is not available: "gr wait")')
   },
   async open(pos, opt) {
     const sessionId = await currentSession(opt); const port = await ensureServer()
@@ -587,7 +806,8 @@ const commands = {
     }
     const viewed = loaded.files.filter((f) => f.viewed)
     out(`\nviewed files: ${viewed.length}/${d.files}${viewed.length ? ` (${viewed.map((f) => `${f.path}${f.viewed === 'changed' ? ' — CHANGED since viewed' : ''}`).join(', ')})` : ''}`)
-    out(`comments: ${st.comments.length}`); for (const c of st.comments) out(fmtComment(c))
+    const pending = pendingCount(st.comments)
+    out(`comments: ${st.comments.length}${pending ? ` · ${pending} pending (written by the reviewer, not sent to Claude Code yet)` : ''}`); for (const c of st.comments) out(fmtComment(c))
     const open = st.requests.filter((r) => r.status === 'pending' || r.status === 'running')
     out(`requests waiting: ${open.length}`); for (const r of open) out(fmtRequest(r))
     out(`conversation: ${st.messages.length} message(s) · Claude Code presence as the UI shows it: ${loaded.presence}`)
@@ -626,26 +846,14 @@ const commands = {
   },
 
   async annotate(pos, opt) {
-    const sessionId = await currentSession(opt)
     const src = opt.file || pos[0]
     if (!src) fail('usage: gr annotate --file walkthrough.json [--request ID]   (schema: references/walkthrough-schema.md; "-" reads stdin)')
-    let wire
-    try { wire = JSON.parse(src === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(src), 'utf8')) } catch (e) { fail(`cannot read walkthrough JSON: ${e.message}`) }
-    const res = await forRequest(opt.request, () => rpc('annotate', sessionId, wire, opt.request))
-    if (opt.json) return printJson(res)
-    out(`walkthrough stored: ${res.sections} section(s)${opt.request ? ` (request ${opt.request} done)` : ''}`)
-    for (const w of res.warnings) out(`corrected against git: ${w}`)
+    let walkthrough
+    try { walkthrough = JSON.parse(src === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(src), 'utf8')) } catch (e) { fail(`cannot read walkthrough JSON: ${e.message}`) }
+    await runAndPrint('annotate', { walkthrough, request: opt.request }, opt)
   },
 
-  async comment(pos, opt) {
-    const sessionId = await currentSession(opt)
-    const text = opt.text || pos.join(' ')
-    if (!text) fail('usage: gr comment --file P --line N [--side new|old] [--expect "text on that line"] --text "…"')
-    const author = opt.as === 'user' ? 'user' : 'agent'
-    const c = await rpc('commentAdd', sessionId, { anchor: needAnchor(opt), text, author, status: opt.queued || author === 'user' ? 'queued' : 'note' })
-    if (opt.json) return printJson(c)
-    out(`comment ${c.id} on ${anchorLabel(c.anchor)}${c.anchor.lineContent != null ? ` — anchored to: ${JSON.stringify(c.anchor.lineContent)}` : ''}`)
-  },
+  async comment(pos, opt) { await runAndPrint('comment', { ...opt, text: opt.text || pos.join(' ') }, opt) },
   async comments(pos, opt) {
     const st = (await rpc('loadSession', await currentSession(opt))).state
     const list = st.comments.filter((c) => !opt.status || c.status === opt.status)
@@ -653,43 +861,17 @@ const commands = {
     if (!list.length) out(opt.status ? `no ${opt.status} comments` : 'no comments')
     for (const c of list) out(fmtComment(c))
   },
-  async reply(pos, opt) {
-    const sessionId = await currentSession(opt)
-    const id = pos[0]; const text = opt.text || pos.slice(1).join(' ')
-    if (!id || !text) fail('usage: gr reply <commentId> --text "…"')
-    const c = await rpc('commentUpdate', sessionId, id, { reply: { author: opt.as === 'user' ? 'user' : 'agent', text } })
-    out(`replied to ${id} (${anchorLabel(c.anchor)})`)
-  },
-  async resolve(pos, opt) {
-    const sessionId = await currentSession(opt)
-    const id = pos[0]
-    if (!id || !['addressed', 'reworked', 'skipped'].includes(opt.verdict) || opt.note == null) fail('usage: gr resolve <commentId> --verdict addressed|reworked|skipped --note "what was done" [--sha COMMIT]')
-    let commit
-    if (opt.sha) {
-      const repo = (await rpc('loadSession', sessionId)).session.repo
-      commit = commitSha(repo, opt.sha); if (!commit) fail(`--sha ${opt.sha} is not a commit in ${repo}`)
-    }
-    const c = await rpc('commentUpdate', sessionId, id, { resolution: { verdict: opt.verdict, note: opt.note, ...(commit ? { commit } : {}) } })
-    out(`resolved ${id} (${anchorLabel(c.anchor)}) as ${opt.verdict}: ${opt.note}`)
-  },
-  async reopen(pos, opt) {
-    if (!pos[0]) fail('usage: gr reopen <commentId>')
-    const c = await rpc('commentUpdate', await currentSession(opt), pos[0], { status: 'queued' })
-    out(`reopened ${c.id}`)
-  },
-  async 'delete-comment'(pos, opt) {
-    if (!pos[0]) fail('usage: gr delete-comment <commentId>')
-    await rpc('commentDelete', await currentSession(opt), pos[0]); out(`deleted ${pos[0]}`)
-  },
+  async reply(pos, opt) { await runAndPrint('reply', { ...opt, id: pos[0], text: opt.text || pos.slice(1).join(' ') }, opt) },
+  async resolve(pos, opt) { await runAndPrint('resolve', { ...opt, id: pos[0] }, opt) },
+  async reopen(pos, opt) { await runAndPrint('reopen', { id: pos[0] }, opt) },
+  async 'delete-comment'(pos, opt) { await runAndPrint('delete-comment', { id: pos[0] }, opt) },
 
   async focus(pos, opt) {
-    const sessionId = await currentSession(opt)
-    const target = focusInput(opt)
-    const { tabs } = await rpc('uiAction', sessionId, { kind: 'focus', target })
-    if (tabs === 0) {
-      const port = await ensureServer(); const { expect: _expect, ...t } = target
+    const { sessionId, op, res } = await runOp('focus', opt, opt)
+    if (res.tabs === 0) {
+      const port = await ensureServer(); const { expect: _expect, ...t } = op.target
       const url = reviewUrl(port, sessionId, t); openBrowser(url); out(`no review tab was open — opened ${url}`)
-    } else out(`focused ${anchorLabel(target)} in ${tabs} open tab(s)`)
+    } else out(op.lines(res)[0])
   },
   async tour(pos, opt) {
     const sessionId = await currentSession(opt)
@@ -705,15 +887,7 @@ const commands = {
     const { tabs } = await rpc('uiAction', await currentSession(opt), { kind: 'status', text }); out(`shown in ${tabs} tab(s)`)
   },
   /** Record something said in the terminal in the review's conversation. */
-  async note(pos, opt) {
-    const text = opt.text || pos.join(' ')
-    if (!text) fail('usage: gr note "text" [--file P --line N]')
-    const a = anchorInput(opt)
-    if (a && !['diff', 'file', 'section', 'summary'].includes(a.kind)) fail('a note can point at a diff line, a file, a section, or the summary')
-    const m = await rpc('messagePost', await currentSession(opt), { text, ...(a ? { actions: [{ kind: 'focus', target: a }] } : {}) })
-    if (opt.json) return printJson(m)
-    out(`posted to the review conversation (${m.id})`)
-  },
+  async note(pos, opt) { await runAndPrint('note', { ...opt, text: opt.text || pos.join(' ') }, opt) },
   async artifact(pos, opt) {
     const sessionId = await currentSession(opt)
     const [verb, p] = pos
@@ -735,15 +909,7 @@ const commands = {
     }
   },
 
-  async viewed(pos, opt) {
-    const sessionId = await currentSession(opt)
-    const loaded = await rpc('loadSession', sessionId)
-    const f = findFile(loaded, opt.file || pos[0] || fail('usage: gr viewed --file P [--unset]'))
-    const viewedAt = { ...loaded.state.viewedAt }
-    if (opt.unset) delete viewedAt[f.path]; else viewedAt[f.path] = { sha: loaded.headSha, hash: f.fileHash ?? '' }
-    await rpc('saveUiState', sessionId, { viewedAt })
-    out(`${f.path}: ${opt.unset ? 'not viewed' : `viewed at ${short(loaded.headSha)}`}`)
-  },
+  async viewed(pos, opt) { await runAndPrint('viewed', { file: opt.file || pos[0], unset: opt.unset }, opt) },
   async 'section-reviewed'(pos, opt) {
     const sessionId = await currentSession(opt)
     const loaded = await rpc('loadSession', sessionId)
@@ -766,28 +932,97 @@ const commands = {
   },
 
   // ── requests from the reviewer ──
-  /** Block until the reviewer asks for something in the UI (or, with --on-change,
-   *  until the code under review changes). While this runs, the UI shows Claude Code
-   *  as listening. Requests it returns are claimed: they are this session's to finish. */
+  /** The persistent listener: run it as a background Monitor. It never exits on its
+   *  own. One line of compact JSON per event on stdout — ready, request, cancelled,
+   *  changed (with --on-change), error — and nothing else; diagnostics go to stderr.
+   *  It covers every review of this repository, and while it runs the UI shows Claude
+   *  Code as listening. Requests it prints are claimed: they are this session's to finish. */
+  async listen(pos, opt) {
+    const { repo } = locate(opt)
+    const emit = (ev) => process.stdout.write(JSON.stringify(ev) + '\n')
+    const log = (s) => process.stderr.write(`gr listen: ${s}\n`)
+    process.stdout.on('error', () => process.exit(0)) // the reader went away
+    const delivered = new Set()
+    const deliver = async (port, includeRunning) => {
+      const items = await rpcAt(port, 'requestTakeAll', [repo, includeRunning])
+      const loaded = new Map()
+      for (const item of items) {
+        const key = `${item.sessionId}:${item.request.id}`
+        // on a reconnect, a request this process already handed over is not news
+        if (item.resumed && delivered.has(key)) continue
+        delivered.add(key)
+        if ((item.request.kind === 'apply' || item.request.kind === 'decisions') && !loaded.has(item.sessionId)) {
+          loaded.set(item.sessionId, await rpcAt(port, 'loadSession', [item.sessionId]).catch(() => null))
+        }
+        emit(requestEvent(item, loaded.get(item.sessionId)))
+      }
+    }
+    let ready = false; let down = false; let backoff = 500
+    for (;;) {
+      const ac = new AbortController()
+      try {
+        PORT = null
+        const port = await ensureServer(opt)
+        const events = await openEvents(port, `bridge=1&repo=${encodeURIComponent(repo)}${opt['on-change'] ? '&changes=1' : ''}`, ac.signal)
+        const reviews = (await rpcAt(port, 'listSessions', [repo])).map((s) => s.id)
+        if (!ready) emit({ type: 'ready', repo, url: `${baseUrl(port)}/#/repo?path=${encodeURIComponent(repo)}`, reviews })
+        else log(`reconnected to ${baseUrl(port)}`)
+        ready = true; down = false; backoff = 500
+        await deliver(port, true) // includes requests an earlier session claimed and never finished
+        for await (const { channel, msg } of events) {
+          try {
+            if (channel === 'session:changed') await deliver(port, false)
+            else if (channel === 'request:cancelled') emit({ type: 'cancelled', session: msg.sessionId, id: msg.requestId })
+            else if (channel === 'repo:changed' && opt['on-change']) {
+              const loaded = await rpcAt(port, 'loadSession', [msg.sessionId])
+              // counted from the approved or reviewed state; a review with neither has
+              // no baseline, so the counts then describe the whole comparison
+              const since = loaded.since?.sha ?? loaded.state.reviewedAtSha ?? loaded.diffBase
+              const d = await rpcAt(port, 'driftSince', [msg.sessionId, since])
+              emit({ type: 'changed', session: msg.sessionId, commits: d.commits, files: d.files, add: d.add, del: d.del, dirty: d.dirty, head: short(d.headSha), since: loaded.since?.kind ?? (loaded.state.reviewedAtSha ? 'reviewed' : 'start of the comparison') })
+            }
+          } catch (e) {
+            if (e instanceof Fail && e.code === 3) throw e // the server is gone: reconnect
+            emit({ type: 'error', message: e.message })
+          }
+        }
+        throw new Fail('the review server closed the connection', 3)
+      } catch (e) {
+        ac.abort()
+        // before the first connection a refusal is a setup problem (UI not built, port
+        // owned by another data directory): say so and stop instead of retrying forever
+        if (!ready && e instanceof Fail && e.code !== 3) throw e
+        const message = e instanceof Fail ? e.message : e.cause?.code || e.message
+        if (!down) emit({ type: 'error', message: `${message} — reconnecting (requests made meanwhile are delivered once connected)` })
+        else log(message)
+        down = true
+        await sleep(backoff); backoff = Math.min(backoff * 2, 10_000)
+      }
+    }
+  },
+  /** The fallback when a persistent listener is not available: block until the
+   *  reviewer asks for something in the UI (any review of this repository), or, with
+   *  --on-change, until the code of the current review changes. Requests it returns
+   *  are claimed; ones claimed earlier and never finished are returned again. */
   async wait(pos, opt) {
     const sessionId = await currentSession(opt)
     const port = await ensureServer()
-    await rpcAt(port, 'loadSession', [sessionId]) // fail early on an unknown review
+    const repo = (await rpcAt(port, 'loadSession', [sessionId])).session.repo // also fails early on an unknown review
     const ac = new AbortController()
-    const events = await openEvents(port, `bridge=1&session=${sessionId}`, ac.signal)
+    const events = await openEvents(port, `bridge=1&repo=${encodeURIComponent(repo)}&session=${sessionId}`, ac.signal)
     let result = null
     const timer = opt.timeout ? setTimeout(() => { result ??= { type: 'timeout' }; ac.abort() }, Number(opt.timeout) * 1000) : null
-    const take = async () => {
+    const take = async (includeRunning) => {
       if (result) return
-      const taken = await rpcAt(port, 'requestTake', [sessionId])
-      if (taken.length) result ??= { type: 'requests', requests: taken }
+      const items = await rpcAt(port, 'requestTakeAll', [repo, includeRunning])
+      if (items.length) result ??= { type: 'requests', items }
     }
     try {
-      await take()
+      await take(true)
       if (!result) {
         for await (const { channel, msg } of events) {
-          if (channel === 'session:changed') await take()
-          else if (channel === 'repo:changed' && opt['on-change']) result ??= { type: 'change', signature: msg.signature, headSha: msg.headSha, dirty: msg.dirty }
+          if (channel === 'session:changed') await take(false)
+          else if (channel === 'repo:changed' && opt['on-change'] && msg.sessionId === sessionId) result ??= { type: 'change', signature: msg.signature, headSha: msg.headSha, dirty: msg.dirty }
           if (result) break
         }
       }
@@ -798,20 +1033,21 @@ const commands = {
     // the stream ending on its own (not our timeout, not a result) means the server went away
     if (!result) fail('the review server closed the connection while waiting. Run gr wait again; it restarts the server if needed.', 3)
     ac.abort()
-    const loaded = result.type === 'timeout' ? null : await rpcAt(port, 'loadSession', [sessionId])
+    if (result.type === 'timeout') { if (opt.json) printJson(result); else out('no requests'); return }
     if (result.type === 'change') {
+      const loaded = await rpcAt(port, 'loadSession', [sessionId])
       result.since = loaded.since?.sha ?? loaded.state.reviewedAtSha ?? loaded.diffBase
       result.drift = await rpcAt(port, 'driftSince', [sessionId, result.since])
-    }
-    if (opt.json) return printJson(result.type === 'requests' ? { ...result, comments: loaded.state.comments.filter((c) => result.requests.some((r) => r.commentIds?.includes(c.id))) } : result)
-    if (result.type === 'timeout') { out('no requests'); return }
-    if (result.type === 'change') {
+      if (opt.json) return printJson(result)
       const d = result.drift
       out(`the code under review changed: ${d.commits} new commit(s), ${d.files} file(s) +${d.add} −${d.del} since ${short(result.since)}${d.dirty ? ', with uncommitted edits' : ''} — see: gr drift`)
       return
     }
-    out(`review #${sessionId}: the reviewer made ${result.requests.length} request(s) in the UI. They are now yours; the UI shows them as running.`)
-    for (const r of result.requests) { out(); printRequest(r, loaded) }
+    const loaded = new Map()
+    for (const item of result.items) if (!loaded.has(item.sessionId)) loaded.set(item.sessionId, await rpcAt(port, 'loadSession', [item.sessionId]).catch(() => null))
+    if (opt.json) return printJson({ type: 'requests', requests: result.items.map((item) => requestEvent(item, loaded.get(item.sessionId))) })
+    out(`the reviewer made ${result.items.length} request(s) in the UI. They are now yours; the UI shows them as running.`)
+    for (const item of result.items) { out(); printRequest(item, loaded.get(item.sessionId)) }
     out('\nwhen finished, run "gr wait" again to keep listening')
   },
   async requests(pos, opt) {
@@ -821,50 +1057,42 @@ const commands = {
     if (!list.length) out(opt.all ? 'no requests' : 'no pending or running requests')
     for (const r of list) out(fmtRequest(r))
   },
-  async answer(pos, opt) {
+  async answer(pos, opt) { await runAndPrint('answer', { ...opt, request: pos[0], text: opt.text || pos.slice(1).join(' '), stops: opt.stop }, opt) },
+  async progress(pos, opt) { await runAndPrint('progress', { request: pos[0], text: opt.text || pos.slice(1).join(' ') }, opt) },
+  async done(pos, opt) { await runAndPrint('done', { request: pos[0], text: opt.text || pos.slice(1).join(' ') }, opt) },
+  async fail(pos, opt) { await runAndPrint('fail', { request: pos[0], text: opt.text || pos.slice(1).join(' ') }, opt) },
+
+  /** Many writes in one call, applied as one atomic update (one refresh of the page):
+   *  a JSON array of operations in the vocabulary of the commands above. */
+  async batch(pos, opt) {
+    const usage = `usage: gr batch --file ops.json | -    a JSON array such as [{"op":"reply","id":"c3","text":"…"},{"op":"resolve","id":"c3","verdict":"addressed","note":"…"},{"op":"done","request":"r5"}]; ops: ${Object.keys(builders).join(', ')}`
+    const src = opt.file || pos[0]
+    if (!src) fail(usage)
+    let list
+    try { list = JSON.parse(src === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(src), 'utf8')) } catch (e) { fail(`cannot read the batch JSON: ${e.message}`) }
+    if (!Array.isArray(list) || !list.length) fail(`a batch is a non-empty JSON array of operations. ${usage}`)
     const sessionId = await currentSession(opt)
-    const id = pos[0]; const text = opt.text || pos.slice(1).join(' ')
-    if (!id || !text) fail('usage: gr answer <requestId> --text "…" [--file P --line N] [--stop "path:line | note" …]')
-    const actions = []
-    const a = anchorInput(opt)
-    if (a) {
-      if (!['diff', 'file', 'section', 'summary'].includes(a.kind)) fail('an answer can point at a diff line, a file, a section, or the summary')
-      actions.push({ kind: 'focus', target: a })
+    const ctx = { repo: once(async () => (await rpc('loadSession', sessionId)).session.repo) }
+    const built = []
+    for (const [i, o] of list.entries()) {
+      const name = o?.op
+      if (typeof name !== 'string' || !Object.hasOwn(builders, name)) fail(`operation ${i + 1}: unknown op ${JSON.stringify(name)} — nothing was applied. Known ops: ${Object.keys(builders).join(', ')}`)
+      try { built.push(await builders[name](o, ctx)) } catch (e) {
+        if (!(e instanceof Fail)) throw e
+        fail(`operation ${i + 1} (${name}): ${e.message.replace(/^usage: gr \S+ /, 'needs ')} — nothing was applied`)
+      }
     }
-    const stops = stopsFrom(opt)
-    if (stops.length === 1) fail('a tour needs at least 2 --stop entries (use --file P --line N to point at one place)')
-    if (stops.length) actions.push({ kind: 'tour', stops })
-    const m = await forRequest(id, () => rpc('messagePost', sessionId, { text, requestId: id, ...(actions.length ? { actions } : {}) }))
-    if (opt.json) return printJson(m)
-    out(`answered request ${id}${actions.length ? ` (with ${actions.map((x) => x.kind).join(' + ')})` : ''}`)
-  },
-  async progress(pos, opt) {
-    const sessionId = await currentSession(opt)
-    const id = pos[0]; const text = opt.text || pos.slice(1).join(' ')
-    if (!id || !text) fail('usage: gr progress <requestId> "what you are doing"')
-    await forRequest(id, () => rpc('requestUpdate', sessionId, id, { progress: text }))
-    out(`progress shown for request ${id}`)
-  },
-  async done(pos, opt) {
-    const sessionId = await currentSession(opt)
-    const id = pos[0]
-    if (!id) fail('usage: gr done <requestId> [--text "final note"]')
-    const text = opt.text || pos.slice(1).join(' ')
-    const r = await forRequest(id, () => rpc('requestUpdate', sessionId, id, { ...(text ? { progress: text } : {}), status: 'done' }))
-    if (opt.json) return printJson(r)
-    out(`request ${id} done`)
-    if (r.commentIds?.length) {
-      const after = (await rpc('loadSession', sessionId)).state.comments.filter((c) => r.commentIds.includes(c.id))
-      out('resolutions:')
-      for (const c of after) out(c.resolution ? `  [${c.id}] ${c.resolution.verdict} — ${c.resolution.note}` : `  [${c.id}] NOT handled (back to ${c.status})`)
+    let results
+    try { ({ results } = await rpc('batch', sessionId, built.map(({ channel, args }) => ({ channel, args })))) } catch (e) {
+      const m = /^operation (\d+) \([^)]*\) failed: cancelled/.exec(e.server ?? '')
+      if (!m) throw e
+      process.stderr.write(`CANCELLED: the reviewer cancelled request ${built[Number(m[1]) - 1]?.request} — stop working on it\n(operation ${m[1]} of the batch; nothing in the batch was applied)\n`)
+      throw Object.assign(new Fail('', 130), { quiet: true })
     }
-  },
-  async fail(pos, opt) {
-    const sessionId = await currentSession(opt)
-    const id = pos[0]; const text = opt.text || pos.slice(1).join(' ')
-    if (!id || !text) fail('usage: gr fail <requestId> --text "why it could not be done"')
-    await forRequest(id, () => rpc('requestUpdate', sessionId, id, { status: 'failed', error: text }))
-    out(`request ${id} marked failed: ${text}`)
+    if (opt.json) return printJson({ applied: built.length, results })
+    const comments = built.some((op, i) => op.needsComments && results[i]?.commentIds?.length) ? (await rpc('loadSession', sessionId)).state.comments : null
+    built.forEach((op, i) => { for (const l of op.lines(results[i], comments)) out(l) })
+    out(`batch: ${built.length} operation(s) applied`)
   },
 
   async rpc(pos) {
@@ -883,8 +1111,11 @@ const commands = {
   annotate --file walkthrough.json [--request ID]      store the walkthrough you wrote
   comment <anchor> --text T   comments   reply   resolve   reopen   delete-comment
   focus <anchor>   tour --stop "path:line | note" …   say "text"   note "text" [<anchor>]
-  wait [--timeout S] [--on-change]       receive what the reviewer asks for in the UI
+  listen [--on-change]                   persistent listener for a background Monitor: one JSON line
+                                         per request the reviewer makes in the UI (any review of the repo)
+  wait [--timeout S] [--on-change]       fallback without a Monitor: block until the next request
   requests [--all]   answer REQ --text T   progress REQ "text"   done REQ   fail REQ --text T
+  batch --file ops.json | -              many writes in one atomic call (comment, reply, resolve, answer, done, …)
   artifact add PATH --role spec|plan | remove PATH | list
   viewed --file P   section-reviewed ID   approve --confirmed-by-user   unapprove
   serve / stop / status / doctor / rpc <channel> '[json]'

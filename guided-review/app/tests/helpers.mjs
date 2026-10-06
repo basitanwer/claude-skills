@@ -89,8 +89,8 @@ export async function makeBridge(extraEnv = {}) {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gr home ')))
   const port = await freePort()
   const env = { ...process.env, GUIDED_REVIEW_HOME: home, GUIDED_REVIEW_PORT: String(port), GUIDED_REVIEW_NO_OPEN: '1', GUIDED_REVIEW_OS_NOTIFY: '0', ...extraEnv }
-  const run = (cwd, args) => {
-    const r = spawnSync(process.execPath, [GR, ...args], { cwd, env, encoding: 'utf8', timeout: 60_000 })
+  const run = (cwd, args, input) => {
+    const r = spawnSync(process.execPath, [GR, ...args], { cwd, env, encoding: 'utf8', timeout: 60_000, ...(input != null ? { input } : {}) })
     return { code: r.status ?? -1, out: r.stdout ?? '', err: r.stderr ?? '' }
   }
   const gr = (cwd, ...args) => {
@@ -101,6 +101,30 @@ export async function makeBridge(extraEnv = {}) {
   return {
     home, port, env, gr,
     try: (cwd, ...args) => run(cwd, args),
+    /** `gr batch -` with the operations on stdin; returns { code, out, err }. */
+    batch: (cwd, ops, ...args) => run(cwd, ['batch', '-', ...args], JSON.stringify(ops)),
+    /** Start `gr listen` the way a Monitor does: every stdout line must be one JSON
+     *  object. `next(pred)` resolves with the first line (from `from` on) that matches. */
+    listener(cwd, ...args) {
+      const child = spawn(process.execPath, [GR, 'listen', ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
+      const lines = []; const bad = []; let buf = ''; let err = ''
+      child.stdout.on('data', (d) => {
+        buf += d
+        let i
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i); buf = buf.slice(i + 1)
+          try { lines.push(JSON.parse(line)) } catch { bad.push(line) }
+        }
+      })
+      child.stderr.on('data', (d) => { err += d })
+      const closed = new Promise((resolve) => child.on('close', resolve))
+      return {
+        lines, bad, child,
+        stderr: () => err,
+        next: (pred, ms = 10_000, from = 0) => until(() => lines.slice(from).find(pred), ms),
+        async kill() { child.kill('SIGTERM'); await closed }
+      }
+    },
     /** Start `gr` without waiting (for `gr wait`). `done` resolves { code, out, err }. */
     start(cwd, ...args) {
       const child = spawn(process.execPath, [GR, ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })

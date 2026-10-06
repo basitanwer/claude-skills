@@ -206,7 +206,62 @@ export function requestTitle(r: ReviewRequest): string {
   switch (r.kind) {
     case 'walkthrough': return r.update ? 'Update the walkthrough' : 'Write a walkthrough'
     case 'question': return 'Answer a question'
-    case 'apply': return `Address ${plural(n, 'comment')}${r.commit ? ' and commit the edits' : ''}`
+    case 'apply': {
+      const replies = r.replyIds?.length ?? 0
+      const fresh = n - replies
+      const what = [fresh ? plural(fresh, 'comment') : '', replies ? `${replies} ${replies === 1 ? 'reply' : 'replies'}` : ''].filter(Boolean).join(' and ')
+      return `${r.editable === false ? 'Answer' : 'Address'} ${what || plural(n, 'comment')}${r.commit ? ' and commit the edits' : ''}`
+    }
     case 'decisions': return `Fold ${plural(n, 'decision')} into the walkthrough`
   }
 }
+
+// ── pending comments and replies ──────────────────────────────
+/** The reviewer replied in this thread and has not sent the reply to Claude Code yet. */
+export const hasPendingReply = (c: Comment): boolean => c.replies.some((r) => r.pending)
+/** What "send to Claude Code" will hand over: new comments, and threads with a new
+ *  reply. Answers to the walkthrough's questions travel separately (as decisions). */
+export function pendingThreads(comments: Comment[]): { queued: Comment[]; replied: Comment[]; all: Comment[] } {
+  const queued = comments.filter((c) => c.status === 'queued' && c.anchor.kind !== 'question')
+  const replied = comments.filter((c) => !queued.includes(c) && hasPendingReply(c))
+  return { queued, replied, all: [...queued, ...replied] }
+}
+/** "2 pending comments and replies" / "1 pending comment" / "3 pending replies" */
+export function pendingLabel(queued: number, replied: number): string {
+  const n = queued + replied
+  if (queued && replied) return `${n} pending comments and replies`
+  if (replied) return `${n} pending ${replied === 1 ? 'reply' : 'replies'}`
+  return `${n} pending comment${queued === 1 ? '' : 's'}`
+}
+
+// ── how long a request has been running ───────────────────────
+/** "45s", "2m 10s", "1h 03m" */
+export function elapsed(sinceIso: string | undefined, now = Date.now()): string {
+  const t = sinceIso ? Date.parse(sinceIso) : NaN
+  if (Number.isNaN(t)) return ''
+  const s = Math.max(0, Math.floor((now - t) / 1000))
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`
+  return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`
+}
+/** How long a running request may go without a progress line before the page offers
+ *  "Send again". Five minutes; for testing it can be lowered, in seconds, with
+ *  `window.__grStuckSeconds = 10` in the console or `?stuck=10` in the page URL
+ *  (before the `#`). */
+export function stuckAfterMs(): number {
+  const w = (window as unknown as { __grStuckSeconds?: number }).__grStuckSeconds
+  const q = Number(new URLSearchParams(window.location.search).get('stuck'))
+  const s = typeof w === 'number' && w > 0 ? w : q > 0 ? q : 300
+  return s * 1000
+}
+/** A claimed request that has been silent for too long: the session that took it may
+ *  be gone (closed terminal, crashed), so the reviewer can put it back in the queue. */
+export function isStuck(r: ReviewRequest, now = Date.now()): boolean {
+  if (r.status !== 'running' || !r.startedAt) return false
+  const limit = stuckAfterMs()
+  const last = Date.parse(r.progress.at(-1)?.at ?? r.startedAt)
+  return now - Date.parse(r.startedAt) >= limit && now - last >= limit
+}
+/** A request nobody has picked up for half a minute while no session is attached. */
+export const isUnclaimed = (r: ReviewRequest, away: boolean, now = Date.now()): boolean =>
+  r.status === 'pending' && away && now - Date.parse(r.createdAt) >= 30_000

@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { Store, emptyState, now } from './store.mjs'
@@ -35,20 +36,34 @@ const IDLE_MS = Number(process.env.GUIDED_REVIEW_IDLE_MINUTES ?? 30) * 60_000
 const store = new Store(HOME)
 
 // ── push ─────────────────────────────────────────────────────
-/** @type {Set<{ res: http.ServerResponse, sessionId: number | null, ui: boolean, bridge: boolean }>} */
+/** @type {Set<{ res: http.ServerResponse, sessionId: number | null, repo: string | null, ui: boolean, bridge: boolean, changes: boolean }>} */
 const clients = new Set()
 /** Send to every client watching this review (and to clients watching none: the dashboard).
  *  @param {string} channel @param {{ sessionId: number } & Record<string, unknown>} msg */
 function push(channel, msg) {
+  const batch = scope.getStore()?.batch
+  if (batch) { batch.pushes.push([channel, msg]); return } // delivered when the batch commits
   const frame = `data: ${JSON.stringify({ channel, msg })}\n\n`
-  for (const c of clients) if (c.sessionId == null || c.sessionId === msg.sessionId) c.res.write(frame)
+  const repo = store.sessions.get(msg.sessionId)?.repo
+  for (const c of clients) {
+    // a client hears about its review, or about every review of its repository;
+    // one with neither (the dashboard) hears everything
+    if (c.repo ? c.repo === repo : c.sessionId == null || c.sessionId === msg.sessionId) c.res.write(frame)
+  }
 }
 const changed = (/** @type {number} */ sessionId) => push('session:changed', { sessionId })
+/** Persist a review — unless a batch is collecting changes, which saves once at the end.
+ *  @param {Session} s @param {{ touch?: boolean }} [opts] */
+function save(s, opts) {
+  if (!scope.getStore()?.batch) store['save'](s, opts)
+}
 const tabsOf = (/** @type {number} */ sessionId) => [...clients].filter((c) => c.ui && c.sessionId === sessionId).length
 /** Tell the reviewer something finished: open tabs raise a browser notification when
  *  hidden; with no tab on this review, fall back to a macOS banner.
  *  @param {number} sessionId @param {string} title @param {string} body */
 function notify(sessionId, title, body) {
+  const batch = scope.getStore()?.batch
+  if (batch) { batch.notes.push([sessionId, title, body]); return }
   push('notify', { sessionId, title, body })
   if (tabsOf(sessionId) === 0 && process.platform === 'darwin' && process.env.GUIDED_REVIEW_OS_NOTIFY !== '0') {
     const esc = (/** @type {string} */ s) => s.replace(/[\\"]/g, '\\$&')
@@ -67,8 +82,15 @@ const WORKING_WINDOW_MS = 120_000
 function presenceOf(sessionId) {
   const s = store.sessions.get(sessionId)
   if (s?.state.requests.some((r) => r.status === 'running')) return 'working'
-  if ([...clients].some((c) => c.bridge && c.sessionId === sessionId)) return 'listening'
+  if ([...clients].some((c) => c.bridge && (c.sessionId === sessionId || (c.repo && c.repo === s?.repo)))) return 'listening'
   return Date.now() - (seen.get(sessionId) ?? 0) < WORKING_WINDOW_MS ? 'working' : 'away'
+}
+/** A bridge listener connected or left: refresh the reviews it covers.
+ *  @param {{ bridge: boolean, sessionId: number | null, repo: string | null }} client */
+function markBridge(client) {
+  if (!client.bridge) return
+  const ids = client.repo ? store.list(client.repo).map((x) => x.id) : client.sessionId ? [client.sessionId] : []
+  for (const id of ids) { seen.set(id, Date.now()); refreshPresence(id) }
 }
 function refreshPresence(/** @type {number} */ sessionId) {
   const p = presenceOf(sessionId)
@@ -84,6 +106,9 @@ setInterval(async () => {
   watching = true
   try {
     const open = new Set([...clients].map((c) => c.sessionId).filter((id) => id != null))
+    // a repository-wide listener that asked for code changes (`gr listen --on-change`)
+    // has every review of its repository watched, tab or no tab
+    for (const c of clients) if (c.repo && c.changes) for (const s of store.list(c.repo)) open.add(s.id)
     for (const id of signatures.keys()) if (!open.has(id)) signatures.delete(id)
     for (const id of open) {
       const s = store.sessions.get(/** @type {number} */ (id))
@@ -115,8 +140,15 @@ if (IDLE_MS > 0) {
 // ── helpers ──────────────────────────────────────────────────
 /** One mutation at a time per review. @type {Map<number, Promise<unknown>>} */
 const locks = new Map()
+/** What the current call chain holds: the review it has locked and, inside `batch`,
+ *  the pushes and notifications waiting for the commit.
+ *  @type {AsyncLocalStorage<{ id: number, batch?: { pushes: [string, any][], notes: [number, string, string][] } }>} */
+const scope = new AsyncLocalStorage()
 /** @template T @param {number} id @param {() => Promise<T>} fn @returns {Promise<T>} */
 function locked(id, fn) {
+  if (scope.getStore()?.id === id) return fn() // already inside this review's lock (a batch step)
+  const inner = fn
+  fn = () => scope.run({ id }, inner)
   const run = (locks.get(id) ?? Promise.resolve()).then(fn, fn)
   locks.set(id, run.catch(() => {}))
   return run
@@ -214,11 +246,11 @@ const api = {
     return assemble(null, { id: 0, repo, pair, direct: Boolean(opts.direct), createdAt: t, updatedAt: t, archived: false, seq: 0, state: emptyState() }, { persist: false, view: opts.view })
   },
   loadSession: (/** @type {number} */ id, /** @type {any} */ view) => locked(id, () => assemble(store, store.get(id), { persist: true, presence: presenceOf(id), view: view ?? undefined })),
-  archiveSession: (/** @type {number} */ id, /** @type {boolean} */ archived) => locked(id, async () => { const s = store.get(id); s.archived = Boolean(archived); store.save(s, { touch: false }); changed(id) }),
+  archiveSession: (/** @type {number} */ id, /** @type {boolean} */ archived) => locked(id, async () => { const s = store.get(id); s.archived = Boolean(archived); save(s, { touch: false }); changed(id) }),
   retargetSession: (/** @type {number} */ id, /** @type {string} */ compareIn) => locked(id, async () => {
     const s = store.get(id)
     s.pair.compare = await resolveInput(s.repo, compareIn, 'compare')
-    store.save(s); changed(id)
+    save(s); changed(id)
   }),
   driftSince: (/** @type {number} */ id, /** @type {string} */ sinceSha) => drift(store.get(id), sinceSha),
   /** Lines of a changed file outside its diff hunks, for "expand context". The new
@@ -241,7 +273,7 @@ const api = {
   saveUiState: (/** @type {number} */ id, /** @type {any} */ patch) => locked(id, async () => {
     const s = store.get(id)
     for (const k of /** @type {const} */ (['viewedAt', 'reviewedSections', 'fileExcluded'])) if (patch?.[k] !== undefined) /** @type {any} */ (s.state)[k] = patch[k]
-    store.save(s); changed(id)
+    save(s); changed(id)
     return s.state
   }),
   setViewed: (/** @type {number} */ id, /** @type {string} */ file, /** @type {boolean} */ viewed) => locked(id, async () => {
@@ -250,7 +282,7 @@ const api = {
     const f = loaded.files.find((x) => x.path === file || x.oldPath === file)
     if (!f) throw new Error(`${file} is not part of this diff`)
     if (viewed) s.state.viewedAt[f.path] = { sha: loaded.headSha, hash: f.fileHash ?? '' }; else delete s.state.viewedAt[f.path]
-    store.save(s); changed(id)
+    save(s); changed(id)
     return s.state
   }),
   commentAdd: (/** @type {number} */ id, /** @type {any} */ input) => locked(id, async () => {
@@ -266,7 +298,7 @@ const api = {
       replies: [], createdAt: now(), iteration: s.state.iterations.length
     }
     s.state.comments.push(c)
-    store.save(s); changed(id)
+    save(s); changed(id)
     return c
   }),
   commentUpdate: (/** @type {number} */ id, /** @type {string} */ cid, /** @type {any} */ patch) => locked(id, async () => {
@@ -274,7 +306,11 @@ const api = {
     const c = s.state.comments.find((x) => x.id === cid)
     if (!c) throw new Error(`no comment ${cid}`)
     if (typeof patch?.text === 'string' && patch.text.trim()) c.text = patch.text.trim()
-    if (patch?.reply?.text) c.replies.push({ author: patch.reply.author === 'agent' ? 'agent' : 'user', text: String(patch.reply.text), at: now() })
+    if (patch?.reply?.text) {
+      const author = patch.reply.author === 'agent' ? 'agent' : 'user'
+      // a reviewer's reply waits, like a new comment, until they send their review
+      c.replies.push({ author, text: String(patch.reply.text), at: now(), ...(author === 'user' ? { pending: true } : {}) })
+    }
     if (patch?.resolution) {
       if (!['addressed', 'reworked', 'skipped'].includes(patch.resolution.verdict)) throw new Error('verdict must be addressed, reworked or skipped')
       c.status = 'resolved'
@@ -284,13 +320,13 @@ const api = {
       c.status = patch.status
       if (patch.status !== 'resolved') delete c.resolution
     }
-    store.save(s); changed(id)
+    save(s); changed(id)
     return c
   }),
   commentDelete: (/** @type {number} */ id, /** @type {string} */ cid) => locked(id, async () => {
     const s = store.get(id)
     s.state.comments = s.state.comments.filter((c) => c.id !== cid)
-    store.save(s); changed(id)
+    save(s); changed(id)
   }),
   approve: (/** @type {number} */ id) => locked(id, async () => {
     const s = store.get(id)
@@ -298,20 +334,20 @@ const api = {
     if (loaded.refMissing) throw new Error('cannot approve: a side of this comparison no longer resolves')
     const hash = approvalKey(loaded)
     if (!s.state.approvals.some((a) => a.hash === hash)) s.state.approvals.push({ sha: loaded.headSha, hash, at: now(), signature: loaded.signature })
-    store.save(s); changed(id)
+    save(s); changed(id)
     return s.state
   }),
   unapprove: (/** @type {number} */ id) => locked(id, async () => {
     const s = store.get(id)
     const hash = approvalKey(await load(s))
     s.state.approvals = s.state.approvals.filter((a) => a.hash !== hash)
-    store.save(s); changed(id)
+    save(s); changed(id)
     return s.state
   }),
   approveArtifact: (/** @type {number} */ id, /** @type {string} */ p, /** @type {boolean} */ approved) => locked(id, async () => {
     const s = store.get(id)
     if (approved) s.state.artifactApprovals[p] = (await load(s)).headSha; else delete s.state.artifactApprovals[p]
-    store.save(s); changed(id)
+    save(s); changed(id)
     return s.state
   }),
   setArtifacts: (/** @type {number} */ id, /** @type {any[]} */ refs) => locked(id, async () => {
@@ -320,8 +356,8 @@ const api = {
     s.state.artifacts = (Array.isArray(refs) ? refs : []).map((r) => ({ role: r?.role === 'plan' ? /** @type {const} */ ('plan') : /** @type {const} */ ('spec'), path: String(r?.path ?? '') })).filter((r) => r.path)
     const loaded = await load(s)
     const missing = s.state.artifacts.filter((r) => !loaded.artifacts.some((a) => a.path === r.path)).map((r) => r.path)
-    if (missing.length) { s.state.artifacts = s.state.artifacts.filter((r) => !missing.includes(r.path)); store.save(s); throw new Error(`cannot read ${missing.join(', ')} on the compare side`) }
-    store.save(s); changed(id)
+    if (missing.length) { s.state.artifacts = s.state.artifacts.filter((r) => !missing.includes(r.path)); save(s); throw new Error(`cannot read ${missing.join(', ')} on the compare side`) }
+    save(s); changed(id)
     return s.state
   }),
   getPrefs: () => store.index.prefs,
@@ -347,32 +383,98 @@ const api = {
       s.state.messages.push({ id: store.nextId(s, 'm'), role: 'user', text, at: now(), ...(r.anchor ? { anchor: r.anchor } : {}), requestId: r.id })
     } else {
       const ids = Array.isArray(input.commentIds) ? input.commentIds.map(String) : []
-      const picked = s.state.comments.filter((c) => ids.includes(c.id) && c.status === 'queued')
-      if (!picked.length) throw new Error('none of those comments is queued')
-      if (kind === 'apply' && !loaded.apply.enabled) throw new Error(loaded.apply.reason === 'frozen-commit' ? 'this comparison ends at a fixed commit, so there is nothing to edit — review the branch or the working tree to apply feedback' : 'the compare branch is not checked out in any worktree, so there is nowhere to make the edits')
-      for (const c of picked) c.status = 'sent'
+      const hasReply = (/** @type {import('../shared/types.ts').Comment} */ c) => c.replies.some((x) => x.pending)
+      const picked = s.state.comments.filter((c) => ids.includes(c.id) && (c.status === 'queued' || (kind === 'apply' && hasReply(c))))
+      if (!picked.length) throw new Error('none of those comments is waiting to be sent')
+      if (kind === 'apply') {
+        // threads sent only for a new reply keep their status; new comments become `sent`
+        r.replyIds = picked.filter((c) => c.status !== 'queued').map((c) => c.id)
+        r.editable = loaded.apply.enabled
+        r.commit = Boolean(input.commit) && loaded.apply.enabled
+      }
+      for (const c of picked) {
+        if (c.status === 'queued') c.status = 'sent'
+        for (const x of c.replies) delete x.pending
+      }
       r.commentIds = picked.map((c) => c.id)
-      if (kind === 'apply') r.commit = Boolean(input.commit)
     }
     s.state.requests.push(r)
-    store.save(s); changed(id)
+    save(s); changed(id)
     return r
   }),
   requestCancel: (/** @type {number} */ id, /** @type {string} */ rid) => locked(id, async () => {
     const s = store.get(id)
     const r = s.state.requests.find((x) => x.id === rid)
     if (!r) throw new Error(`no request ${rid}`)
+    const wasRunning = r.status === 'running'
     if (r.status === 'pending' || r.status === 'running') finish(s, r, 'cancelled')
-    store.save(s); changed(id); refreshPresence(id)
+    save(s); changed(id); refreshPresence(id)
+    if (wasRunning) push('request:cancelled', { sessionId: id, requestId: r.id })
+    return r
+  }),
+  requestRetry: (/** @type {number} */ id, /** @type {string} */ rid) => locked(id, async () => {
+    const s = store.get(id)
+    const r = s.state.requests.find((x) => x.id === rid)
+    if (!r) throw new Error(`no request ${rid}`)
+    if (r.status !== 'running') throw new Error(`request ${rid} is ${r.status}, not running`)
+    r.status = 'pending'; delete r.startedAt
+    r.progress.push({ at: now(), text: 'Sent again by the reviewer.' })
+    save(s); changed(id); refreshPresence(id)
     return r
   }),
   requestTake: (/** @type {number} */ id) => locked(id, async () => {
     const s = store.get(id)
     const taken = s.state.requests.filter((r) => r.status === 'pending')
-    for (const r of taken) r.status = 'running'
-    if (taken.length) { store.save(s); changed(id) }
+    for (const r of taken) { r.status = 'running'; r.startedAt = now() }
+    if (taken.length) { save(s); changed(id) }
     refreshPresence(id)
     return taken
+  }),
+  async requestTakeAll(/** @type {string} */ dir, includeRunning = false) {
+    const repo = await repoOf(dir)
+    const out = []
+    for (const s of store.list(repo)) {
+      const got = await locked(s.id, async () => {
+        const mine = s.state.requests.filter((r) => r.status === 'pending' || (includeRunning && r.status === 'running'))
+        const items = mine.map((r) => ({ sessionId: s.id, request: r, resumed: r.status === 'running', comments: s.state.comments.filter((c) => r.commentIds?.includes(c.id)) }))
+        let any = false
+        for (const r of mine) if (r.status === 'pending') { r.status = 'running'; r.startedAt = now(); any = true }
+        if (any) { save(s); changed(s.id) }
+        if (mine.length) { seen.set(s.id, Date.now()); refreshPresence(s.id) }
+        return structuredClone(items)
+      })
+      out.push(...got)
+    }
+    return out
+  },
+  /** Several bridge calls as one update. Nothing is saved or announced until every step
+   *  has succeeded; if one fails the review is put back exactly as it was. */
+  batch: (/** @type {number} */ id, /** @type {any[]} */ ops) => locked(id, async () => {
+    const s = store.get(id)
+    if (!Array.isArray(ops) || !ops.length) throw new Error('a batch is a non-empty list of operations')
+    const before = { state: structuredClone(s.state), seq: s.seq, updatedAt: s.updatedAt }
+    const batch = { pushes: /** @type {[string, any][]} */ ([]), notes: /** @type {[number, string, string][]} */ ([]) }
+    const results = []
+    try {
+      await scope.run({ id, batch }, async () => {
+        for (const [i, op] of ops.entries()) {
+          if (!BATCHABLE.has(op?.channel)) throw new Error(`operation ${i + 1}: "${op?.channel}" cannot be used in a batch`)
+          try { results.push(await api[op.channel](id, ...(Array.isArray(op.args) ? op.args : []))) } catch (err) {
+            throw new Error(`operation ${i + 1} (${op.channel}) failed: ${err instanceof Error ? err.message : err} — nothing was applied`)
+          }
+        }
+      })
+    } catch (err) {
+      Object.assign(s, { state: before.state, seq: before.seq, updatedAt: before.updatedAt })
+      store['save'](s, { touch: false }) // a load inside the batch may have written a partial state
+      throw err
+    }
+    store.save(s)
+    changed(id)
+    for (const [channel, msg] of batch.pushes) if (channel !== 'session:changed') push(channel, msg)
+    for (const [sid, title, body] of batch.notes.slice(-1)) notify(sid, title, body)
+    refreshPresence(id)
+    return { results }
   }),
   requestUpdate: (/** @type {number} */ id, /** @type {string} */ rid, /** @type {any} */ patch) => locked(id, async () => {
     const s = store.get(id)
@@ -382,7 +484,7 @@ const api = {
       finish(s, r, patch.status, patch.status === 'failed' ? String(patch.error || 'failed') : undefined)
       notify(id, patch.status === 'done' ? 'Claude Code finished' : 'Claude Code could not finish', r.kind === 'apply' ? `${r.commentIds?.length ?? 0} comment(s) handled` : r.error ?? r.kind)
     }
-    store.save(s); changed(id); refreshPresence(id)
+    save(s); changed(id); refreshPresence(id)
     return r
   }),
   messagePost: (/** @type {number} */ id, /** @type {any} */ input) => locked(id, async () => {
@@ -398,7 +500,7 @@ const api = {
     const m = { id: store.nextId(s, 'm'), role: 'agent', text, at: now(), ...(r ? { requestId: r.id } : {}), ...(actions.length ? { actions } : {}) }
     s.state.messages.push(m)
     if (r) { finish(s, r, 'done'); notify(id, 'Claude Code answered', text.slice(0, 120)) }
-    store.save(s); changed(id); refreshPresence(id)
+    save(s); changed(id); refreshPresence(id)
     // the first focus/tour also plays live, so the answer lands with the code it cites on screen
     if (actions[0]) push('ui:action', { sessionId: id, action: actions[0] })
     return m
@@ -419,7 +521,7 @@ const api = {
       if (role && !s.state.artifacts.some((a) => a.path === p) && (await tryGit(s.repo, ['cat-file', '-e', `${loaded.headSha}:${p}`])) !== null) s.state.artifacts.push({ role, path: p })
     }
     if (r) finish(s, r, 'done')
-    store.save(s); changed(id); refreshPresence(id)
+    save(s); changed(id); refreshPresence(id)
     notify(id, 'Walkthrough ready', `${walkthrough.sections.length} sections — ${walkthrough.title}`)
     return { sections: walkthrough.sections.length, warnings }
   }),
@@ -445,6 +547,8 @@ async function checkAction(s, loaded, a) {
   if (a?.kind === 'navigate' && /^#\//.test(a.hash ?? '')) return { kind: 'navigate', hash: String(a.hash) }
   throw new Error('unknown UI action')
 }
+/** What a batch may contain. */
+const BATCHABLE = new Set(['commentAdd', 'commentUpdate', 'commentDelete', 'messagePost', 'requestUpdate', 'annotate', 'uiAction', 'setViewed', 'setArtifacts'])
 /** Channels the bridge uses; a call to one marks the session as present. */
 const BRIDGE_HEADER = 'x-guided-review-bridge'
 
@@ -497,9 +601,9 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' })
     res.write('retry: 2000\n\n')
     const sid = Number(url.searchParams.get('session'))
-    const client = { res, sessionId: Number.isInteger(sid) && sid > 0 ? sid : null, ui: url.searchParams.get('ui') === '1', bridge: url.searchParams.get('bridge') === '1' }
+    const client = { res, sessionId: Number.isInteger(sid) && sid > 0 ? sid : null, repo: url.searchParams.get('repo') || null, ui: url.searchParams.get('ui') === '1', bridge: url.searchParams.get('bridge') === '1', changes: url.searchParams.get('changes') === '1' }
     clients.add(client); touch()
-    if (client.bridge && client.sessionId) { seen.set(client.sessionId, Date.now()); refreshPresence(client.sessionId) }
+    markBridge(client)
     // a tab learns the current fingerprint as soon as it connects, so a change that
     // landed between its load and the watcher's first look is not missed
     const opened = client.ui && client.sessionId ? store.sessions.get(client.sessionId) : null
@@ -511,7 +615,7 @@ const server = http.createServer((req, res) => {
     const keepalive = setInterval(() => res.write(': ping\n\n'), 25_000)
     req.on('close', () => {
       clearInterval(keepalive); clients.delete(client); touch()
-      if (client.bridge && client.sessionId) { seen.set(client.sessionId, Date.now()); refreshPresence(client.sessionId) }
+      markBridge(client)
     })
     return
   }

@@ -2,7 +2,7 @@ import { createContext, useContext, useState } from 'react'
 import type { AnchorInput, Comment } from '@shared/types'
 import { useStore } from '../store'
 import { focusAnchor } from '../focus'
-import { ago, anchorLabel, focusable } from '../util'
+import { ago, anchorLabel, focusable, hasPendingReply, isOpen } from '../util'
 import { Icon, Md, Menu, MenuItem } from './common'
 
 /** Comments indexed by anchor key (see util.indexComments). */
@@ -27,15 +27,32 @@ export function Who({ author }: { author: 'user' | 'agent' }) {
   )
 }
 
-/** One review comment with its replies, in GitHub's review-thread shape. */
+/** One review comment with its replies, in GitHub's review-thread shape. Every thread
+ *  is two-way: the reviewer can reply at any time; a reply stays "Pending" until the
+ *  review is sent, and Claude's answer arrives in the same thread. */
 export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) {
   const updateComment = useStore((s) => s.updateComment)
   const removeComment = useStore((s) => s.removeComment)
+  // handed to Claude Code in a request that is not finished yet
+  const sentAt = useStore((s) => (s.loaded?.state.requests ?? []).find((r) => isOpen(r) && r.commentIds?.includes(c.id))?.createdAt)
+  const withClaude = sentAt !== undefined
   const [mode, setMode] = useState<'view' | 'edit' | 'reply'>('view')
   const [text, setText] = useState('')
+  const [toggled, setToggled] = useState<boolean | null>(null)
   const target = focusable(c.anchor)
   const st = STATUS[c.status]
   const mine = c.author === 'user'
+  const pendingReply = hasPendingReply(c)
+  // A resolved thread folds away, as on GitHub — unless the conversation went on after
+  // it was resolved: a reply waiting to be sent, one being handled, or Claude's answer.
+  const lastReply = c.replies.at(-1)
+  // Claude already answered in this round; the request may still be open for other threads
+  const answered = Boolean(withClaude && lastReply?.author === 'agent' && lastReply.at >= (sentAt ?? ''))
+  const moved = pendingReply || withClaude || Boolean(lastReply && c.resolution && lastReply.at > c.resolution.at)
+  const live = `${c.replies.length}:${pendingReply}:${withClaude}`
+  const [seen, setSeen] = useState(live)
+  if (seen !== live) { setSeen(live); if (moved) setToggled(null) }      // new activity re-opens a thread the reviewer folded
+  const open = toggled ?? (c.status !== 'resolved' || moved || mode !== 'view')
   const submit = (): void => {
     const body = text.trim()
     if (!body) return
@@ -43,8 +60,21 @@ export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
     setMode('view')
     setText('')
   }
+  const cls = 'thread ' + c.author + ' ' + st.cls + (pendingReply ? ' pending' : '')
+  if (!open) {
+    return (
+      <div className={cls + ' folded'} data-gr-comment={c.id} data-gr-status={c.status} data-gr-folded="true">
+        <div className="thread-main thread-head">
+          <Who author={c.author} />
+          <span className={'label ' + st.cls} title={st.title}>{st.text}{c.resolution ? ` · ${c.resolution.verdict}` : ''}</span>
+          <span className="clip grow muted">{c.resolution?.note || c.text}</span>
+          <button className="link small nowrap" data-gr="show-resolved" onClick={() => setToggled(true)}>Show resolved</button>
+        </div>
+      </div>
+    )
+  }
   return (
-    <div className={'thread ' + c.author + ' ' + st.cls} data-gr-comment={c.id} data-gr-status={c.status}>
+    <div className={cls} data-gr-comment={c.id} data-gr-status={c.status} data-gr-pending-reply={pendingReply ? 'true' : undefined}>
       <div className="thread-main">
         <div className="thread-head">
           <Who author={c.author} />
@@ -58,6 +88,7 @@ export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
               : <span className="mono muted small">{anchorLabel(c.anchor)}</span>
           )}
           <span className="grow" />
+          {c.status === 'resolved' && <button className="link small nowrap" onClick={() => setToggled(false)}>Hide resolved</button>}
           {c.status !== 'sent' && (
             <Menu label={<Icon name="kebab" />} className="icon-btn" title="Comment actions" align="right">
               {(close) => (
@@ -85,11 +116,19 @@ export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
         )}
       </div>
       {c.replies.map((r, i) => (
-        <div key={i} className={'thread-main reply ' + r.author}>
-          <div className="thread-head"><Who author={r.author} /><span className="muted">{ago(r.at)}</span></div>
+        <div key={i} className={'thread-main reply ' + r.author + (r.pending ? ' pending' : '')} data-gr-reply={r.pending ? 'pending' : r.author}>
+          <div className="thread-head">
+            <Who author={r.author} /><span className="muted">{ago(r.at)}</span>
+            {r.pending && <span className="label pending" title="Not sent yet. It goes to Claude Code when you send your review.">Pending</span>}
+          </div>
           <Md text={r.text} className="thread-body" />
         </div>
       ))}
+      {withClaude && !answered && (
+        <div className="thread-main reply waiting" data-gr="with-claude">
+          <span className="spinner" /><span className="muted">With Claude Code — its reply will appear here</span>
+        </div>
+      )}
       <div className="thread-foot">
         {mode === 'view' ? (
           <input name="gr-field" className="reply-stub" placeholder="Reply…" aria-label="Reply" readOnly onFocus={() => { setText(''); setMode('reply') }} />
@@ -100,8 +139,9 @@ export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
               onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit(); if (e.key === 'Escape') setMode('view') }}
             />
             <div className="row gap end">
+              {mode === 'reply' && <span className="muted small grow">Stays pending until you send your review.</span>}
               <button className="btn sm" onClick={() => setMode('view')}>Cancel</button>
-              <button className="btn sm primary" disabled={!text.trim()} onClick={submit}>{mode === 'edit' ? 'Update comment' : 'Reply'}</button>
+              <button className="btn sm primary" data-gr="reply-add" disabled={!text.trim()} onClick={submit}>{mode === 'edit' ? 'Update comment' : 'Add reply'}</button>
             </div>
           </>
         )}
@@ -137,7 +177,7 @@ export function Composer({ anchor, k }: { anchor: AnchorInput; k: string }) {
       />
       <div className="row gap end wrap">
         <button className="btn sm" onClick={close}>Cancel</button>
-        <button className="btn sm" data-gr="comment-ask" disabled={!text.trim() || busy} onClick={ask} title="Ask Claude Code about this spot now; the answer arrives in Conversation">Ask Claude Code</button>
+        <button className="btn sm" data-gr="comment-ask" disabled={!text.trim() || busy} onClick={ask} title="Ask Claude Code about this spot. It is delivered when Claude Code is listening; the answer arrives in Conversation.">Ask Claude Code</button>
         <button className="btn sm primary" data-gr="comment-add" disabled={!text.trim() || busy} onClick={add} title="Add as a pending comment (⌘/Ctrl + Enter). Nothing is sent until you submit your review.">Add comment</button>
       </div>
     </div>

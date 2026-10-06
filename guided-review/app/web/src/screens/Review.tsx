@@ -5,7 +5,8 @@ import type {
 import { useStore, treeWidthLimits, type Filters } from '../store'
 import { focusAnchor } from '../focus'
 import {
-  ago, anchorKey, anchorLabel, baseName, driftText, focusable, indexComments, isOpen, plural, requestTitle, routeHash, short, SIDE_KIND,
+  ago, anchorKey, anchorLabel, baseName, driftText, elapsed, focusable, hasPendingReply, indexComments, isOpen, isStuck, isUnclaimed, pendingLabel,
+  pendingThreads, plural, requestTitle, routeHash, short, SIDE_KIND,
   sinceActive, symLabel, targetLabel, type DiffMode, type Tab
 } from '../util'
 import { AwayHint, CopyButton, DiffStat, Icon, Md, Menu, MenuItem, PresenceDot, currentTheme, setTheme } from '../components/common'
@@ -102,9 +103,10 @@ function DriftBanner() {
 
 /** What Claude Code has been asked and has not finished: one compact row each, on every tab. */
 function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
-  useTick(30_000)
+  useTick(loaded.state.requests.some(isOpen) ? 1000 : 30_000)
   const dismissed = useStore((s) => s.dismissed)
-  const { cancelRequest, dismissRequest, setTab } = useStore.getState()
+  const { cancelRequest, dismissRequest, retryRequest, setTab } = useStore.getState()
+  const away = loaded.presence === 'away'
   const rows = loaded.state.requests.filter((r) => isOpen(r) || (r.status === 'failed' && !dismissed.includes(r.id) && Date.now() - Date.parse(r.finishedAt ?? r.createdAt) < 600_000))
   if (rows.length === 0) return null
   return (
@@ -113,12 +115,14 @@ function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
         <div key={r.id} className={'req-row ' + r.status} data-gr-request={r.id} data-gr-request-kind={r.kind} data-gr-request-status={r.status}>
           {isOpen(r) ? <span className="spinner" /> : <Icon name="x" size={14} />}
           <button className="link strong" onClick={() => setTab('conversation')}>{requestTitle(r)}</button>
-          <span className="muted">
-            {r.status === 'pending' ? 'waiting for Claude Code' : r.status === 'running' ? 'Claude Code is working' : `failed: ${r.error ?? 'no reason given'}`}
+          <span className="muted" data-gr="request-state">
+            {r.status === 'pending' ? 'waiting for Claude Code' : r.status === 'running' ? `working for ${elapsed(r.startedAt) || '0s'}` : `failed: ${r.error ?? 'no reason given'}`}
           </span>
+          {isStuck(r) && <span className="label warn" data-gr="request-stuck" title="It was picked up but has reported nothing for a while; the session may have closed">Claude Code may not be listening</span>}
           {isOpen(r) && r.progress.length > 0 && <span className="req-progress" title={r.progress.map((p) => p.text).join('\n')}>{r.progress[r.progress.length - 1].text}</span>}
           <span className="grow" />
-          {r.status === 'pending' && loaded.presence === 'away' && <span className="muted small" title="In Claude Code run /guided-review --resume — it will pick this up">nothing is listening</span>}
+          {isUnclaimed(r, away) && <span className="away-hint small" data-gr="request-unclaimed" title="In Claude Code run /guided-review --resume — it will pick this up">nothing is listening — run /guided-review --resume</span>}
+          {isStuck(r) && <button className="btn sm" data-gr="request-retry" title="Put it back in the queue for the next Claude Code session that listens" onClick={() => void retryRequest(r.id)}>Send again</button>}
           {isOpen(r)
             ? <button className="btn sm" data-gr="request-cancel" onClick={() => void cancelRequest(r.id)}>Cancel</button>
             : <button className="icon-btn" aria-label="Dismiss" onClick={() => dismissRequest(r.id)}><Icon name="x" size={14} /></button>}
@@ -163,14 +167,14 @@ function Tabs({ loaded }: { loaded: LoadedReview }) {
 function ReviewMenu({ loaded }: { loaded: LoadedReview }) {
   const drift = useStore((s) => s.drift)
   const { request, toggleApprove } = useStore.getState()
-  const pending = loaded.state.comments.filter((c) => c.status === 'queued' && c.anchor.kind !== 'question')
+  const { queued, replied, all: pending } = pendingThreads(loaded.state.comments)
+  const what = pendingLabel(queued.length, replied.length)
+  const editable = loaded.apply.enabled
   const [choice, setChoice] = useState<'send' | 'approve'>('send')
   const [note, setNote] = useState('')
   const [commit, setCommit] = useState(false)
   const [busy, setBusy] = useState(false)
-  const blocked = !loaded.apply.enabled
-    ? (loaded.apply.reason === 'frozen-commit' ? 'This comparison ends at a fixed commit, so there is nothing to edit.' : 'The compare branch is not checked out anywhere, so there is nowhere to make the edits.')
-    : pending.length === 0 ? 'There are no pending comments.' : null
+  const blocked = pending.length === 0 ? 'There are no pending comments or replies.' : null
   const canApprove = !drift && !loaded.refMissing
   const act = choice === 'send' && blocked ? 'approve' : choice
   if (loaded.view?.commit) {
@@ -179,20 +183,25 @@ function ReviewMenu({ loaded }: { loaded: LoadedReview }) {
   return (
     <Menu
       label={<>Review{pending.length > 0 && <span className="counter on-accent">{pending.length}</span>}<Icon name="chevDown" size={12} /></>}
-      className="btn sm primary" align="right" hook="review-menu" title="Send your pending comments to Claude Code, or approve"
+      className="btn sm primary" align="right" hook="review-menu" title="Send your pending comments and replies to Claude Code, or approve"
     >
       {(close) => (
         <div className="review-pop">
           <div className="pop-title">Finish your review</div>
           <textarea name="gr-text" rows={3} value={note} placeholder="Leave a note for Claude Code (optional)" disabled={act !== 'send'} onChange={(e) => setNote(e.target.value)} />
-          <label className={'radio' + (blocked ? ' off' : '')} title={blocked ?? 'Claude Code edits the code to address them and reports back on each'}>
+          <label className={'radio' + (blocked ? ' off' : '')} title={blocked ?? 'Delivered when Claude Code is listening. It answers in each thread and reports an outcome for each comment.'}>
             <input type="radio" name="gr-review-choice" checked={act === 'send'} disabled={Boolean(blocked)} onChange={() => setChoice('send')} />
-            <span><strong>Send {plural(pending.length, 'pending comment')} to Claude Code</strong>{blocked && <span className="muted small"> — {blocked}</span>}</span>
+            <span><strong data-gr="send-label">Send {what} to Claude Code</strong>{blocked && <span className="muted small"> — {blocked}</span>}</span>
           </label>
-          {act === 'send' && (
+          {act === 'send' && editable && (
             <label className="check sub" title="Off: the edits stay uncommitted for you to check">
               <input type="checkbox" name="gr-field" checked={commit} onChange={(e) => setCommit(e.target.checked)} data-gr="commit-toggle" /> commit the changes
             </label>
+          )}
+          {act === 'send' && !editable && (
+            <div className="muted small sub" data-gr="not-editable">
+              {loaded.apply.reason === 'frozen-commit' ? 'Fixed commit: Claude Code can answer here but not edit.' : 'The branch is not checked out anywhere: Claude Code can answer here but not edit.'}
+            </div>
           )}
           <label className={'radio' + (canApprove ? '' : ' off')} title={drift ? 'Refresh first: the code changed since you loaded it' : 'Records your approval of exactly this state'}>
             <input type="radio" name="gr-review-choice" checked={act === 'approve'} disabled={!canApprove} onChange={() => setChoice('approve')} />
@@ -206,7 +215,7 @@ function ReviewMenu({ loaded }: { loaded: LoadedReview }) {
               onClick={() => {
                 setBusy(true)
                 const done = (): void => { setBusy(false); setNote(''); close() }
-                if (act === 'send') void request({ kind: 'apply', commentIds: pending.map((c) => c.id), text: note.trim() || undefined, commit }).then(done)
+                if (act === 'send') void request({ kind: 'apply', commentIds: pending.map((c) => c.id), text: note.trim() || undefined, commit: commit && editable }).then(done)
                 else void toggleApprove().then(done)
               }}
             >
@@ -223,7 +232,7 @@ function CommentsMenu({ loaded }: { loaded: LoadedReview }) {
   const setTab = useStore((s) => s.setTab)
   const all = loaded.state.comments
   const groups: { title: string; list: Comment[] }[] = [
-    { title: 'Pending', list: all.filter((c) => c.status === 'queued') },
+    { title: 'Pending', list: all.filter((c) => c.status === 'queued' || hasPendingReply(c)) },
     { title: 'With Claude Code', list: all.filter((c) => c.status === 'sent') },
     { title: 'Notes from Claude', list: all.filter((c) => c.status === 'note') },
     { title: 'Resolved', list: all.filter((c) => c.status === 'resolved') },
@@ -543,10 +552,21 @@ function ActionChip({ action }: { action: UiAction }) {
 }
 
 function Progress({ r }: { r: ReviewRequest }) {
+  useTick(1000)
   const cancel = useStore((s) => s.cancelRequest)
+  const retry = useStore((s) => s.retryRequest)
+  const away = useStore((s) => s.loaded?.presence === 'away')
+  const stuck = isStuck(r)
   return (
     <div className="tl-progress" data-gr-request={r.id}>
-      <div className="row gap"><span className="spinner" />{r.status === 'pending' ? 'Waiting for Claude Code to pick this up' : 'Claude Code is working on it'}<button className="link" data-gr="request-cancel" onClick={() => void cancel(r.id)}>Cancel</button></div>
+      <div className="row gap wrap">
+        <span className="spinner" />
+        <span data-gr="request-state">{r.status === 'pending' ? 'Waiting for Claude Code to pick this up' : `Claude Code is working on it — working for ${elapsed(r.startedAt) || '0s'}`}</span>
+        {stuck && <span className="label warn" data-gr="request-stuck">Claude Code may not be listening</span>}
+        {stuck && <button className="link" data-gr="request-retry" onClick={() => void retry(r.id)}>Send again</button>}
+        <button className="link" data-gr="request-cancel" onClick={() => void cancel(r.id)}>Cancel</button>
+      </div>
+      {isUnclaimed(r, away) && <AwayHint />}
       {r.progress.map((p, i) => <div key={i} className="progress-line small"><span className="muted">{ago(p.at)}</span> {p.text}</div>)}
     </div>
   )
@@ -779,7 +799,7 @@ function ConversationTab({ loaded }: { loaded: LoadedReview }) {
               <div className="row gap end wrap">
                 <AwayHint />
                 <button className="btn sm" disabled={!text.trim() || busy} onClick={() => send('comment')} title="Add a pending comment on the summary">Comment</button>
-                <button className="btn sm primary" data-gr="chat-send" disabled={!text.trim() || busy} onClick={() => send('ask')} title="Your Claude Code session answers here (⌘/Ctrl + Enter)">Ask Claude Code</button>
+                <button className="btn sm primary" data-gr="chat-send" disabled={!text.trim() || busy} onClick={() => send('ask')} title="Delivered when Claude Code is listening; its answer appears here (⌘/Ctrl + Enter)">Ask Claude Code</button>
               </div>
             </div>
           </div>
@@ -805,7 +825,8 @@ function ConversationTab({ loaded }: { loaded: LoadedReview }) {
         )}
         <div className="side-block">
           <div className="side-title">Comments</div>
-          {(['queued', 'sent', 'note', 'resolved', 'outdated'] as Comment['status'][]).filter((s) => count(s) > 0).map((s) => <div key={s} className="side-stat"><span>{s === 'note' ? 'Notes from Claude' : STATUS[s].text}</span><span>{count(s)}</span></div>)}
+          {pendingThreads(st.comments).all.length > 0 && <div className="side-stat" data-gr="side-pending"><span>Pending</span><span>{pendingThreads(st.comments).all.length}</span></div>}
+          {(['sent', 'note', 'resolved', 'outdated'] as Comment['status'][]).filter((s) => count(s) > 0).map((s) => <div key={s} className="side-stat"><span>{s === 'note' ? 'Notes from Claude' : STATUS[s].text}</span><span>{count(s)}</span></div>)}
           {st.comments.length === 0 && <div className="muted">None yet</div>}
         </div>
       </aside>

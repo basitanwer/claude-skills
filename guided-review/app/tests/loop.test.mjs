@@ -45,7 +45,7 @@ test('1. open a comparison (the repository path contains spaces)', () => {
   assert.deepEqual(info.artifacts, [{ role: 'spec', path: 'specs/rate-limit/spec.md' }, { role: 'plan', path: 'specs/rate-limit/plan.md' }], 'spec and plan are discovered by convention')
   const text = b.gr(fx.dir, 'review', 'main..feature')
   assert.match(text, /^Resumed review #\d+: main \(moving branch\) → feature \(moving branch\)/, 'the same comparison is resumed, not duplicated')
-  assert.match(text, /next: run "gr wait" in the background/)
+  assert.match(text, /next: start "gr listen" as a background Monitor .*fallback.*"gr wait"/)
 })
 
 test('2. a walkthrough is reconciled against git, not trusted', () => {
@@ -131,9 +131,13 @@ test('4. a question asked in the UI reaches the session through gr wait and is a
   assert.match(out, new RegExp(`REQUEST ${r.id} question`))
   assert.match(out, /What does this line do\?/)
   assert.match(out, /about: src\/a\.ts:2 — "  return 2"/)
-  assert.match(out, new RegExp(`answer with: gr answer ${r.id} --text`))
+  assert.match(out, new RegExp(`review #${sid}: main \\(moving branch\\) → feature \\(moving branch\\)`))
+  assert.match(out, new RegExp(`answer with: gr answer ${r.id} --session ${sid} --text`), 'follow-up commands name the review')
+  assert.doesNotMatch(out, /resumed/)
   assert.equal(request(r.id).status, 'running', 'a returned request is claimed')
-  assert.match(g('wait', '--timeout', '1'), /no requests/, 'and is not handed out twice')
+  assert.ok(request(r.id).startedAt)
+  // a session that asks again before finishing gets the claimed request back, marked
+  assert.match(g('wait', '--timeout', '1'), new RegExp(`REQUEST ${r.id} question\\n  review #${sid}[^\\n]*\\n  \\(resumed: claimed earlier and never finished\\)`))
 
   g('progress', r.id, 'reading src/a.ts')
   assert.deepEqual(request(r.id).progress.map((p) => p.text), ['reading src/a.ts'])
@@ -143,6 +147,7 @@ test('4. a question asked in the UI reaches the session through gr wait and is a
   assert.deepEqual([answer.role, answer.requestId, answer.text], ['agent', r.id, 'It is the new return value.'])
   assert.deepEqual(answer.actions, [{ kind: 'focus', target: { kind: 'diff', file: 'src/a.ts', side: 'new', line: 2 } }])
   assert.equal(st.requests.find((x) => x.id === r.id).status, 'done')
+  assert.match(g('wait', '--timeout', '1'), /no requests/, 'once finished it is not handed out again')
   const again = gt('answer', r.id, '--text', 'twice')
   assert.equal(again.code, 1); assert.match(again.err, /already done/)
   const outside = gt('answer', r.id, '--text', 'x', '--file', 'src/a.ts', '--line', '999')
@@ -160,7 +165,7 @@ test('4b. presence: away, then listening while gr wait blocks, then working; a b
   const r = await b.rpc('requestCreate', other, { kind: 'question', text: 'Anything risky here?' })
   const res = await w.done
   assert.equal(res.code, 0)
-  assert.match(res.out, new RegExp(`REQUEST ${r.id} question\\n  Anything risky here\\?`))
+  assert.match(res.out, new RegExp(`REQUEST ${r.id} question\\n  review #${other}: v0 \\(frozen\\) → feature \\(moving branch\\)\\n  Anything risky here\\?`))
   assert.equal((await b.rpc('loadSession', other)).presence, 'working', 'the session holds a request')
 
   b.gr(fx.dir, 'answer', r.id, '--session', String(other), '--text', 'Two places.', '--stop', 'src/a.ts:2 | the changed return', '--stop', 'src/b.ts | new module')
@@ -302,7 +307,7 @@ test('6b. comments follow their line; a comment whose line is gone is never re-a
 test('7. feedback is applied only on request: the session edits, resolves each comment, nothing is committed', async () => {
   const head = git(fx.dir, 'rev-parse', 'HEAD')
   const extra = commentId(g('comment', '--as', 'user', '--file', 'src/c.ts', '--line', '1', '--text', 'Explain c.'))
-  await assert.rejects(b.rpc('requestCreate', sid, { kind: 'apply', commentIds: ['nope'] }), /none of those comments is queued/)
+  await assert.rejects(b.rpc('requestCreate', sid, { kind: 'apply', commentIds: ['nope'] }), /none of those comments is waiting to be sent/)
   const r = await b.rpc('requestCreate', sid, { kind: 'apply', commentIds: [ids.moves, extra], text: 'keep it small' })
   assert.equal(r.commit, false)
   assert.deepEqual([comment(ids.moves).status, comment(extra).status], ['sent', 'sent'])
@@ -391,10 +396,21 @@ test('9. a fixed commit, a moving branch and a direct comparison are different r
   assert.equal(new Set([sid, frozen.sessionId, pinned.sessionId, direct.sessionId]).size, 4)
   assert.equal(b.json(fx.dir, 'review', 'main..feature', '--direct').sessionId, direct.sessionId)
 
-  // a review that ends at a fixed commit has nowhere to apply feedback
+  // a review that ends at a fixed commit has nowhere to make edits: its comments can
+  // still be sent, and the request says so (a commit cannot be asked for)
+  const F = ['--session', String(frozen.sessionId)]
   const c = await b.rpc('commentAdd', frozen.sessionId, { anchor: { kind: 'file', file: 'src/a.ts' }, text: 'Rename this.', author: 'user' })
-  await assert.rejects(b.rpc('requestCreate', frozen.sessionId, { kind: 'apply', commentIds: [c.id] }), /ends at a fixed commit, so there is nothing to edit/)
-  assert.equal(b.json(fx.dir, 'comments', '--session', String(frozen.sessionId))[0].status, 'queued')
+  const r = await b.rpc('requestCreate', frozen.sessionId, { kind: 'apply', commentIds: [c.id], commit: true })
+  assert.deepEqual([r.editable, r.commit, r.replyIds], [false, false, []])
+  const out = b.gr(fx.dir, 'wait', '--timeout', '10', ...F)
+  assert.match(out, new RegExp(`REQUEST ${r.id} apply\\n  review #${frozen.sessionId}: main \\(moving branch\\) → \\w+ \\(frozen\\)`))
+  assert.match(out, /commit: no/)
+  assert.match(out, /this comparison cannot be edited \(it ends at a fixed commit, or its branch is not checked out\): do not change files/)
+  assert.doesNotMatch(out, /edit in:|do NOT commit|asked for the edits to be committed/)
+  b.gr(fx.dir, 'reply', c.id, '--text', 'That needs the branch; this review is pinned to a commit.', ...F)
+  b.gr(fx.dir, 'resolve', c.id, '--verdict', 'skipped', '--note', 'Cannot edit a fixed commit.', ...F)
+  assert.match(b.gr(fx.dir, 'done', r.id, ...F), new RegExp(`\\[${c.id}\\] skipped — Cannot edit a fixed commit\\.`))
+  assert.equal(b.json(fx.dir, 'comments', ...F)[0].status, 'resolved')
 
   assert.equal(b.json(fx.dir, 'sessions').length, 5)
   b.gr(fx.dir, 'archive', String(pinned.sessionId))

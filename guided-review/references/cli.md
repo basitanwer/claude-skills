@@ -90,7 +90,7 @@ Common options: `--repo DIR` (default: cwd), `--session N` (default: the review 
 | `viewed --file P [--unset]` · `section-reviewed ID [--unset]` | Set review-tracking marks (normally the reviewer does this in the UI). |
 | `approve --confirmed-by-user` · `unapprove` | Record or withdraw approval of the exact current state. Refused without the flag. |
 
-**Requests** (see next section): `wait [--timeout S] [--on-change]`, `requests [--all]`, `answer REQ --text T [<anchor>] [--stop …]`, `progress REQ "text"`, `done REQ [--text T]`, `fail REQ --text reason`.
+**Requests** (see next section): `listen [--on-change]`, `wait [--timeout S] [--on-change]`, `requests [--all]`, `answer REQ --text T [<anchor>] [--stop …]`, `progress REQ "text"`, `done REQ [--text T]`, `fail REQ --text reason`, `batch --file ops.json`.
 
 **Server**: `serve [--port N]`, `stop`, `status`, `doctor`, `rpc <channel> '[json args]'` (raw call).
 
@@ -98,25 +98,48 @@ Exit codes: `0` ok, `1` usage error or refused, `3` server unreachable, `130` th
 
 ## Requests from the reviewer
 
-The UI cannot do agent work itself. Its "Ask Claude Code" buttons create **requests**, stored in the review, that the attached session claims with `gr wait` and completes with one command. Walkthrough, question, and apply are distinct kinds with distinct completions.
+The page cannot do agent work itself. What the reviewer does there that needs Claude Code becomes a **request**, stored in the review, that the attached session receives and completes with one command. Walkthrough, question, and apply are distinct kinds with distinct completions.
 
 | Kind | Created by | Carries | Completed by |
 |---|---|---|---|
-| `walkthrough` | Generate / Update walkthrough | optional steer; `update` flag | `gr annotate --file F --request ID` |
-| `question` | The conversation box, optionally "about this line" | the question, optional anchor with the line's text | `gr answer ID --text "…"` (an anchor or `--stop`s attach clickable focus/tour chips) |
-| `apply` | "Send N to Claude Code" on queued comments | comment ids (now `sent`), optional steer, `commit` flag | edits, `gr resolve` per comment, then `gr done ID` |
+| `walkthrough` | Ask for / Update walkthrough | optional steer; `update` flag | `gr annotate --file F --request ID` |
+| `question` | The Conversation box, or "Ask Claude Code" on a line | the question, optional anchor with the line's text | `gr answer ID --text "…"` (an anchor or `--stop`s attach clickable focus/tour chips; the first one also plays live) |
+| `apply` | Review ▾ → Send | every pending comment and every thread with a pending reply; optional note; `commit`; `editable` | `gr reply` / edits + `gr resolve` per item, then `gr done ID` |
 | `decisions` | Answering the walkthrough's open questions | the answer comments | updated walkthrough, `gr resolve` per answer, then `gr done ID` |
 
-Lifecycle: `pending` → `running` (claimed by `gr wait`) → `done` | `failed` | `cancelled`.
+Lifecycle: `pending` → `running` (claimed by a listener) → `done` | `failed` | `cancelled`.
 
-- **Waiting.** `gr wait` blocks until at least one request is pending, claims all pending requests, prints them, and exits. Run it in the background so its exit wakes the session. `--timeout S` gives up after S seconds (prints `no requests`). `--on-change` also returns when the code under review changes.
-- **Progress.** `gr progress ID "text"` appends a line the UI shows live under the request.
-- **Cancellation.** The reviewer can cancel a pending or running request. A pending one is simply never delivered. For a running one, the next `gr progress`, `gr answer`, `gr done` or `gr annotate --request` for it fails with exit code 130; stop working on it. Cancellation is therefore as prompt as the session's next progress report, not instant.
-- **Failure.** `gr fail ID --text "why"` ends a request with a reason the UI shows.
-- **Unresolved comments.** When an apply or decisions request ends in any way, comments still `sent` return to `queued`, so nothing is lost.
-- **Permissions.** Edits are made by this Claude Code session with its normal tools, so Claude Code's own permission prompts and settings apply. The UI has no permission controls.
-- **Presence.** The UI shows whether a session is attached: *listening* while a `gr wait` is connected, *working* for two minutes after any `gr` call for that review or while a request is running, otherwise *not attached*. Requests made while nothing is attached wait until a session runs `gr wait`.
+**Threads are two-way.** A reply the reviewer types under any comment — Claude's note, their own comment, a resolved thread — is stored as *pending*, like a new comment, and is delivered with the next Review ▾ send. The session answers in the same thread with `gr reply`. `replyIds` on the request names the threads that were sent only because of a new reply; `gr` marks those replies as new.
+
+**Receiving requests**
+
+- `gr listen` is the persistent listener, meant to be the command of a Claude Code Monitor. It covers every review of the repository, never exits by itself, reconnects if the server restarts, and prints one compact JSON line per event: `ready`, `request` (with a `do` field holding the completing command, `--session N` included), `cancelled`, `error`, and with `--on-change` `changed`. On start it also re-delivers requests an earlier session claimed and never finished (`"resumed": true`), so nothing is lost when a session ends mid-request. A Monitor lasts at most 30 minutes; start it again when it expires.
+- `gr wait [--timeout S] [--on-change]` is the fallback without a Monitor tool: it blocks until requests exist, claims them, prints one `REQUEST <id> <kind>` block each, and exits. Run it in the background so its exit wakes the session, and again after handling them.
+
+**During a request**
+
+- **Progress.** `gr progress ID "text"` appends a line the page shows live under the request, next to an elapsed-time counter.
+- **Cancellation.** The reviewer can cancel a pending or running request. `gr listen` prints a `cancelled` line at once; in any case the next `gr progress`, `gr answer`, `gr done` or `gr annotate --request` for it fails with exit code 130.
+- **Stuck requests.** If a running request shows no progress for five minutes the page offers "Send again", which puts it back in the queue for the next listener.
+- **Failure.** `gr fail ID --text "why"` ends a request with a reason the page shows.
+- **Unresolved comments.** When an apply or decisions request ends in any way, comments still `sent` return to pending, so nothing is lost.
+- **Edits and permissions.** Edits are made by this Claude Code session with its normal tools, so Claude Code's own permission prompts and settings apply; the skill additionally has the session confirm in the terminal before the first edit a request asks for. A request on a fixed commit has `editable: false`: it can be answered but not edited.
+- **Presence.** The page shows whether a session is attached: *listening* while `gr listen` or `gr wait` is connected, *working* for two minutes after any `gr` call for that review or while a request is running, otherwise *not attached*. Requests made while nothing is attached wait.
 - **Notifications.** Completing a request or storing a walkthrough notifies the reviewer: a browser notification when the tab is in the background, or a macOS banner when no tab is open on that review.
+
+**Batching writes.** `gr batch --file ops.json` (`-` = stdin) applies a JSON array of operations as one atomic update: either all are applied and the page refreshes once, or none is and the error names the failing operation. Each operation is an object with `op` and the same fields as the matching command's flags:
+
+```json
+[
+  {"op": "comment", "file": "src/a.ts", "line": 12, "expect": "retry(", "text": "Unbounded retry."},
+  {"op": "reply", "id": "c4", "text": "It is called from two places; both pass a budget."},
+  {"op": "resolve", "id": "c7", "verdict": "addressed", "note": "Capped at 5."},
+  {"op": "answer", "request": "r3", "text": "Because …", "file": "src/a.ts", "line": 12},
+  {"op": "done", "request": "r5"}
+]
+```
+
+Operations: `comment`, `reply`, `resolve`, `reopen`, `delete-comment`, `answer`, `note`, `progress`, `done`, `fail`, `annotate` (`walkthrough` object), `focus`, `viewed`.
 
 ## Anchors
 
@@ -175,7 +198,7 @@ Everything is local and human-readable: `<home>/sessions/<id>.json` holds one re
 The UI and `gr` use the same two endpoints. Both reject requests whose `Origin` does not match `Host`, and (without a token) any `Host` that is not a loopback name, which blocks cross-site requests and DNS rebinding.
 
 - `POST /rpc/<channel>` with a JSON array of arguments → `{"value": …}` or HTTP 400 `{"error": "…"}`.
-- `GET /events?session=<id>` (Server-Sent Events; `&ui=1` for a browser tab, `&bridge=1` for `gr wait`) → frames `{"channel", "msg"}` on `session:changed`, `repo:changed`, `ui:action`, `presence`, `notify`.
+- `GET /events?session=<id>` (Server-Sent Events; `&ui=1` for a browser tab, `&bridge=1` for `gr wait`; `?bridge=1&repo=<path>` for `gr listen`, every review of a repository) → frames `{"channel", "msg"}` on `session:changed`, `repo:changed`, `ui:action`, `presence`, `request:cancelled`, `notify`.
 
 Every channel, argument and data shape is declared in `app/shared/types.ts` (`Api`, `PushMap`). The server is `app/server/` (`main.mjs` HTTP and handlers, `review.mjs` assembly, anchors and reconciliation, `git.mjs` git access, `store.mjs` persistence).
 

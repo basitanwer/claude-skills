@@ -18,6 +18,12 @@ diffs, branch sides keyed by name and commit sides by SHA, walkthroughs reconcil
 against the diff, exact-text comment re-anchoring, approval of an exact surface, and
 `GIT_OPTIONAL_LOCKS`-safe polling.
 
+The interaction model — the reviewer's actions in the page delivered to the agent as
+events through a listener that wakes it, every comment thread being a two-way
+conversation, and the agent writing several changes as one atomic batch — follows
+**grill-with-ui** by Jason Ku (https://github.com/jasonku09/grill-with-ui, MIT). No
+code from it is included.
+
 Build-time dependencies of the web UI (React, Zustand, highlight.js, react-markdown,
 remark-gfm, Vite, TypeScript) are installed from npm under their own open-source
 licenses; see `package.json`. The server and the `gr` bridge have no dependencies.

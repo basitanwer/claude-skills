@@ -102,6 +102,8 @@ interface Store {
   /** Ask the attached Claude Code session for something. */
   request(input: { kind: RequestKind; text?: string; anchor?: AnchorInput; commentIds?: string[]; update?: boolean; commit?: boolean }): Promise<ReviewRequest | null>
   cancelRequest(id: string): Promise<void>
+  /** Put a request a session claimed but seems to have dropped back in the queue. */
+  retryRequest(id: string): Promise<void>
   dismissRequest(id: string): void
 
   setTab(tab: Tab): void
@@ -564,6 +566,16 @@ export const useStore = create<Store>((set, get) => {
       if (id == null) return
       try {
         const r = await api.requestCancel(id, requestId)
+        patchState((s) => ({ ...s, requests: s.requests.map((x) => (x.id === r.id ? r : x)) }))
+        get().softReload()
+      } catch (e) { fail(e) }
+    },
+
+    async retryRequest(requestId) {
+      const id = get().sessionId
+      if (id == null) return
+      try {
+        const r = await api.requestRetry(id, requestId)
         patchState((s) => ({ ...s, requests: s.requests.map((x) => (x.id === r.id ? r : x)) }))
         get().softReload()
       } catch (e) { fail(e) }

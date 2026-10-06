@@ -127,7 +127,11 @@ export type AnchorInput =
   | { kind: 'artifact'; path: string; line: number; expect?: string }
   | Exclude<CommentAnchor, { kind: 'diff' } | { kind: 'artifact' }>
 
-export interface CommentReply { author: 'user' | 'agent'; text: string; at: string }
+export interface CommentReply {
+  author: 'user' | 'agent'; text: string; at: string
+  /** a reviewer's reply that has not been sent to Claude Code yet */
+  pending?: boolean
+}
 export interface Comment {
   id: string
   anchor: CommentAnchor
@@ -179,8 +183,14 @@ export interface ReviewRequest {
   /** question text, or the reviewer's steer for walkthrough / apply */
   text?: string
   anchor?: CommentAnchor
-  /** apply / decisions: the comments handed over */
+  /** apply / decisions: the comments handed over (new comments and threads with new replies) */
   commentIds?: string[]
+  /** apply: the subset of `commentIds` sent only because the reviewer replied in the thread */
+  replyIds?: string[]
+  /** apply: whether there is a working tree Claude Code could edit (false for a fixed commit) */
+  editable?: boolean
+  /** when a session claimed it */
+  startedAt?: string
   /** walkthrough: fold new changes into the existing one instead of starting over */
   update?: boolean
   /** apply: the reviewer asked for the edits to be committed */
@@ -334,10 +344,18 @@ export interface Api {
   // requests: the reviewer asks the attached Claude Code session for something
   requestCreate(sessionId: number, input: { kind: RequestKind; text?: string; anchor?: AnchorInput; commentIds?: string[]; update?: boolean; commit?: boolean }): Promise<ReviewRequest>
   requestCancel(sessionId: number, requestId: string): Promise<ReviewRequest>
+  /** Put a claimed request back in the queue (the session that took it seems to be gone). */
+  requestRetry(sessionId: number, requestId: string): Promise<ReviewRequest>
 
   // bridge: used by the Claude Code session through scripts/gr
   /** Claim every pending request (they become `running`). */
   requestTake(sessionId: number): Promise<ReviewRequest[]>
+  /** The same for every review of a repository. With `includeRunning`, requests an
+   *  earlier session claimed and never finished are handed over again. */
+  requestTakeAll(repo: string, includeRunning?: boolean): Promise<{ sessionId: number; request: ReviewRequest; comments: Comment[]; resumed: boolean }[]>
+  /** Several bridge calls as one atomic update: all succeed and the page refreshes once,
+   *  or none is applied and the error names the failing operation. */
+  batch(sessionId: number, ops: BatchOp[]): Promise<{ results: unknown[] }>
   /** Add a progress line and/or finish. Rejects with "cancelled" if the reviewer cancelled it. */
   requestUpdate(sessionId: number, requestId: string, patch: { progress?: string; status?: 'done' | 'failed'; error?: string }): Promise<ReviewRequest>
   /** Post an agent message; with `requestId` it answers that question and completes it. */
@@ -348,7 +366,14 @@ export interface Api {
   uiAction(sessionId: number, action: UiAction): Promise<{ tabs: number }>
 }
 
-// ── push: GET /events?session=<id>[&ui=1|&bridge=1] (Server-Sent Events) ──
+/** One step of `batch`: any of these bridge channels with its arguments after the session id. */
+export interface BatchOp {
+  channel: 'commentAdd' | 'commentUpdate' | 'commentDelete' | 'messagePost' | 'requestUpdate' | 'annotate' | 'uiAction' | 'setViewed' | 'setArtifacts'
+  args: unknown[]
+}
+
+// ── push: GET /events?session=<id>[&ui=1|&bridge=1], or ?bridge=1&repo=<path> for
+//    every review of a repository (Server-Sent Events) ──
 export interface PushMap {
   /** review state changed (comment, walkthrough, request, message, approval…): reload */
   'session:changed': { sessionId: number }
@@ -356,5 +381,7 @@ export interface PushMap {
   'repo:changed': { sessionId: number; signature: string; headSha: string; dirty: boolean }
   'ui:action': { sessionId: number; action: UiAction }
   presence: { sessionId: number; presence: Presence }
+  /** the reviewer cancelled a request a session had claimed */
+  'request:cancelled': { sessionId: number; requestId: string }
   notify: { sessionId: number; title: string; body: string }
 }

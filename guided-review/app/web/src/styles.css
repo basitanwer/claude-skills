@@ -375,3 +375,9 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .tree-panel { overflow: visible; max-height: none; display: flex; flex-direction: column; }
 .tree-panel > .tree { overflow: auto; max-height: calc(100vh - 124px); }
 @media (max-width: 760px) { .tree-panel > .tree { max-height: 34vh; } }
+
+/* two-way threads */
+.thread-main.reply.pending { background: color-mix(in srgb, var(--warn-soft) 55%, var(--panel)); }
+.thread-main.reply.waiting { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.thread.folded .thread-head { margin: 0; flex-wrap: nowrap; min-width: 0; } .thread.folded { opacity: 0.9; }
+.review-pop .sub { margin-left: 22px; }
