@@ -451,6 +451,181 @@ export function reconcile(files, raw) {
   return { walkthrough: { title: str(raw.title).trim(), summary: str(raw.summary), sections, questions, ...(planMap ? { planMap } : {}) }, warnings }
 }
 
+// ── visual: the whole change as diagrams ─────────────────────
+/** How much one visual holds. More than this cannot be read as a picture. */
+export const VISUAL_MAX = { views: 6, nodes: 40, edges: 80, warnings: 40 }
+const VISUAL_KINDS = /** @type {Record<string, import('../shared/types.ts').VisualKind>} */ ({
+  architecture: 'architecture', components: 'architecture', modules: 'architecture',
+  flow: 'flow', data: 'flow', dataflow: 'flow', 'data-flow': 'flow',
+  calls: 'calls', callgraph: 'calls', 'call-graph': 'calls', functions: 'calls'
+})
+const VISUAL_TITLE = { architecture: 'Architecture', flow: 'Data flow', calls: 'Function calls' }
+/** Whether lines `start`..`end` of a changed file's new side are touched by the diff:
+ *  one of them was added, or lines were removed from between them or from right next to
+ *  them. A removal at the edge of a range counts for it: saying "changed" of a function
+ *  whose neighbour lost a line is the smaller mistake than saying "unchanged" of one that
+ *  lost its own first or last line.
+ *  @param {FileDiff} f @param {number} start @param {number} end */
+function touched(f, start, end) {
+  for (const h of f.hunks) {
+    // the new-side line a removed line comes after
+    let last = Number(/\+(\d+)/.exec(h.range)?.[1] ?? 1) - 1
+    for (const l of h.lines) {
+      if (l.new != null) { last = l.new; if (l.kind === 'add' && l.new >= start && l.new <= end) return true }
+      else if (l.kind === 'del' && last >= start - 1 && last <= end) return true
+    }
+  }
+  return false
+}
+/** Check the diagrams a session drew against git, the way a walkthrough is: nothing in
+ *  them is taken on trust that git can answer. A node's path has to be a file or a
+ *  directory git knows on the compare side (or one the diff removes), spelled as git
+ *  spells it, and its lines have to be there; whether the node is new, changed, deleted
+ *  or untouched is read from the diff, whatever the session said. What cannot be
+ *  confirmed is removed and reported, never guessed.
+ *  Only git is asked about a path the diff does not hold: the JSON may come from a session
+ *  that has just read somebody else's branch, and a path handed to the file system could
+ *  name a link out of the repository, a device or an ignored file.
+ *  @param {string} repo @param {LoadedReview} loaded @param {any} raw @param {ReturnType<typeof sideReader>} read */
+export async function reconcileVisual(repo, loaded, raw, read) {
+  const str = (/** @type {unknown} */ v) => (typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : '')
+  const cut = (/** @type {unknown} */ v, /** @type {number} */ n) => { const t = str(v).replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t }
+  /** An id, as a node declares it and as an edge refers to it. */
+  const idOf = (/** @type {unknown} */ v) => str(v).trim().slice(0, 80)
+  /** A line number as written: a whole number, or digits in a string. */
+  const num = (/** @type {unknown} */ v) => (typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v.trim()) ? Number(v) : NaN)
+  if (!raw || typeof raw !== 'object') throw new Error('a visual is a JSON object with "views"')
+  if (!Array.isArray(raw.views) || !raw.views.length) throw new Error('the visual needs at least one view with "nodes" and "edges"')
+  /** @type {string[]} */
+  const warnings = []
+  let unsaid = 0
+  const warn = (/** @type {string} */ w) => { if (warnings.length < VISUAL_MAX.warnings) warnings.push(w); else unsaid++ }
+  // an untracked file left out of the review is not part of the change
+  const files = loaded.files.filter((f) => !f.excluded)
+  /** What git has at a path in a commit. @type {Map<string, Promise<'file' | 'dir' | null>>} */
+  const kinds = new Map()
+  const kindAt = (/** @type {string} */ sha, /** @type {string} */ rel) => {
+    const key = `${sha}:${rel}`
+    if (!kinds.has(key)) kinds.set(key, tryGit(repo, ['cat-file', '-t', key]).then((t) => (t?.trim() === 'tree' ? 'dir' : t?.trim() === 'blob' ? 'file' : null)))
+    return /** @type {Promise<'file' | 'dir' | null>} */ (kinds.get(key))
+  }
+  /** Whether a directory the diff reaches into still holds a file on the compare side:
+   *  one the diff leaves there, or one git tracks that the diff neither removes nor moves away.
+   *  @param {string} rel @param {FileDiff[]} here */
+  const keeps = async (rel, here) => {
+    if (here.some((x) => x.status !== 'deleted')) return true
+    const gone = new Set(files.flatMap((x) => (x.status === 'deleted' ? [x.path] : x.oldPath ? [x.oldPath] : [])))
+    const tracked = ((await tryGit(repo, ['ls-tree', '-r', '--name-only', '-z', loaded.headSha, '--', rel])) ?? '').split('\0').filter(Boolean)
+    return tracked.some((p) => !gone.has(p))
+  }
+  /** The lines a node names, held to the file's length. @param {string} where @param {number | undefined} line @param {number | undefined} end @param {number | null} total */
+  const span = (where, line, end, total) => {
+    if (line == null) return {}
+    if (total == null || !Number.isInteger(line) || line < 1 || line > total) {
+      warn(`${where}:${Number.isNaN(line) ? '?' : line} is named, ${total == null ? 'but the file has no lines to name' : `but the file has ${total} lines`} — the line was removed`)
+      return {}
+    }
+    if (end == null || end === line) return { line }
+    if (!Number.isInteger(end) || end < line) { warn(`${where}:${line}: the range ends at ${Number.isNaN(end) ? '?' : end}, before it starts — only line ${line} was kept`); return { line } }
+    if (end > total) { warn(`${where}:${line}-${end}: the file has ${total} lines — the range was cut to ${line}-${total}`); end = total }
+    return end > line ? { line, end } : { line }
+  }
+  /** The code a node names, as git has it. @param {string} name @param {any} n */
+  const place = async (name, n) => {
+    // "path:start-end" in one field, or file / line / end apart
+    const at = /^(.*?)(?::(\d+)(?:-(\d+))?)?$/.exec(str(n?.at).trim())
+    const given = str(n?.file).trim() || at?.[1] || ''
+    if (!given) return { status: /** @type {const} */ ('none') }
+    const rel = given.replace(/\/+$/, '')
+    // the path as git spells it: no "." or ".." or empty part, so that one file has one name
+    if (!rel || given.length > 1000 || path.isAbsolute(rel) || rel.split('/').some((p) => p === '..' || p === '.' || p === '' || p.toLowerCase() === '.git')) {
+      warn(`${name} names ${JSON.stringify(given.slice(0, 200))}, which is not a path of the repository as git spells it — the path was removed`)
+      return { status: /** @type {const} */ ('none') }
+    }
+    const line = n?.line == null ? (at?.[2] ? Number(at[2]) : undefined) : num(n.line)
+    const end = n?.end == null ? (at?.[3] ? Number(at[3]) : undefined) : num(n.end)
+    const f = files.find((x) => x.path === rel) ?? files.find((x) => x.oldPath === rel)
+    if (f) {
+      const base = { file: f.path, inDiff: true }
+      if (f.status === 'deleted') return { ...base, status: /** @type {const} */ ('deleted') }
+      const full = f.binary ? null : await read(f, 'new')
+      const lines = span(`${name}: ${f.path}`, line, end, full ? full.length : null)
+      if (lines.line == null) return { ...base, status: f.status === 'added' ? /** @type {const} */ ('new') : /** @type {const} */ ('changed') }
+      return { ...base, ...lines, status: f.status === 'added' ? /** @type {const} */ ('new') : touched(f, lines.line, lines.end ?? lines.line) ? /** @type {const} */ ('changed') : /** @type {const} */ ('unchanged') }
+    }
+    // not a changed file: a directory (judged by the changed files in it and the ones the
+    // change took out of it), or something the change does not touch
+    const here = files.filter((x) => x.path.startsWith(`${rel}/`))
+    const left = files.filter((x) => x.oldPath?.startsWith(`${rel}/`) && !x.path.startsWith(`${rel}/`))
+    const kind = await kindAt(loaded.headSha, rel)
+    if ((here.length || left.length) && kind !== 'file') {
+      const existed = (await kindAt(loaded.diffBase, rel)) === 'dir'
+      const status = !(await keeps(rel, here)) ? /** @type {const} */ ('deleted') : existed ? /** @type {const} */ ('changed') : /** @type {const} */ ('new')
+      return { file: `${rel}/`, ...(here.length ? { inDiff: true } : {}), status }
+    }
+    if (!kind) {
+      warn(`${name} names ${rel}, which git does not have on the compare side — the path was removed`)
+      return { status: /** @type {const} */ ('none') }
+    }
+    if (kind === 'dir') return { file: `${rel}/`, status: /** @type {const} */ ('unchanged') }
+    // untouched, so the commit has it exactly as the compare side does
+    const text = line == null ? null : await tryGit(repo, ['show', `${loaded.headSha}:${rel}`])
+    const total = text == null ? null : text.split('\n').length - (text.endsWith('\n') || text === '' ? 1 : 0)
+    return { file: rel, ...span(`${name}: ${rel}`, line, end, total), status: /** @type {const} */ ('unchanged') }
+  }
+
+  if (raw.views.length > VISUAL_MAX.views) warn(`${raw.views.length} views given; a visual holds ${VISUAL_MAX.views} — the rest were dropped`)
+  /** @type {import('../shared/types.ts').VisualView[]} */
+  const views = []
+  const viewIds = new Set()
+  for (const [vi, v] of raw.views.slice(0, VISUAL_MAX.views).entries()) {
+    const asked = str(v?.kind).trim().toLowerCase()
+    const kind = Object.hasOwn(VISUAL_KINDS, asked) ? VISUAL_KINDS[asked] : undefined
+    if (!kind) warn(`view ${vi + 1} has kind ${JSON.stringify(cut(v?.kind, 40) || null)}; it is shown as "architecture" (kinds: architecture, flow, calls)`)
+    const title = cut(v?.title, 80) || VISUAL_TITLE[kind ?? 'architecture']
+    const rawNodes = Array.isArray(v?.nodes) ? v.nodes : []
+    /** @type {import('../shared/types.ts').VisualNode[]} */
+    const nodes = []
+    const ids = new Set()
+    // ids the session chose are taken first, so that a made-up one never collides with them
+    for (const n of rawNodes) if (idOf(n?.id)) ids.add(idOf(n.id))
+    const taken = new Set()
+    let auto = 0
+    for (const [ni, n] of rawNodes.entries()) {
+      if (nodes.length === VISUAL_MAX.nodes) { warn(`view "${title}" has more than ${VISUAL_MAX.nodes} nodes; a view holds ${VISUAL_MAX.nodes} — the rest were dropped`); break }
+      const label = cut(n?.label, 60)
+      if (!label) { warn(`view "${title}": node ${ni + 1} has no label — dropped`); continue }
+      let id = idOf(n?.id)
+      if (!id) { do id = `n${++auto}`; while (ids.has(id)); ids.add(id) }
+      if (taken.has(id)) { warn(`view "${title}": two nodes have the id ${JSON.stringify(id)} — the second was dropped`); continue }
+      taken.add(id)
+      const sub = cut(n?.sub, 90); const group = cut(n?.group, 40)
+      nodes.push({ id, label, ...(sub ? { sub } : {}), ...(group ? { group } : {}), ...(await place(`view "${title}": node "${label}"`, n)) })
+    }
+    if (nodes.length < 2) { warn(`view "${title}" has fewer than two nodes — dropped`); continue }
+    /** @type {import('../shared/types.ts').VisualEdge[]} */
+    const edges = []
+    const seen = new Set()
+    for (const e of Array.isArray(v?.edges) ? v.edges : []) {
+      if (edges.length === VISUAL_MAX.edges) { warn(`view "${title}" has more than ${VISUAL_MAX.edges} edges; a view holds ${VISUAL_MAX.edges} — the rest were dropped`); break }
+      const [from, to, label] = Array.isArray(e) ? [idOf(e[0]), idOf(e[1]), cut(e[2], 40)] : [idOf(e?.from), idOf(e?.to), cut(e?.label, 40)]
+      if (!taken.has(from) || !taken.has(to)) { warn(`view "${title}": an edge joins ${JSON.stringify(from)} and ${JSON.stringify(to)}, and ${JSON.stringify(taken.has(from) ? to : from)} is not a node of this view — dropped`); continue }
+      if (from === to) { warn(`view "${title}": an edge joins ${JSON.stringify(from)} to itself — dropped`); continue }
+      if (seen.has(`${from}\0${to}`)) { warn(`view "${title}": ${JSON.stringify(from)} → ${JSON.stringify(to)} is given twice — the second was dropped`); continue }
+      seen.add(`${from}\0${to}`)
+      const k = Array.isArray(e) ? e[3] : e?.kind
+      edges.push({ from, to, ...(label ? { label } : {}), kind: k === 'new' || k === 'removed' ? k : '' })
+    }
+    let id = idOf(v?.id) || title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `v${vi + 1}`
+    while (viewIds.has(id)) id = `${id}-${vi + 1}`
+    viewIds.add(id)
+    views.push({ id, kind: kind ?? 'architecture', title, caption: str(v?.caption).trim().slice(0, 600), nodes, edges })
+  }
+  if (!views.length) throw new Error('no view has two nodes or more; a view is { "kind", "title", "nodes": [{ "id", "label", "at": "path:start-end" }], "edges": [{ "from", "to" }] }')
+  if (unsaid) warnings.push(`…and ${unsaid} more correction(s) of the same kinds`)
+  return { visual: { title: cut(raw.title, 120), summary: str(raw.summary).trim().slice(0, 1200), views }, warnings }
+}
+
 // ── assembly ─────────────────────────────────────────────────
 /** Paths named by `git status --porcelain -z` entries ("XY path", renames are followed
  *  by their original path as a separate entry). @param {string[]} entries */
@@ -493,7 +668,7 @@ export async function assemble(store, session, opts) {
   /** @type {LoadedReview} */
   const loaded = {
     sessionId: session.id, session: meta, baseContext: await describeSide(repo, pair.base, null), compareContext: await describeSide(repo, pair.compare, now.workdir),
-    diffBase: '', headSha: now.headSha, files: [], commits: [], dirty: false, signature: '', state, artifacts: [], approved: false, approvalHash: '', walkthroughStale: false,
+    diffBase: '', headSha: now.headSha, files: [], commits: [], dirty: false, signature: '', state, artifacts: [], approved: false, approvalHash: '', walkthroughStale: false, visualStale: false,
     apply: { enabled: false, reason: 'frozen-commit', workdir: null }, presence: opts.presence ?? 'away',
     ...(viewing ? { view } : {})
   }
@@ -551,6 +726,8 @@ export async function assemble(store, session, opts) {
   loaded.approved = state.approvals.some((a) => a.hash === aHash)
   loaded.approvalHash = aHash
   loaded.walkthroughStale = Boolean(state.walkthrough) && (state.reviewedSignature ? state.reviewedSignature !== sig.signature : state.reviewedAtSha !== headSha)
+  // the diff base is part of it: a base branch that moves changes what every box's status should be
+  loaded.visualStale = Boolean(state.visual) && state.visual?.signature !== `${diffBase}:${sig.signature}`
   const lastApproval = state.approvals.find((a) => a.sha === headSha) ?? state.approvals.at(-1)
   const baseline = lastApproval?.sha ?? state.reviewedAtSha
   let changed = false

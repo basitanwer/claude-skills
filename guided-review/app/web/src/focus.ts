@@ -28,7 +28,7 @@ function find(sels: string[]): HTMLElement | null {
   return null
 }
 
-const TAB_NAMES: Record<Tab, string> = { conversation: 'Conversation', commits: 'Commits', spec: 'Spec & plan', files: 'Files changed' }
+const TAB_NAMES: Record<Tab, string> = { conversation: 'Conversation', commits: 'Commits', spec: 'Spec & plan', visual: 'Visualize', files: 'Files changed' }
 type Spot = NonNullable<ReturnType<typeof useStore.getState>['returnTo']>
 /** The reviewer's current position: the tab, the scroll position and, among the files,
  *  the file under the top of the window with how far down the window it starts. */
@@ -282,6 +282,24 @@ export async function focusChanged(r: ChangedRange): Promise<void> {
     else say(`${lines[0].toUpperCase()}${lines.slice(1)} of ${baseName(file.path)} ${r.end > r.start ? 'are' : 'is'} not there any more: the file changed after this fix was recorded.`)
   }
   window.requestAnimationFrame(tick)
+}
+/** Go to lines of a changed file and flash all of them: the code a box of a diagram
+ *  stands for. A jump like any other the reviewer did not aim at a line themselves. */
+export function focusLines(file: string, start: number, end: number): void {
+  focusAnchor({ kind: 'diff', file, side: 'new', line: start })
+  if (end <= start) return
+  // the lines of the range between the hunks are not on the page: have them fetched too
+  useStore.getState().revealLine(file, 'new', start, end)
+  // flash once every line of the range is on the page (as many as a jump fetches, for a
+  // very long one), or after a moment whatever of it is
+  const want = Math.min(end - start + 1, 400)
+  const have = (): number => new Set([...document.querySelectorAll<HTMLElement>(`[data-gr-file="${cssq(file)}"] [data-new]`)].map((el) => Number(el.dataset.new)).filter((n) => n >= start && n <= end)).size
+  let tries = 0
+  const tick = (): void => {
+    if (have() >= want || tries++ > 40) { if (have()) flashRange(file, { file, start, end, lineContent: '' }); return }
+    window.setTimeout(tick, 50)
+  }
+  window.setTimeout(tick, 60)
 }
 /** Flash every line of a range that is on the page, and bring the range into the window:
  *  centred when it fits, else with its first line near the top. */

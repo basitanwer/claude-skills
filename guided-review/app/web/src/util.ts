@@ -4,8 +4,8 @@ import type {
 } from '@shared/types'
 
 // ── routing ───────────────────────────────────────────────────
-export type Tab = 'conversation' | 'commits' | 'spec' | 'files'
-const TABS: Tab[] = ['conversation', 'commits', 'spec', 'files']
+export type Tab = 'conversation' | 'commits' | 'spec' | 'visual' | 'files'
+const TABS: Tab[] = ['conversation', 'commits', 'spec', 'visual', 'files']
 export type Route =
   | { name: 'dashboard' }
   | { name: 'hub'; path: string }
@@ -256,6 +256,7 @@ export function requestTitle(r: ReviewRequest): string {
       return `${r.editable === false ? 'Answer' : 'Address'} ${what || plural(n, 'comment')}${r.commit ? ' and commit the edits' : ''}`
     }
     case 'decisions': return `Fold ${plural(n, 'decision')} into the walkthrough`
+    case 'visualize': return r.update ? 'Redraw the diagrams of this change' : 'Draw this change as diagrams'
   }
 }
 

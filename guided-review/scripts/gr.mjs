@@ -479,6 +479,9 @@ function guidance(r, s) {
   if (r.kind === 'walkthrough') {
     return [`write the walkthrough${r.update ? ` (an update: see gr drift ${S})` : ''}, then: gr annotate --file <json> --request ${r.id} ${S}`]
   }
+  if (r.kind === 'visualize') {
+    return [`draw the whole change as diagrams (schema: ${path.join(SKILL, 'references', 'visual-schema.md')})${r.update ? ` (an update: the current ones are in gr state --json ${S}, under state.visual, drawn at the commit state.visual.endSha; the code has changed since, so read gr diff ${S} again)` : ''}, then: gr visualize --file <json> --request ${r.id} ${S}`]
+  }
   if (r.kind === 'decisions') return [`these are decisions, not code changes: update the walkthrough (gr annotate --file <json> ${S}), gr resolve each (${S}), then: gr done ${r.id} ${S}`]
   const steps = []
   const resolve = `gr resolve <commentId> ${S} --verdict addressed|reworked|skipped --note "…"`
@@ -527,7 +530,7 @@ function requestEvent(item, loaded) {
   // a follow-up comes with its thread so far, so it can be answered in context
   // (null: the review could not be read just now, so the earlier exchange is missing; gr state has it)
   if (r.follows) { ev.follows = r.follows; ev.thread = loaded ? earlier(r, loaded) : null }
-  if (r.kind === 'walkthrough') ev.update = Boolean(r.update)
+  if (r.kind === 'walkthrough' || r.kind === 'visualize') ev.update = Boolean(r.update)
   if (r.kind === 'apply') {
     ev.commit = Boolean(r.commit); ev.editable = r.editable !== false
     if (ev.editable && loaded?.apply.workdir) ev.workdir = loaded.apply.workdir
@@ -546,6 +549,9 @@ function printRequest(item, loaded) {
   if (r.retried) out('  (the reviewer pressed "Send again": if you are already handling it, carry on; do not start over)')
   if (r.kind === 'walkthrough') {
     out(r.update ? '  the reviewer asked for the walkthrough to be UPDATED for what changed since it was written' : '  the reviewer asked for a walkthrough of this comparison')
+    if (r.text) out(`  steer: ${r.text}`)
+  } else if (r.kind === 'visualize') {
+    out(r.update ? '  the reviewer asked for the diagrams of this change to be REDRAWN for what changed since they were drawn' : '  the reviewer asked to see this whole change as diagrams: its architecture, its data flow and its function calls')
     if (r.text) out(`  steer: ${r.text}`)
   } else if (r.kind === 'question') {
     if (r.follows) {
@@ -692,6 +698,13 @@ const builders = {
     return {
       channel: 'annotate', args: [o.walkthrough, ...(o.request ? [String(o.request)] : [])], ...(o.request ? { request: String(o.request) } : {}),
       lines: (res) => [`walkthrough stored: ${res.sections} section(s)${o.request ? ` (request ${o.request} done)` : ''}`, ...res.warnings.map((w) => `corrected against git: ${w}`)]
+    }
+  },
+  visualize(o) {
+    if (!o.visual || typeof o.visual !== 'object') fail('usage: gr visualize --file visual.json [--request ID]   (schema: references/visual-schema.md; "-" reads stdin)')
+    return {
+      channel: 'visualize', args: [o.visual, ...(o.request ? [String(o.request)] : [])], ...(o.request ? { request: String(o.request) } : {}),
+      lines: (res) => [`visual stored: ${res.views} diagram(s), ${res.nodes} node(s)${o.request ? ` (request ${o.request} done)` : ''}`, ...res.warnings.map((w) => `corrected against git: ${w}`)]
     }
   },
   focus(o) {
@@ -859,7 +872,7 @@ const commands = {
       return printJson(opt.full ? loaded : {
         sessionId, session: loaded.session, state: loaded.state, commits: loaded.commits, headSha: loaded.headSha, diffBase: loaded.diffBase,
         artifacts: loaded.artifacts.map((a) => ({ role: a.role, path: a.path, title: a.title })), dirty: loaded.dirty, apply: loaded.apply,
-        approved: loaded.approved, since: loaded.since ?? null, signature: loaded.signature, presence: loaded.presence, stats: d
+        approved: loaded.approved, since: loaded.since ?? null, signature: loaded.signature, visualStale: loaded.visualStale, presence: loaded.presence, stats: d
       })
     }
     const st = loaded.state; const w = st.walkthrough
@@ -877,8 +890,10 @@ const commands = {
         for (const v of w.planMap.deviations) out(`  DEVIATION: ${v.text}`)
       }
     }
+    const v = st.visual
+    out(`\nvisual: ${v ? `${v.views.map((x) => `${x.title} (${x.kind}, ${x.nodes.length} nodes)`).join(' · ')} · drawn at ${short(v.endSha)}${loaded.visualStale ? ' — the code CHANGED since' : ''}` : 'none yet (gr visualize)'}`)
     const viewed = loaded.files.filter((f) => f.viewed)
-    out(`\nviewed files: ${viewed.length}/${d.files}${viewed.length ? ` (${viewed.map((f) => `${f.path}${f.viewed === 'changed' ? ' — CHANGED since viewed' : ''}`).join(', ')})` : ''}`)
+    out(`viewed files: ${viewed.length}/${d.files}${viewed.length ? ` (${viewed.map((f) => `${f.path}${f.viewed === 'changed' ? ' — CHANGED since viewed' : ''}`).join(', ')})` : ''}`)
     const pending = pendingCount(st.comments)
     out(`comments: ${st.comments.length}${pending ? ` · ${pending} pending (written by the reviewer, not sent to Claude Code yet)` : ''}`); for (const c of st.comments) out(fmtComment(c))
     const open = st.requests.filter((r) => r.status === 'pending' || r.status === 'running')
@@ -924,6 +939,15 @@ const commands = {
     let walkthrough
     try { walkthrough = JSON.parse(src === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(src), 'utf8')) } catch (e) { fail(`cannot read walkthrough JSON: ${e.message}`) }
     await runAndPrint('annotate', { walkthrough, request: opt.request }, opt)
+  },
+
+  async visualize(pos, opt) {
+    const usage = 'usage: gr visualize --file visual.json [--request ID]   (schema: references/visual-schema.md; "-" reads stdin)'
+    const src = opt.file || pos[0]
+    if (!src) fail(usage)
+    let visual
+    try { visual = JSON.parse(src === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(src), 'utf8')) } catch (e) { fail(`cannot read the visual JSON: ${e.message}`) }
+    await runAndPrint('visualize', { visual, request: opt.request }, opt)
   },
 
   async comment(pos, opt) { await runAndPrint('comment', { ...opt, text: opt.text || pos.join(' ') }, opt) },
@@ -1187,6 +1211,7 @@ const commands = {
   review --resume [SPEC] [--list]        reopen a saved review
   diff [--file P] [--stat]   state   drift   sessions   open   archive [N]   unarchive N
   annotate --file walkthrough.json [--request ID]      store the walkthrough you wrote
+  visualize --file visual.json [--request ID]          store diagrams of the whole change (architecture, data flow, calls)
   comment <anchor> --text T   comments   reply   resolve   reopen   delete-comment
   focus <anchor>   tour --stop "path:line | note" …   say "text"   note "text" [<anchor>]
   listen [--on-change]                   persistent listener for a background Monitor: one JSON line

@@ -105,6 +105,49 @@ export interface Walkthrough {
 }
 export interface Iteration { n: number; at: string; endSha: string; title: string; summary: string }
 
+// ── visual: the whole change drawn as diagrams ───────────────
+/** What a diagram shows: the parts involved and how they depend on each other, how data
+ *  moves through the change, or which function calls which. */
+export type VisualKind = 'architecture' | 'flow' | 'calls'
+/** How a node's code stands in this comparison. Worked out by the server from git, never
+ *  taken from the session: `new` (the file is added), `changed` (the file, or the named
+ *  lines of it, changed: a line added in them, or removed in or right next to them), `deleted`, `unchanged` (it exists and this change does not touch
+ *  it), `none` (the node names no code: a browser, a database, a person). */
+export type VisualStatus = 'new' | 'changed' | 'deleted' | 'unchanged' | 'none'
+export interface VisualNode {
+  id: string
+  label: string
+  sub?: string
+  /** a path of the repository, checked against the compare side */
+  file?: string
+  /** with `file`: the first line of the code the node stands for, and its last (new side) */
+  line?: number
+  end?: number
+  /** the part of the system it belongs to; nodes of one group share a colour */
+  group?: string
+  status: VisualStatus
+  /** the file is part of the diff, so the page can go to it */
+  inDiff?: boolean
+}
+export interface VisualEdge {
+  from: string
+  to: string
+  label?: string
+  /** the session's reading of the change: this change adds or removes the connection */
+  kind: '' | 'new' | 'removed'
+}
+export interface VisualView { id: string; kind: VisualKind; title: string; caption: string; nodes: VisualNode[]; edges: VisualEdge[] }
+export interface Visual {
+  title: string
+  summary: string
+  views: VisualView[]
+  at: string
+  /** when it was drawn: the compare commit, and what identifies the comparison then
+   *  (the commit the diff started from, and the surface's fingerprint) */
+  endSha: string
+  signature: string
+}
+
 // ── comments ─────────────────────────────────────────────────
 export type CommentAnchor =
   | { kind: 'diff'; file: string; side: 'new' | 'old'; line: number; hunkRange: string; lineContent: string
@@ -189,13 +232,13 @@ export interface Message {
 }
 
 /** Work the reviewer asked the attached Claude Code session to do, from the UI. */
-export type RequestKind = 'walkthrough' | 'question' | 'apply' | 'decisions'
+export type RequestKind = 'walkthrough' | 'question' | 'apply' | 'decisions' | 'visualize'
 export type RequestStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled'
 export interface ReviewRequest {
   id: string
   kind: RequestKind
   status: RequestStatus
-  /** question text, or the reviewer's steer for walkthrough / apply */
+  /** question text, or the reviewer's steer for walkthrough / apply / visualize */
   text?: string
   anchor?: CommentAnchor
   /** question: the question this one follows up on, asked from that question's thread */
@@ -217,7 +260,8 @@ export interface ReviewRequest {
   retried?: number
   /** after "Send again": the session that held it, which gets it back if it is listening */
   wasWith?: string
-  /** walkthrough: fold new changes into the existing one instead of starting over */
+  /** walkthrough: fold new changes into the existing one instead of starting over.
+   *  visualize: redraw the existing diagrams for what changed since */
   update?: boolean
   /** apply: the reviewer asked for the edits to be committed */
   commit?: boolean
@@ -244,6 +288,8 @@ export interface ReviewView {
 }
 export interface ReviewState {
   walkthrough?: Walkthrough
+  /** the diagrams of the whole change, kept apart from the walkthrough (a new walkthrough leaves them) */
+  visual?: Visual
   iterations: Iteration[]
   comments: Comment[]
   messages: Message[]
@@ -289,6 +335,8 @@ export interface LoadedReview {
   approvalHash: string
   /** the code changed since the walkthrough was written (new commits or uncommitted edits) */
   walkthroughStale: boolean
+  /** the same for the diagrams: the code changed since they were drawn */
+  visualStale: boolean
   /** baseline of the `since` marks: the latest approval, else the last walkthrough */
   since?: { kind: 'approved' | 'reviewed'; sha: string; moved: boolean }
   /** where Claude Code can make edits for an apply request */
@@ -396,13 +444,16 @@ export interface Api {
   messagePost(sessionId: number, input: { text: string; requestId?: string; actions?: UiAction[] }): Promise<Message>
   /** Store a walkthrough; it is reconciled against the live diff. */
   annotate(sessionId: number, walkthrough: unknown, requestId?: string): Promise<{ sections: number; warnings: string[] }>
+  /** Store the diagrams of the whole change; files and lines are checked against git and
+   *  each node's status is worked out from the diff. */
+  visualize(sessionId: number, visual: unknown, requestId?: string): Promise<{ views: number; nodes: number; warnings: string[] }>
   /** Push a UI action to the tabs showing this review. Targets are validated against the diff. */
   uiAction(sessionId: number, action: UiAction): Promise<{ tabs: number }>
 }
 
 /** One step of `batch`: any of these bridge channels with its arguments after the session id. */
 export interface BatchOp {
-  channel: 'commentAdd' | 'commentUpdate' | 'commentDelete' | 'messagePost' | 'requestUpdate' | 'annotate' | 'uiAction' | 'setViewed' | 'setArtifacts'
+  channel: 'commentAdd' | 'commentUpdate' | 'commentDelete' | 'messagePost' | 'requestUpdate' | 'annotate' | 'visualize' | 'uiAction' | 'setViewed' | 'setArtifacts'
   args: unknown[]
 }
 

@@ -12,6 +12,7 @@ import {
 import { AwayHint, CopyButton, DiffStat, FileIcon, Icon, Md, Menu, MenuItem, PresenceDot, currentTheme, setTheme } from '../components/common'
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
 import { FileBox, hoveredLine } from '../components/diff'
+import { VisualTab } from '../components/visual'
 import { TopBar } from './Home'
 
 function useTick(ms: number): void {
@@ -131,7 +132,7 @@ function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
         return (
           <div key={r.id} className={'req-row ' + r.status} data-gr-request={r.id} data-gr-request-kind={r.kind} data-gr-request-status={r.status}>
             {isOpen(r) ? <span className="spinner" /> : <Icon name="x" size={14} />}
-            <button className="link strong" onClick={() => setTab('conversation')}>{requestTitle(r)}</button>
+            <button className="link strong" onClick={() => setTab(r.kind === 'visualize' ? 'visual' : 'conversation')}>{requestTitle(r)}</button>
             <span className="muted" data-gr="request-state">
               {r.status === 'pending' ? 'waiting for Claude Code' : r.status === 'running' ? `${stuck === 'away' ? 'picked up' : 'working for'} ${elapsed(r.startedAt) || '0s'}${stuck === 'away' ? ' ago' : ''}` : `failed: ${r.error ?? 'no reason given'}`}
             </span>
@@ -164,6 +165,7 @@ function Tabs({ loaded }: { loaded: LoadedReview }) {
     { id: 'conversation', label: 'Conversation', icon: 'comment', n: conv },
     { id: 'commits', label: 'Commits', icon: 'commit', n: loaded.commits.length },
     ...(hasSpec ? [{ id: 'spec' as Tab, label: 'Spec & plan', icon: 'book', n: loaded.artifacts.length }] : []),
+    { id: 'visual', label: 'Visualize', icon: 'graph', n: loaded.state.visual?.views.length ?? 0 },
     { id: 'files', label: 'Files changed', icon: 'file', n: files.length }
   ]
   return (
@@ -1208,6 +1210,7 @@ export function Review() {
           {tab === 'conversation' && <ConversationTab loaded={loaded} />}
           {tab === 'commits' && <CommitsTab loaded={loaded} />}
           {tab === 'spec' && <SpecTab loaded={loaded} />}
+          {tab === 'visual' && <VisualTab loaded={loaded} />}
           {tab === 'files' && stale.length > 0 && (
             <div className="unplaced page-level" data-gr="outdated">
               <div className="unplaced-head">Outdated comments — the lines they were written on are gone</div>

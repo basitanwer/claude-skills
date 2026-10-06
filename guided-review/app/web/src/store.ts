@@ -29,7 +29,8 @@ export interface Drift { signature: string; summary: DriftSummary | null }
 interface PreviewInputs { repo: string; base: string; compare: string; direct: boolean; fresh: boolean }
 export type DiffView = 'split' | 'unified'
 /** A diff line the review was asked to show; a file box reveals it if it lies outside the hunks. */
-export interface Reveal { file: string; side: 'old' | 'new'; line: number; seq: number }
+/** `end`: with side `new`, show the whole range `line`..`end`, not only the lines round `line` */
+export interface Reveal { file: string; side: 'old' | 'new'; line: number; end?: number; seq: number }
 const TREE_W = { min: 200, max: 600, def: 300 }
 export const treeWidthLimits = TREE_W
 function storedTreeWidth(): number {
@@ -84,6 +85,10 @@ interface Store {
   excludedOpen: boolean
   diffMode: DiffMode
   docPath: string | null
+  /** the diagram open in the Visualize tab, by view id (null: the first one) */
+  visualView: string | null
+  /** the box of that diagram the reviewer last picked: it stays marked, so it is found again on the way back from its code */
+  visualNode: string | null
   composer: string | null
   tour: Tour | null
   /** Where the reviewer was before a jump took them to another tab or far down the same
@@ -135,7 +140,7 @@ interface Store {
   setTab(tab: Tab): void
   /** Change the view (hide whitespace / one commit) and reload under it. */
   setView(patch: ReviewView): Promise<void>
-  revealLine(file: string, side: 'old' | 'new', line: number): void
+  revealLine(file: string, side: 'old' | 'new', line: number, end?: number): void
   setTreeWidth(px: number | null): void
   setDiffView(view: DiffView): void
   setTreeView(view: 'tree' | 'list'): void
@@ -143,7 +148,7 @@ interface Store {
   setFileOpen(path: string, open: boolean): void
   setFileLoaded(path: string): void
   setSectionOpen(id: string, open: boolean): void
-  set(patch: Partial<Pick<Store, 'excludedOpen' | 'diffMode' | 'docPath' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'fileQuery'>>): void
+  set(patch: Partial<Pick<Store, 'excludedOpen' | 'diffMode' | 'docPath' | 'visualView' | 'visualNode' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'fileQuery'>>): void
   applyAction(action: UiAction): void
 
   onStreamOpen(): void
@@ -272,7 +277,7 @@ export const useStore = create<Store>((set, get) => {
     set({
       loaded, sessionId, preview, loading: false,
       viewedAt: loaded.state.viewedAt, reviewedSections: loaded.state.reviewedSections,
-      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, sectionOpen: {}, excludedOpen: false, diffMode: 'all', docPath: null,
+      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, sectionOpen: {}, excludedOpen: false, diffMode: 'all', docPath: null, visualView: null, visualNode: null,
       composer: null, tour: null, returnTo: null, sectionPanel: null, fileQuery: '', wsOnly: []
     })
     refreshWsOnly()
@@ -297,6 +302,8 @@ export const useStore = create<Store>((set, get) => {
     excludedOpen: false,
     diffMode: 'all',
     docPath: null,
+    visualView: null,
+    visualNode: null,
     composer: null,
     tab: 'files',
     view: {},
@@ -652,8 +659,8 @@ export const useStore = create<Store>((set, get) => {
       syncHash(route)
       await get().reload()
     },
-    revealLine(file, side, line) {
-      set({ reveal: { file, side, line, seq: (get().reveal?.seq ?? 0) + 1 } })
+    revealLine(file, side, line, end) {
+      set({ reveal: { file, side, line, ...(end != null && end > line ? { end } : {}), seq: (get().reveal?.seq ?? 0) + 1 } })
     },
     setTreeWidth(px) {
       const w = px == null ? TREE_W.def : Math.round(Math.min(TREE_W.max, Math.max(TREE_W.min, px)))

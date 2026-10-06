@@ -8,7 +8,7 @@ Contents: [Verified column](#verified-column) · [Limn features and what became 
 
 ## Verified column
 
-- **T:** an automated integration test in `app/tests/` (`loop` = `loop.test.mjs`, 15 tests; `sem` = `semantics.test.mjs`, 14 tests; `filelines.test.mjs`, 6 tests for expand-context, comments outside the hunks, hide whitespace, single-commit view and the list's approved state; `idle.test.mjs`, 1 test; plus tests for `gr listen`, `gr batch`, two-way thread replies and request retry). They drive the real server through `gr` against real git repositories, and play the browser's part by calling the same HTTP channels the UI calls. All 89 pass.
+- **T:** an automated integration test in `app/tests/` (`loop` = `loop.test.mjs`, 15 tests; `sem` = `semantics.test.mjs`, 14 tests; `filelines.test.mjs`, 6 tests for expand-context, comments outside the hunks, hide whitespace, single-commit view and the list's approved state; `idle.test.mjs`, 1 test; plus tests for `gr listen`, `gr batch`, two-way thread replies, request retry and `gr visualize`). They drive the real server through `gr` against real git repositories, and play the browser's part by calling the same HTTP channels the UI calls. All 96 pass.
 - **UI:** exercised in Chrome against the running server, with HTTP calls standing in for the Claude Code session.
 - **UI + gr:** additionally re-checked in Chrome with the real `gr` as the session: a review with a walkthrough rendered, the indicator read *listening* while `gr wait` was blocked, a question created from the page woke `gr wait`, the indicator read *working*, a `gr progress` line was accepted, and `gr answer` with an anchor scrolled the tab to the cited line and cleared the request. No console errors.
 - **UI (built):** implemented and compiles, but that control was not exercised.
@@ -89,6 +89,7 @@ Requested for this skill and not in Limn.
 | A13 | Any number of reviews watched at once; polling never takes git's index lock | `main.mjs` watcher, `git.mjs` | T sem (two reviews) |
 | A14 | No dependencies at run time; Node 20; human-readable storage | `app/server`, `store.mjs` | T (all) |
 | A15 | Guided mode: going through the walkthrough section by section beside the code. The section panel's arrows and its "Reviewed, next" bring the diff to the section's first file not yet viewed (no "Back to …" pill; held-back diffs stay held); "n / m sections" in the Files toolbar is the way in and shows progress; a reviewed section carries a tick on its files' chips, its row in the grouped tree and the panel's head; the file tree and the panel's file list mark the file under the top of the window, and the tree scrolls itself to keep that row in view | UI (`focus.ts` `goToSection`, `followFiles`; `Review.tsx`) | UI |
+| A16 | "Visualize this PR": the whole change as diagrams (architecture, data flow, function calls) in a Visualize tab. The session describes boxes and connections as data (`gr visualize`, answering a `visualize` request); the server checks every path and line against git and works out each box's status (new / changed / deleted / unchanged) from the diff; the page lays the boxes out in layers and draws them as SVG, with no diagram library and no markup from the session. A box with code in the diff goes to that code and flashes its lines; hovering shows what a box connects to; a banner says when the code changed since the drawing and asks for a redraw | `review.mjs` `reconcileVisual`, `main.mjs` `visualize`, `gr.mjs`, UI (`graph.ts`, `components/visual.tsx`), `references/visual-schema.md` | T (`visual.test.mjs`, 7 tests); UI + gr (three diagrams of a 19-file change and one with cycles, a deleted file and over-long labels; request from the page, progress, completion; box → code → Back; dark and light, 1440px and 390px) |
 
 ## Not carried over
 
@@ -121,7 +122,7 @@ Requested for this skill and not in Limn.
 
 ```bash
 cd ~/.claude/skills/guided-review/app
-npm test            # 89 integration tests, about 210 s, needs only Node and git
+npm test            # 96 integration tests, about 215 s, needs only Node and git
 npx tsc --noEmit    # contract + web UI type-check (needs the dev dependencies)
 ../scripts/demo.sh  # the whole loop on a throwaway repository, browser open
 ```

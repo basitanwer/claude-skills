@@ -79,6 +79,7 @@ Common options: `--repo DIR` (default: cwd), `--session N` (default: the review 
 | Command | Purpose |
 |---|---|
 | `annotate --file F.json` (`-` = stdin) `[--request ID]` | Store the walkthrough (see walkthrough-schema.md). |
+| `visualize --file F.json` (`-` = stdin) `[--request ID]` | Store diagrams of the whole change: architecture, data flow, function calls (see visual-schema.md). Paths and lines are checked against git (only git: the file system is not asked about a path); each box's status comes from the diff. A `visualize` request is completed only by this command, not by `annotate --request`. |
 | `artifact add PATH --role spec\|plan` · `artifact remove PATH` · `artifact list` | Attach or detach spec/plan files the review is judged against. |
 | `comment <anchor> --text T [--expect TEXT] [--as user] [--queued]` | Add a comment. From this session it is a `note`; `--queued` or `--as user` puts it in the reviewer's queue. |
 | `comments [--status note\|queued\|sent\|answered\|resolved\|outdated]` | List comments. |
@@ -106,10 +107,11 @@ The page cannot do agent work itself. What the reviewer does there that needs Cl
 | `question` | The Conversation box, "Ask Claude Code" on a line, or a follow-up typed in a Question thread | the question, optional anchor with the line's text; for a follow-up also `follows` and the `thread` so far | `gr answer ID --text "…"` (an anchor or `--stop`s attach clickable focus/tour chips; the first one also plays live) |
 | `apply` | Review ▾ → Send | every pending comment and every thread with a pending reply; optional note; `commit`; `editable` | `gr reply` / edits + `gr resolve` per item (with `--changed` for the lines edited), then `gr done ID` |
 | `decisions` | Answering the walkthrough's open questions | the answer comments | updated walkthrough, `gr resolve` per answer, then `gr done ID` |
+| `visualize` | "Visualize this PR" in the Visualize tab, or "Ask Claude Code to redraw them" when the code changed since | optional steer; `update` flag (the current diagrams are in `gr state --json`, `state.visual`) | `gr visualize --file F --request ID` |
 
 Lifecycle: `pending` → `running` (claimed by a listener) → `done` | `failed` | `cancelled`.
 
-**A claimed request has an owner**: the Claude Code session that claimed it (`gr` sends that session's id with every call; outside Claude Code there is none and the request is simply claimed). While its owner is alive, no other session is handed it. An owner is alive while one of its listeners is connected, and for a while after it was last heard from: two minutes for a session that uses `gr listen` (the gap is its listener being restarted), five for one that uses `gr wait` (it is disconnected while it works). After that the request is orphaned, and a session that is listening, or starts to, receives it with `"resumed": true, "yours": false`. The session it was taken from is told at its next call for that request (`gr progress`, `answer`, `done`, `annotate --request`, or a batch containing one), which fails with exit code 130 and `DISPLACED`. Two limits: a session that makes no `gr` call for longer than its grace period while another session is listening loses its request this way, so post `gr progress` during long work; and after the server restarts, every owner is given the grace period again from the restart, since what the server knew about who is alive is not kept on disk. A request claimed without an owner id is held for as long as a listener without one is connected, or its review heard from a session within the grace period.
+**A claimed request has an owner**: the Claude Code session that claimed it (`gr` sends that session's id with every call; outside Claude Code there is none and the request is simply claimed). While its owner is alive, no other session is handed it. An owner is alive while one of its listeners is connected, and for a while after it was last heard from: two minutes for a session that uses `gr listen` (the gap is its listener being restarted), five for one that uses `gr wait` (it is disconnected while it works). After that the request is orphaned, and a session that is listening, or starts to, receives it with `"resumed": true, "yours": false`. The session it was taken from is told at its next call for that request (`gr progress`, `answer`, `done`, `annotate --request`, `visualize --request`, or a batch containing one), which fails with exit code 130 and `DISPLACED`. Two limits: a session that makes no `gr` call for longer than its grace period while another session is listening loses its request this way, so post `gr progress` during long work; and after the server restarts, every owner is given the grace period again from the restart, since what the server knew about who is alive is not kept on disk. A request claimed without an owner id is held for as long as a listener without one is connected, or its review heard from a session within the grace period.
 
 **Threads are two-way.** A reply the reviewer types under any comment — Claude's note, their own comment, a resolved thread — is stored as *pending*, like a new comment, and is delivered with the next Review ▾ send. The session answers in the same thread with `gr reply`. `replyIds` on the request names the threads that were sent only because of a new reply; `gr` marks those replies as new.
 
@@ -123,7 +125,7 @@ Lifecycle: `pending` → `running` (claimed by a listener) → `done` | `failed`
 **During a request**
 
 - **Progress.** `gr progress ID "text"` appends a line the page shows live under the request, next to an elapsed-time counter.
-- **Cancellation.** The reviewer can cancel a pending or running request. `gr listen` prints a `cancelled` line at once; in any case the next `gr progress`, `gr answer`, `gr done` or `gr annotate --request` for it fails with exit code 130.
+- **Cancellation.** The reviewer can cancel a pending or running request. `gr listen` prints a `cancelled` line at once; in any case the next `gr progress`, `gr answer`, `gr done`, `gr annotate --request` or `gr visualize --request` for it fails with exit code 130.
 - **Stuck requests.** If a running request shows no progress for five minutes, or sooner when no session is reachable, the page offers "Send again". That clears the request's owner and puts it back in the queue; it is delivered with `"retried": true`, to the session that had it if that session is listening, otherwise to whichever listener asks first.
 - **Failure.** `gr fail ID --text "why"` ends a request with a reason the page shows.
 - **Comments without an outcome.** When an apply or decisions request ends in any way, a comment still `sent` goes one of two ways. If the request was an apply and Claude Code replied to the comment during it, the comment becomes `answered`: an open thread that is no longer waiting to be sent (the reviewer can reply again, or resolve it). One it never touched returns to pending, so nothing is lost. The same holds for a reply: a thread sent only for the reviewer's reply, and neither answered nor resolved, has that reply pending again (unless a later request that is still open already carries the thread). Reply before finishing: a `gr reply` made after `gr done` does not clear a reply that `done` has just given back.
@@ -144,7 +146,7 @@ Lifecycle: `pending` → `running` (claimed by a listener) → `done` | `failed`
 ]
 ```
 
-Operations: `comment`, `reply`, `resolve`, `reopen`, `delete-comment`, `answer`, `note`, `progress`, `done`, `fail`, `annotate` (`walkthrough` object), `focus`, `viewed`. A `resolve` operation takes `changed` as an array of `"path:start-end"` strings or `{"file", "start", "end"}` objects.
+Operations: `comment`, `reply`, `resolve`, `reopen`, `delete-comment`, `answer`, `note`, `progress`, `done`, `fail`, `annotate` (`walkthrough` object), `visualize` (`visual` object), `focus`, `viewed`. A `resolve` operation takes `changed` as an array of `"path:start-end"` strings or `{"file", "start", "end"}` objects.
 
 ## Anchors
 
@@ -176,7 +178,7 @@ When a review is first loaded: every recognised file the diff touches is attache
 
 ## State and identity
 
-Everything is local and human-readable: `<home>/sessions/<id>.json` holds one review (walkthrough and its history, comments and replies, conversation, requests, viewed and reviewed marks, excluded untracked files, approval history, attached spec/plan paths); `<home>/index.json` holds opened repositories and preferences; `<home>/bridge.json` holds the server port and the current review per repository. Diffs and file contents are never stored; they are read from git on every load. Writes are atomic (temp file, then rename). A file that fails to parse is set aside as `*.corrupt-<time>`, never deleted.
+Everything is local and human-readable: `<home>/sessions/<id>.json` holds one review (walkthrough and its history, the diagrams of the Visualize tab, comments and replies, conversation, requests, viewed and reviewed marks, excluded untracked files, approval history, attached spec/plan paths); `<home>/index.json` holds opened repositories and preferences; `<home>/bridge.json` holds the server port and the current review per repository. Diffs and file contents are never stored; they are read from git on every load. Writes are atomic (temp file, then rename). A file that fails to parse is set aside as `*.corrupt-<time>`, never deleted.
 
 - Default home: `~/Library/Application Support/guided-review` (macOS), `$XDG_CONFIG_HOME/guided-review` or `~/.config/guided-review` (Linux).
 - **Identity** of a review is (repository, base identity, compare identity, direct or not). A branch side's identity is its name; a commit side's is its SHA. So `main..feature` is one review that follows `feature`, `main..<sha>` is a different, frozen one, and `--direct` is a third. `gr review` resumes the matching review unless `--new`.
@@ -209,7 +211,7 @@ The UI and `gr` use the same two endpoints. Both reject requests whose `Origin` 
 
 Every channel, argument and data shape is declared in `app/shared/types.ts` (`Api`, `PushMap`). The server is `app/server/` (`main.mjs` HTTP and handlers, `review.mjs` assembly, anchors and reconciliation, `git.mjs` git access, `store.mjs` persistence).
 
-Routes the UI understands: `#/` (dashboard), `#/repo?path=<abs>`, `#/review?session=<id>`, `#/review?repo=<abs>&base=<ref>&compare=<ref>[&direct=1]`, each review route optionally with `&tab=conversation|commits|spec|files` (default `files`), `&w=1` (hide whitespace), `&commit=<sha>` (one commit of the range, read-only) and `&focus=<url-encoded JSON target>`. Special ref inputs: `@empty` (empty tree, base only) and `@worktree` (compare only: the current branch, or the working tree itself when `HEAD` is detached).
+Routes the UI understands: `#/` (dashboard), `#/repo?path=<abs>`, `#/review?session=<id>`, `#/review?repo=<abs>&base=<ref>&compare=<ref>[&direct=1]`, each review route optionally with `&tab=conversation|commits|spec|visual|files` (default `files`), `&w=1` (hide whitespace), `&commit=<sha>` (one commit of the range, read-only) and `&focus=<url-encoded JSON target>`. Special ref inputs: `@empty` (empty tree, base only) and `@worktree` (compare only: the current branch, or the working tree itself when `HEAD` is detached).
 
 ## What costs Claude usage
 

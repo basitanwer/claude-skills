@@ -72,6 +72,8 @@ function geo(h: Hunk): Geo {
 const STEP = 20
 const AROUND = 3
 const ALL = 1_000_000
+/** how many lines of a range a jump shows at most */
+const RANGE_MAX = 400
 const squash = (t: string): string => t.replace(/\s+/g, ' ').trim()
 
 // How long is the file? Needed to know whether anything follows the last hunk. Asked
@@ -234,6 +236,20 @@ const DiffBody = memo(function DiffBody({ file, hunks, split, placed, outside, c
     }
   }
 
+  /** Show every line of a new-side range that lies outside the hunks (the range of a
+   *  function, most of which did not change). A very long range is shown from its start. */
+  const showRange = async (from: number, to: number): Promise<void> => {
+    const last = Math.min(to, from + RANGE_MAX - 1)
+    for (let i = 0; i <= n; i++) {
+      const g = gapRange(i)
+      const a = Math.max(g.start, from); const b = Math.min(g.end ?? ALL, last)
+      if (a > b) continue
+      let have = true
+      for (let t = a; t <= b && have; t++) have = shown.has(t)
+      if (!have) await fetchLines(a, b)
+    }
+  }
+
   // comments outside the hunks, and focus targets, are fetched and shown in place
   const wanted = canExpand ? outside.map((c) => (c.anchor.kind === 'diff' ? locate(c.anchor.side, c.anchor.line) : null)).filter((x): x is { gap: number; t: number } => Boolean(x)) : []
   const missing = wanted.filter((w) => !cache.has(w.t) && (total == null || w.t <= total))
@@ -246,7 +262,8 @@ const DiffBody = memo(function DiffBody({ file, hunks, split, placed, outside, c
   useEffect(() => {
     if (!reveal || !canExpand) return
     const at = locate(reveal.side, reveal.line)
-    if (at && !shown.has(at.t)) void showAround([at])
+    if (reveal.end && reveal.side === 'new') void showRange(reveal.line, reveal.end)
+    else if (at && !shown.has(at.t)) void showAround([at])
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revealSeq])
   // "expand all" from the file header: read the whole file once

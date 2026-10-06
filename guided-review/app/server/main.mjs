@@ -13,7 +13,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { Store, emptyState, now } from './store.mjs'
-import { approvalKey, approvedState, artifactRole, assemble, changedByCommit, drift, makeAnchor, makeChanged, makeFocus, readAt, reconcile, resolveInput, sideReader, signatureOf } from './review.mjs'
+import { approvalKey, approvedState, artifactRole, assemble, changedByCommit, drift, makeAnchor, makeChanged, makeFocus, readAt, reconcile, reconcileVisual, resolveInput, sideReader, signatureOf } from './review.mjs'
 import { assertSafeRef, branches, commitOf, currentBranch, defaultBase, log, primaryRepo, statusEntries, tags, tryGit, worktrees } from './git.mjs'
 
 /** @typedef {import('./store.mjs').Session} Session */
@@ -468,7 +468,7 @@ const api = {
   requestCreate: (/** @type {number} */ id, /** @type {any} */ input) => locked(id, async () => {
     const s = store.get(id)
     const kind = input?.kind
-    if (!['walkthrough', 'question', 'apply', 'decisions'].includes(kind)) throw new Error(`unknown request kind ${kind}`)
+    if (!['walkthrough', 'question', 'apply', 'decisions', 'visualize'].includes(kind)) throw new Error(`unknown request kind ${kind}`)
     const text = String(input.text ?? '').trim()
     // a follow-up question: refused here, before anything is touched, if what it follows is not a question of this review
     const root = kind === 'question' && input.follows ? threadRoot(s, String(input.follows)) : null
@@ -480,6 +480,11 @@ const api = {
     if (kind === 'walkthrough') {
       if (open.some((x) => x.kind === 'walkthrough')) throw new Error('a walkthrough request is already waiting')
       r.update = Boolean(input.update && s.state.walkthrough)
+    } else if (kind === 'visualize') {
+      if (open.some((x) => x.kind === 'visualize')) throw new Error('a request to visualize this change is already waiting')
+      if (loaded.refMissing) throw new Error('a side of this comparison no longer resolves')
+      if (!loaded.files.length) throw new Error('there is no change to visualize')
+      r.update = Boolean(input.update && s.state.visual)
     } else if (kind === 'question') {
       if (!text) throw new Error('a question needs text')
       if (input.anchor) r.anchor = await makeAnchor(loaded, input.anchor, sideReader(s.repo, loaded))
@@ -640,6 +645,7 @@ const api = {
   annotate: (/** @type {number} */ id, /** @type {any} */ raw, /** @type {string} */ requestId) => locked(id, async () => {
     const s = store.get(id)
     const r = requestId ? liveRequest(s, String(requestId)) : null
+    if (r?.kind === 'visualize') throw new Error(`request ${r.id} asks for a visual, not for a walkthrough: complete it with gr visualize`)
     const loaded = await load(s)
     if (loaded.refMissing) throw new Error('a side of this comparison no longer resolves')
     const { walkthrough, warnings } = reconcile(loaded.files, raw)
@@ -663,6 +669,20 @@ const api = {
     save(s); changed(id); refreshPresence(id)
     notify(id, 'Walkthrough ready', `${walkthrough.sections.length} sections — ${walkthrough.title}`)
     return { sections: walkthrough.sections.length, warnings }
+  }),
+  visualize: (/** @type {number} */ id, /** @type {any} */ raw, /** @type {string} */ requestId) => locked(id, async () => {
+    const s = store.get(id)
+    const r = requestId ? liveRequest(s, String(requestId)) : null
+    if (r && r.kind !== 'visualize') throw new Error(`request ${r.id} asks for ${r.kind}, not for a visual`)
+    const loaded = await load(s)
+    if (loaded.refMissing) throw new Error('a side of this comparison no longer resolves')
+    const { visual, warnings } = await reconcileVisual(s.repo, loaded, raw, sideReader(s.repo, loaded))
+    s.state.visual = { ...visual, at: now(), endSha: loaded.headSha, signature: `${loaded.diffBase}:${loaded.signature}` }
+    if (r) finish(s, r, 'done')
+    save(s); changed(id); refreshPresence(id)
+    const nodes = visual.views.reduce((a, v) => a + v.nodes.length, 0)
+    notify(id, 'Visual ready', `${visual.views.length} diagram(s)${visual.title ? ` — ${visual.title}` : ''}`)
+    return { views: visual.views.length, nodes, warnings }
   }),
   uiAction: (/** @type {number} */ id, /** @type {any} */ action) => locked(id, async () => {
     const s = store.get(id)
@@ -715,7 +735,7 @@ async function checkAction(s, loaded, a) {
   throw new Error('unknown UI action')
 }
 /** What a batch may contain. */
-const BATCHABLE = new Set(['commentAdd', 'commentUpdate', 'commentDelete', 'messagePost', 'requestUpdate', 'annotate', 'uiAction', 'setViewed', 'setArtifacts'])
+const BATCHABLE = new Set(['commentAdd', 'commentUpdate', 'commentDelete', 'messagePost', 'requestUpdate', 'annotate', 'visualize', 'uiAction', 'setViewed', 'setArtifacts'])
 /** Sent by `gr` with every call. */
 const BRIDGE_HEADER = 'x-guided-review-bridge'
 /** The calling Claude Code session's id, when `gr` knows it. */
@@ -725,7 +745,7 @@ const OWNER_HEADER = 'x-guided-review-owner'
  *  about whether a request made now would be picked up.
  *  @param {string} channel @param {any[]} args */
 const handling = (channel, args) => channel === 'requestTake' || channel === 'requestUpdate'
-  || (channel === 'messagePost' && Boolean(args[1]?.requestId)) || (channel === 'annotate' && Boolean(args[2]))
+  || (channel === 'messagePost' && Boolean(args[1]?.requestId)) || ((channel === 'annotate' || channel === 'visualize') && Boolean(args[2]))
   || (channel === 'batch' && Array.isArray(args[1]) && args[1].some((op) => handling(op?.channel, [args[0], ...(Array.isArray(op?.args) ? op.args : [])])))
 
 // ── HTTP ─────────────────────────────────────────────────────
