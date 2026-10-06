@@ -92,6 +92,9 @@ interface Store {
   returnTo: { tab: Tab; y: number; top: number | null; label: string; target?: FocusTarget } | null
   /** the walkthrough section open in the panel beside the code (Files changed), by id */
   sectionPanel: string | null
+  /** the file under the top of the window in Files changed, kept by followFiles: the
+   *  file tree and the section panel mark it as where the reviewer is */
+  currentFile: string | null
   status: string | null
   navOpen: boolean
 
@@ -159,6 +162,9 @@ let routeSeq = 0
 /** the review being loaded, and whether it changed while its load was in flight */
 let loadingSession: number | null = null
 let changedWhileLoading = false
+/** counts the reviewer's changes to the reviewed sections: a reload that was in flight
+ *  when one was made carries the list from before it (the save brings another reload) */
+let sectionEdits = 0
 
 /** Ask for notification permission the first time the reviewer asks Claude Code for
  *  something — never on page load. */
@@ -302,6 +308,7 @@ export const useStore = create<Store>((set, get) => {
     tour: null,
     returnTo: null,
     sectionPanel: null,
+    currentFile: null,
     status: null,
     navOpen: false,
 
@@ -453,9 +460,12 @@ export const useStore = create<Store>((set, get) => {
       const { sessionId, preview } = get()
       try {
         if (sessionId != null) {
+          const edits = sectionEdits
           const next = await load(() => api.loadSession(sessionId, viewArg()))
           if (get().sessionId !== sessionId) return     // navigated away meanwhile
-          set({ loaded: next, viewedAt: next.state.viewedAt, reviewedSections: next.state.reviewedSections, drift: null })
+          // sections ticked while this was loading stay ticked: stepping through them quickly on a
+          // large review, the next tick would otherwise be saved on top of the older list
+          set({ loaded: next, viewedAt: next.state.viewedAt, reviewedSections: edits === sectionEdits ? next.state.reviewedSections : get().reviewedSections, drift: null })
           refreshWsOnly()
         } else if (preview) {
           const next = await load(() => api.previewReview(preview.repo, preview.base, preview.compare, { direct: preview.direct, view: viewArg() }))
@@ -528,6 +538,7 @@ export const useStore = create<Store>((set, get) => {
       const next = cur.includes(sectionId) ? cur.filter((s) => s !== sectionId) : [...cur, sectionId]
       const sectionOpen = { ...get().sectionOpen }
       delete sectionOpen[sectionId]
+      sectionEdits++
       set({ reviewedSections: next, sectionOpen })
       try { await api.saveUiState(id, { reviewedSections: next }) } catch (e) { fail(e) }
     },

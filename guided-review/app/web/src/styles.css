@@ -403,6 +403,16 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .file-group.sec > .file:last-child { margin-bottom: 0; }
 .sec-item { box-shadow: inset 3px 0 0 var(--sec, transparent); }
 .tree-row.in-sec { box-shadow: inset 2px 0 0 var(--sec); border-radius: 0 var(--radius) var(--radius) 0; }
+/* a section marked Reviewed carries a tick wherever it is named beside the code: the chip
+   in a file's header, its row in the grouped tree, the head of the panel */
+.sec-tick { flex: none; display: inline-flex; color: var(--ok); }
+/* sections reviewed, in the toolbar: the way into going through the walkthrough in order */
+.sec-progress { color: var(--text-2); } .sec-progress strong { color: var(--text); } .sec-progress.done .ico { color: var(--ok); }
+.sec-all-done { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; font-weight: 600; color: var(--ok); }
+/* where the reviewer is: the row of the file under the top of the window, or of the
+   folded folder that holds it (in its section's colour, where it has one) */
+.tree-row.here { background: color-mix(in srgb, var(--sec, var(--accent)) 16%, transparent); box-shadow: inset 3px 0 0 var(--sec, var(--accent)); border-radius: 0 var(--radius) var(--radius) 0; font-weight: 600; }
+.tree-row.here:hover { background: color-mix(in srgb, var(--sec, var(--accent)) 26%, transparent); }
 
 /* back to where a link was clicked */
 .backbar { position: fixed; left: 16px; bottom: 16px; z-index: 60; display: flex; align-items: center; gap: 2px; max-width: min(440px, calc(100vw - 32px)); padding: 3px 4px; background: var(--panel); border: 1px solid var(--accent); border-radius: 2em; box-shadow: var(--shadow); }

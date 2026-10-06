@@ -88,6 +88,7 @@ Requested for this skill and not in Limn.
 | A12 | `gr drift`: commits and exact delta since the reviewed / approved state | `gr.mjs` | T loop |
 | A13 | Any number of reviews watched at once; polling never takes git's index lock | `main.mjs` watcher, `git.mjs` | T sem (two reviews) |
 | A14 | No dependencies at run time; Node 20; human-readable storage | `app/server`, `store.mjs` | T (all) |
+| A15 | Guided mode: going through the walkthrough section by section beside the code. The section panel's arrows and its "Reviewed, next" bring the diff to the section's first file not yet viewed (no "Back to …" pill; held-back diffs stay held); "n / m sections" in the Files toolbar is the way in and shows progress; a reviewed section carries a tick on its files' chips, its row in the grouped tree and the panel's head; the file tree and the panel's file list mark the file under the top of the window, and the tree scrolls itself to keep that row in view | UI (`focus.ts` `goToSection`, `followFiles`; `Review.tsx`) | UI |
 
 ## Not carried over
 

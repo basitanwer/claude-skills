@@ -70,11 +70,13 @@ function flash(el: HTMLElement): void {
  *  collapsed file is opened, and a diff held back as large or generated is loaded.
  *  A jump the reviewer did not aim themselves (a link in the text, a comment in a menu,
  *  the session showing something) leaves a "Back to …" pill when it takes them away from
- *  their place. `nav`: they picked the destination from a list of files — no pill. */
-export function focusAnchor(t: FocusTarget, opts: { nav?: boolean } = {}): void {
+ *  their place. `nav`: they picked the destination from a list of files — no pill.
+ *  `top`: the target is put under the toolbar, to be read from its first line, instead of
+ *  in the middle of the window (where a file taller than the window shows its middle). */
+export function focusAnchor(t: FocusTarget, opts: { nav?: boolean; top?: boolean } = {}): void {
   const st = useStore.getState()
   // during a tour the way back leads to where the tour started, from whichever stop
-  jump(t, opts.nav ? null : st.tour?.origin ?? whereAmI(st.tab), false)
+  jump(t, opts.nav ? null : st.tour?.origin ?? whereAmI(st.tab), false, opts.top)
 }
 /** Start a tour at one of its stops, remembering where the reviewer was. */
 export function startTour(stops: TourStop[], loop?: boolean, idx = 0): void {
@@ -84,8 +86,8 @@ export function startTour(stops: TourStop[], loop?: boolean, idx = 0): void {
   focusAnchor(stops[idx].target)
 }
 /** `origin`: where to offer the way back to, if the jump moves the reviewer. `keep`: leave
- *  an already remembered spot alone. */
-function jump(t: FocusTarget, origin: Spot | null, keep: boolean): void {
+ *  an already remembered spot alone. `top`: see focusAnchor. */
+function jump(t: FocusTarget, origin: Spot | null, keep: boolean, top = false): void {
   const st = useStore.getState()
   const loaded = st.loaded
   if (!loaded) return
@@ -104,7 +106,7 @@ function jump(t: FocusTarget, origin: Spot | null, keep: boolean): void {
   const leaves = Boolean(origin) && origin?.tab !== to
   if (!keep) st.set({ returnTo: leaves ? origin : null })
   // a commit view shows another diff: targets belong to the whole comparison
-  if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, origin, keep || leaves)); return }
+  if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, origin, keep || leaves, top)); return }
   if (beside) {
     // nothing to switch or open
   } else if (t.kind === 'summary' || t.kind === 'section') {
@@ -135,7 +137,14 @@ function jump(t: FocusTarget, origin: Spot | null, keep: boolean): void {
     const usable = tries < (t.kind === 'diff' ? 30 : 8) ? sels.slice(0, 1) : sels
     const el = find(usable)
     if (el) {
-      el.scrollIntoView({ block: 'center', behavior: 'auto' })
+      const land = (): void => {
+        if (top) window.scrollBy({ top: el.getBoundingClientRect().top - pinnedHeight() - 8 })
+        else el.scrollIntoView({ block: 'center', behavior: 'auto' })
+        arriveAt(el)
+      }
+      land()
+      // once more after late layout (a section opening beside the code changes every height above), unless the reviewer has scrolled since
+      if (top) { const y = window.scrollY; window.setTimeout(() => { if (el.isConnected && window.scrollY === y) land() }, 150) }
       flash(el)
       if (origin && !leaves && !keep && movedFrom(origin)) useStore.getState().set({ returnTo: origin })
       return
@@ -281,5 +290,90 @@ function flashRange(file: string, r: ChangedRange): void {
     void el.offsetWidth               // restart the animation on a repeat click
     el.classList.add('gr-flash-range')
     window.setTimeout(() => el.classList.remove('gr-flash-range'), 1800)
+  }
+}
+
+/** Take the reviewer to a walkthrough section: it opens beside the code, and the code
+ *  moves to the first of its files not yet marked Viewed (the first one, when all are).
+ *  This is their own step through the walkthrough, so it leaves no "Back to …" pill, and
+ *  unlike showSection it does not hold the page where it was: the page is meant to move. */
+export function goToSection(id: string): void {
+  const st = useStore.getState()
+  const section = st.loaded?.state.walkthrough?.sections.find((s) => s.id === id)
+  if (!section) return
+  st.set({ sectionPanel: id })
+  const files = section.files.map((p) => st.loaded?.files.find((f) => f.path === p))
+  const file = (files.find((f) => f && f.viewed !== 'viewed') ?? files[0])?.path ?? section.files[0]
+  if (file) focusAnchor({ kind: 'file', file }, { nav: true, top: true })
+}
+
+/** How much of the top of the window stays covered in Files changed: the requests strip
+ *  and the toolbar, which stick there. */
+function pinnedHeight(): number {
+  const h = (sel: string): number => document.querySelector<HTMLElement>(sel)?.offsetHeight ?? 0
+  return h('.req-strip') + h('.files-toolbar')
+}
+/** The file the reviewer was just taken to, and where its box then was in the window.
+ *  A file is not always under the top of the window after a jump to it (one near the end
+ *  of the page cannot be brought up that far; a line is shown in the middle): until the
+ *  reviewer scrolls, it is still the file they are at. */
+let arrived: { box: HTMLElement; top: number } | null = null
+function arriveAt(el: HTMLElement): void {
+  const box = el.closest<HTMLElement>('[data-gr-file]')
+  if (!box) return
+  arrived = { box, top: box.getBoundingClientRect().top }
+  useStore.setState({ currentFile: box.dataset.grFile ?? null })
+}
+/** The file under the top of the window in Files changed: the first of `boxes` (the file
+ *  boxes, in page order) to reach below what is pinned there — the requests strip, the
+ *  toolbar, the top of a sticky file header. Between two files, or on a section's header,
+ *  that is the next file down; past the last one it stays the last. A binary search: a
+ *  handful of rectangles are read however many files there are and however long their
+ *  diffs (asking the document what lies at a point costs tens of milliseconds on a long
+ *  review, and finding the boxes anew walks every line of every diff). */
+function fileAtTop(boxes: HTMLElement[]): HTMLElement | null {
+  if (arrived) {
+    if (arrived.box.isConnected && Math.abs(arrived.box.getBoundingClientRect().top - arrived.top) < 4) return arrived.box
+    arrived = null
+  }
+  if (!boxes.length) return null
+  const line = Math.max(document.querySelector('.files-toolbar')?.getBoundingClientRect().bottom ?? 0, 0) + 24
+  let lo = 0
+  let hi = boxes.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (boxes[mid].getBoundingClientRect().bottom > line) hi = mid
+    else lo = mid + 1
+  }
+  return boxes[lo]
+}
+/** Keep the store's `currentFile` true while Files changed is on screen (`list`: the
+ *  column of file boxes, which the caller follows anew when it draws other boxes or
+ *  draws them in another order). Scrolling asks for one reading on the next frame,
+ *  however many scroll events arrive before it; so does the list changing height under
+ *  a still window (a file folds, a diff loads). Returns the way to stop. */
+export function followFiles(list: HTMLElement): () => void {
+  const collect = (): HTMLElement[] => [...list.querySelectorAll<HTMLElement>('[data-gr-file]')]
+  let boxes = collect()
+  let frame = 0
+  const read = (): void => {
+    frame = 0
+    let box = fileAtTop(boxes)
+    // drawn again since they were collected (boxes that are gone have no place, so the search ends on one)
+    if (box && !box.isConnected) { boxes = collect(); box = fileAtTop(boxes) }
+    const file = box?.dataset.grFile
+    if (file != null && file !== useStore.getState().currentFile) useStore.setState({ currentFile: file })
+  }
+  const soon = (): void => { frame ||= window.requestAnimationFrame(read) }
+  const ro = new ResizeObserver(soon)
+  ro.observe(list)
+  window.addEventListener('scroll', soon, { passive: true })
+  window.addEventListener('resize', soon)
+  soon()
+  return () => {
+    ro.disconnect()
+    window.removeEventListener('scroll', soon)
+    window.removeEventListener('resize', soon)
+    if (frame) window.cancelAnimationFrame(frame)
   }
 }

@@ -1,9 +1,9 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent, type PointerEvent as RPointerEvent, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent, type PointerEvent as RPointerEvent, type ReactNode, type RefObject } from 'react'
 import type {
   AnchorInput, Artifact, Comment, FileDiff, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, focusQuestion, showSection, startTour } from '../focus'
+import { focusAnchor, focusQuestion, followFiles, goToSection, showSection, startTour } from '../focus'
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, driftText, elapsed, focusable, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
@@ -333,10 +333,29 @@ const treeOrder = (n: DirNode): FileDiff[] => [...n.dirs.flatMap(treeOrder), ...
 const TREE_STEP = 16
 const STATUS_MARK: Record<FileDiff['status'], string> = { added: 'A', deleted: 'D', renamed: 'R', modified: '' }
 /** `nested`: the row is in the folder tree, so it keeps an empty slot where a folder has its chevron. */
+/** Whether a row in a list of files is the one to mark as where the reviewer is: `is`
+ *  says so of the file under the top of the window. When the mark lands on a row of the
+ *  file tree, the tree scrolls itself just enough to show it — never the page, which a
+ *  scrollIntoView would also move. */
+function useHere<T extends HTMLElement>(is: (file: string) => boolean): { ref: RefObject<T | null>; here: boolean } {
+  const here = useStore((s) => s.currentFile != null && is(s.currentFile))
+  const ref = useRef<T>(null)
+  useEffect(() => {
+    const row = ref.current
+    const box = row?.closest<HTMLElement>('.tree')
+    if (!here || !row || !box) return
+    const r = row.getBoundingClientRect()
+    const b = box.getBoundingClientRect()
+    if (r.top < b.top) box.scrollTop -= b.top - r.top + 4
+    else if (r.bottom > b.bottom) box.scrollTop += r.bottom - b.bottom + 4
+  }, [here])
+  return { ref, here }
+}
 function TreeFile({ file, depth, comments, showDir, nested }: { file: FileDiff; depth: number; comments: number; showDir?: boolean; nested?: boolean }) {
   const sec = useContext(SectionsCtx).get(file.path)
+  const { ref, here } = useHere<HTMLButtonElement>((f) => f === file.path)
   return (
-    <button className={'tree-row leaf' + (sec ? ' in-sec' : '')} style={{ paddingLeft: `${8 + depth * TREE_STEP}px`, ...(sec ? secStyle(sec.no) : {}) }} title={`${file.path} (${file.status})${sec ? ` · ${sec.section.name}` : ''}`} data-gr-tree-file={file.path} data-gr-status={file.status} onClick={() => focusAnchor({ kind: 'file', file: file.path }, { nav: true })}>
+    <button ref={ref} className={'tree-row leaf' + (sec ? ' in-sec' : '') + (here ? ' here' : '')} aria-current={here ? 'true' : undefined} style={{ paddingLeft: `${8 + depth * TREE_STEP}px`, ...(sec ? secStyle(sec.no) : {}) }} title={`${file.path} (${file.status})${sec ? ` · ${sec.section.name}` : ''}`} data-gr-tree-file={file.path} data-gr-status={file.status} onClick={() => focusAnchor({ kind: 'file', file: file.path }, { nav: true, top: true })}>
       {nested && <span className="tree-chev" />}
       <FileIcon path={file.path} />
       <span className={'tree-name' + (file.status === 'deleted' ? ' gone' : '')}>{baseName(file.path)}{showDir && file.path.includes('/') && <span className="muted small"> {file.path.slice(0, file.path.lastIndexOf('/'))}</span>}</span>
@@ -354,9 +373,12 @@ const NO_SECTIONS: SectionMap = new Map()
 const SectionsCtx = createContext<SectionMap>(NO_SECTIONS)
 function TreeDir({ node, depth, closed, toggle, counts }: { node: DirNode; depth: number; closed: Set<string>; toggle: (p: string) => void; counts: Map<string, number> }) {
   const open = !closed.has(node.path)
+  // folded, it stands for the files inside it. Only rows with every folder above them
+  // open are drawn, so the folded one that holds the file is the nearest row on screen.
+  const { ref, here } = useHere<HTMLButtonElement>((f) => !open && f.startsWith(node.path + '/'))
   return (
     <>
-      <button className="tree-row dir" style={{ paddingLeft: `${8 + depth * TREE_STEP}px` }} aria-expanded={open} title={node.path} data-gr-dir={node.path} onClick={() => toggle(node.path)}>
+      <button ref={ref} className={'tree-row dir' + (here ? ' here' : '')} aria-current={here ? 'true' : undefined} style={{ paddingLeft: `${8 + depth * TREE_STEP}px` }} aria-expanded={open} title={node.path} data-gr-dir={node.path} onClick={() => toggle(node.path)}>
         <Icon name={open ? 'chevDown' : 'chevRight'} size={12} className="tree-chev" /><Icon name="folder" className="folder" /><span className="tree-name">{node.name}</span>
       </button>
       {open && node.dirs.map((d) => <TreeDir key={d.path} node={d} depth={depth + 1} closed={closed} toggle={toggle} counts={counts} />)}
@@ -388,15 +410,20 @@ function SectionHeader({ section, files, no }: { section: Section; files: FileDi
 }
 /** A walkthrough section beside the code: what it says, its files, and the same
  *  Reviewed mark and comment thread it has in the Conversation tab. Opened from a file's
- *  section chip, so reading about a group of files never means leaving them. */
+ *  section chip, so reading about a group of files never means leaving them. It is also
+ *  how the walkthrough is gone through in order: its arrows and "Reviewed, next" open
+ *  another section and bring the code to it (goToSection). */
 function SectionPanel({ sections }: { sections: Section[] }) {
   const id = useStore((s) => s.sectionPanel)
-  const reviewed = useStore((s) => (id ? s.reviewedSections.includes(id) : false))
+  const done = useStore((s) => s.reviewedSections)
   const toggle = useStore((s) => s.toggleSectionReviewed)
   const files = useStore((s) => s.loaded?.files)
   const set = useStore((s) => s.set)
   const no = sections.findIndex((s) => s.id === id)
   const section = sections[no]
+  // the file being read, when it is one of this section's
+  const here = useStore((s) => (s.currentFile && section?.files.includes(s.currentFile) ? s.currentFile : null))
+  const stepped = useRef(0)
   useEffect(() => {
     if (!section) return
     const onKey = (e: KeyboardEvent): void => {
@@ -408,19 +435,42 @@ function SectionPanel({ sections }: { sections: Section[] }) {
   }, [section, set])
   if (!section) return null
   const k = anchorKey({ kind: 'section', sectionId: section.id })
-  const step = (d: number): void => set({ sectionPanel: sections[(no + d + sections.length) % sections.length].id })
+  const reviewed = done.includes(section.id)
+  const step = (d: number): void => goToSection(sections[(no + d + sections.length) % sections.length].id)
+  // the next section still to review: after this one, then round to the earliest (the list
+  // of reviewed ids can hold sections of an earlier walkthrough, so it is never counted)
+  const next = [...sections.slice(no + 1), ...sections.slice(0, no)].find((s) => !done.includes(s.id))
+  const allDone = sections.every((s) => done.includes(s.id))
+  const reviewedNext = (): void => {
+    // the second click of a double click would tick the section just arrived at, unread
+    if (Date.now() - stepped.current < 500) return
+    // never a toggle: on a section already ticked it only moves on
+    void (reviewed ? Promise.resolve() : toggle(section.id)).then(() => {
+      if (!next || !useStore.getState().reviewedSections.includes(section.id)) return
+      stepped.current = Date.now()
+      goToSection(next.id)
+    })
+  }
   return (
     <aside className="sec-panel" style={secStyle(no)} aria-label="Walkthrough section" data-gr="section-panel" data-gr-section-panel={section.id} data-gr-reviewed={reviewed ? 'true' : 'false'}>
       <div className="sec-panel-head">
         <span className="sec-dot" /><span className="muted small">Section {no + 1} of {sections.length}</span>
+        {reviewed && <span className="sec-tick" role="img" aria-label="Reviewed" title="You marked this section reviewed" data-gr="section-tick"><Icon name="check" size={14} /></span>}
         <span className="grow" />
-        {sections.length > 1 && <button className="icon-btn" title="Previous section" aria-label="Previous section" onClick={() => step(-1)}><Icon name="chevUp" /></button>}
-        {sections.length > 1 && <button className="icon-btn" title="Next section" aria-label="Next section" onClick={() => step(1)}><Icon name="chevDown" /></button>}
+        {sections.length > 1 && <button className="icon-btn" title="Previous section, and its code" aria-label="Previous section" data-gr="section-prev" onClick={() => step(-1)}><Icon name="chevUp" /></button>}
+        {sections.length > 1 && <button className="icon-btn" title="Next section, and its code" aria-label="Next section" data-gr="section-next" onClick={() => step(1)}><Icon name="chevDown" /></button>}
         <button className="icon-btn" title="Close (Esc)" aria-label="Close section" data-gr="section-panel-close" onClick={() => showSection(null)}><Icon name="x" /></button>
       </div>
       <h3>{section.name}</h3>
       {section.desc && <div className="sec-desc">{section.desc}</div>}
-      <div className="row gap">
+      <div className="row gap wrap">
+        {allDone
+          ? <span className="sec-all-done" data-gr="sections-done"><Icon name="check" size={14} />{sections.length === 1 ? 'The section is reviewed' : `All ${sections.length} sections reviewed`}</span>
+          : (
+            <button className="btn sm primary" data-gr="section-reviewed-next" title={reviewed ? `Go to the next section you have not reviewed: “${next?.name}”` : next ? `Mark this section reviewed and go to the next one you have not reviewed: “${next.name}”` : 'Mark this section reviewed — it is the last one left'} onClick={reviewedNext}>
+              <Icon name={reviewed ? 'arrowDown' : 'check'} size={14} />{reviewed ? 'Next unreviewed' : next ? 'Reviewed, next' : 'Reviewed, finish'}
+            </button>
+          )}
         <label className={'viewed-box' + (reviewed ? ' on' : '')}><input type="checkbox" name="gr-field" checked={reviewed} onChange={() => void toggle(section.id)} data-gr="section-reviewed" /> Reviewed</label>
         <button className="btn sm" data-gr="section-comment" onClick={() => set({ composer: k })}><Icon name="comment" size={14} /> Comment</button>
       </div>
@@ -432,7 +482,7 @@ function SectionPanel({ sections }: { sections: Section[] }) {
         {section.files.map((p) => {
           const f = files?.find((x) => x.path === p)
           return (
-            <button key={p} className="tree-row leaf" title={p} onClick={() => focusAnchor({ kind: 'file', file: p }, { nav: true })}>
+            <button key={p} className={'tree-row leaf' + (p === here ? ' here' : '')} aria-current={p === here ? 'true' : undefined} title={p} data-gr-panel-file={p} onClick={() => focusAnchor({ kind: 'file', file: p }, { nav: true, top: true })}>
               <FileIcon path={p} /><span className="tree-name">{baseName(p)}</span>
               {f?.viewed === 'viewed' && <Icon name="check" size={12} className="tree-viewed" />}
               {f && <DiffStat add={f.add} del={f.del} />}
@@ -504,6 +554,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
   }, [wt])
   const sectionNo = (s: Section | null | undefined): number => (s ? (wt?.sections ?? []).indexOf(s) : -1)
   const secPanelId = useStore((s) => s.sectionPanel)
+  const reviewed = useStore((s) => s.reviewedSections)
   const secPanel = Boolean(secPanelId && wt?.sections.some((s) => s.id === secPanelId))
   // From 1100px the open section is a column, not a drawer over the code. Up to 1600px
   // there is no room for three columns: it takes the tree's place until it is closed, and
@@ -531,6 +582,16 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
       ].filter((g) => g.files.length > 0)
     : [{ section: null, files: treeView === 'tree' ? treeOrder(tree) : visible }]
   const viewed = kept.filter((f) => f.viewed === 'viewed').length
+  // the list of reviewed ids can hold sections of an earlier walkthrough: count this one's
+  const secCount = wt?.sections.length ?? 0
+  const secDone = (wt?.sections ?? []).filter((s) => reviewed.includes(s.id)).length
+  const secNext = wt?.sections.find((s) => !reviewed.includes(s.id)) ?? wt?.sections[0]
+  // the file under the top of the window, for the tree and the section panel to mark:
+  // followed anew when other boxes are drawn, or the same ones in another order or under
+  // other groups, which no scroll or resize tells
+  const list = useRef<HTMLDivElement>(null)
+  const order = groups.flatMap((g) => g.files.map((f) => f.path)).join('\n')
+  useEffect(() => (list.current ? followFiles(list.current) : undefined), [order, bySection, filters.showExcluded])
   const toggleDir = (p: string): void => setClosed((prev) => { const next = new Set(prev); if (next.has(p)) next.delete(p); else next.add(p); return next })
   const modeLabel = shownCommit ? `${short(shownCommit.sha)} ${shownCommit.subject}` : commitView ? short(commitView) : eff === 'all' ? 'All changes' : eff === 'since' ? (since?.kind === 'approved' ? 'Since approved' : 'Since reviewed') : 'Since viewed'
   const pick = (m: DiffMode, close: () => void): void => { set({ diffMode: m }); if (commitView) void setView({ commit: undefined }); close() }
@@ -559,6 +620,15 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
         {dirty && <span className="legend small muted" title="Uncommitted lines carry a stripe in the gutter"><span className="swatch staged" />staged<span className="swatch unstaged" />unstaged</span>}
         <span className="grow" />
         <span className="viewed-progress" data-gr="viewed-progress"><Icon name="circle" size={14} /><strong>{viewed}</strong> / {kept.length} viewed</span>
+        {secNext && (
+          <button
+            className={'btn sm sec-progress' + (secDone === secCount ? ' done' : '')} style={secStyle(sectionNo(secNext))} data-gr="sections-progress" data-gr-reviewed={secDone} data-gr-sections={secCount}
+            title={`Guided review: go through the walkthrough section by section, marking each Reviewed.\n${secDone === secCount ? `All ${plural(secCount, 'section')} reviewed — opens the first one` : `Opens the first section you have not reviewed, “${secNext.name}”,`} beside the code and takes you to its first file not yet viewed.`}
+            onClick={() => goToSection(secNext.id)}
+          >
+            {secDone === secCount ? <Icon name="check" size={14} /> : <span className="sec-dot" />}<span><strong>{secDone}</strong> / {plural(secCount, 'section')}</span>
+          </button>
+        )}
         <ReviewMenu loaded={loaded} />
         <Menu label={<Icon name="gear" />} className="btn sm icon" align="right" hook="view-settings" title="View settings">
           {(close) => (
@@ -608,9 +678,11 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
               {visible.length === 0 && <div className="pop-note">No files match.</div>}
               {bySection
                 ? groups.map((g) => (
-                    <div key={g.section?.id ?? '-'}>
-                      <button className="tree-row dir sec" style={g.section ? secStyle(sectionNo(g.section)) : undefined} title={g.section?.desc} onClick={() => { if (g.section) { const el = document.querySelector(`[data-gr-section="${g.section.id}"]`); el?.scrollIntoView({ block: 'start' }) } }}>
-                        {g.section && <span className="sec-dot" />}<span className="tree-name">{g.section?.name ?? 'Not in the walkthrough'}</span><span className="muted small">{g.files.length}</span>
+                    <div key={g.section?.id ?? '-'} style={g.section ? secStyle(sectionNo(g.section)) : undefined}>
+                      <button className="tree-row dir sec" title={g.section?.desc} data-gr-tree-section={g.section?.id} data-gr-reviewed={g.section && reviewed.includes(g.section.id) ? 'true' : 'false'} onClick={() => { if (g.section) { const el = document.querySelector(`[data-gr-section="${g.section.id}"]`); el?.scrollIntoView({ block: 'start' }) } }}>
+                        {g.section && <span className="sec-dot" />}<span className="tree-name">{g.section?.name ?? 'Not in the walkthrough'}</span>
+                        {g.section && reviewed.includes(g.section.id) && <span className="sec-tick" role="img" aria-label="Reviewed" title="You marked this section reviewed"><Icon name="check" size={12} /></span>}
+                        <span className="muted small">{g.files.length}</span>
                       </button>
                       {g.files.map((f) => <TreeFile key={f.path} file={f} depth={1} comments={counts.get(f.path) ?? 0} showDir />)}
                     </div>
@@ -622,7 +694,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
           </aside>
           </SectionsCtx.Provider>
         )}
-        <div className="files-list">
+        <div className="files-list" ref={list}>
           {kept.length === 0 && <div className="blankslate"><h3>No changes</h3><p className="muted">The two sides of this comparison are identical.</p></div>}
           {kept.length > 0 && visible.length === 0 && <div className="blankslate"><h3>No files match</h3><p className="muted">Change the filter or the “{modeLabel}” view.</p></div>}
           {groups.map((g) => (

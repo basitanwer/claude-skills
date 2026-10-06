@@ -422,6 +422,7 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   const commitView = Boolean(view?.commit)
   const [notesOpen, setNotesOpen] = useState(true)
   const inPanel = useStore((s) => Boolean(section) && s.sectionPanel === section?.id)
+  const secReviewed = useStore((s) => Boolean(section) && s.reviewedSections.includes(section?.id ?? ''))
   const loadLarge = useStore((s) => Boolean(s.fileLoaded[file.path]))
   const [expandAll, setExpandAll] = useState(0)
   const { setFileOpen, setFileLoaded, toggleViewed, toggleExcluded, set } = useStore.getState()
@@ -511,8 +512,8 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
         <CopyButton text={file.path} title="Copy path" />
         {expandable && open && !held && <button className="icon-btn" title="Expand all lines" aria-label="Expand all lines" onClick={() => setExpandAll((n) => n + 1)}><Icon name="unfold" /></button>}
         {section && !grouped && (
-          <button className={'sec-chip' + (inPanel ? ' on' : '')} data-gr="section-chip" aria-pressed={inPanel} title={`Part of “${section.name}”${section.desc ? ` — ${section.desc}` : ''}\nClick to ${inPanel ? 'close' : 'read'} the section beside the code`} onClick={() => showSection(inPanel ? null : section.id)}>
-            <span className="sec-dot" /><span className="clip">{section.name}</span>
+          <button className={'sec-chip' + (inPanel ? ' on' : '')} data-gr="section-chip" data-gr-reviewed={secReviewed ? 'true' : 'false'} aria-pressed={inPanel} title={`Part of “${section.name}”${section.desc ? ` — ${section.desc}` : ''}${secReviewed ? '\nYou marked this section reviewed' : ''}\nClick to ${inPanel ? 'close' : 'read'} the section beside the code`} onClick={() => showSection(inPanel ? null : section.id)}>
+            <span className="sec-dot" /><span className="clip">{section.name}</span>{secReviewed && <Icon name="check" size={12} className="sec-tick" />}
           </button>
         )}
         <span className="grow" />
