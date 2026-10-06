@@ -45,7 +45,8 @@ function AskThread({ c }: { c: Comment }) {
   const requests = useStore((s) => s.loaded?.state.requests)
   const request = useStore((s) => s.request)
   const cancel = useStore((s) => s.cancelRequest)
-  // what is being typed lives here, in a component keyed by the thread, so a refresh of the review does not lose it
+  // what is being typed lives here, in a component keyed by the thread, so a background refresh that
+  // leaves the code as it is does not lose it (folding in changed code redraws the diff, and it is lost)
   const [mode, setMode] = useState<'view' | 'reply'>('view')
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
@@ -92,7 +93,7 @@ function AskThread({ c }: { c: Comment }) {
               <div className={'thread-main reply waiting ' + st} data-gr="ask-ended">
                 {st === 'failed' ? <span className="ask-reason">Claude Code could not answer: {x.request?.error ?? 'no reason given'}</span> : <span className="muted">Cancelled.</span>}
                 {/* the latest exchange only: an earlier one was already asked again, or followed by something else */}
-                {x === last && <button className="btn sm nowrap" data-gr="ask-again" disabled={busy} title="Send the same question to Claude Code again, in this thread" onClick={() => send(x.text, x.id)}>Ask again</button>}
+                {x === last && <button className="btn sm nowrap" data-gr="ask-again" disabled={busy} title="Send the same question to Claude Code again, in this thread" onClick={() => { setMode('view'); send(x.text, x.id) }}>Ask again</button>}
               </div>
             )}
           </Fragment>

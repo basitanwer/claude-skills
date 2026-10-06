@@ -446,7 +446,8 @@ function SectionPanel({ sections }: { sections: Section[] }) {
     if (Date.now() - stepped.current < 500) return
     // never a toggle: on a section already ticked it only moves on
     void (reviewed ? Promise.resolve() : toggle(section.id)).then(() => {
-      if (!next || !useStore.getState().reviewedSections.includes(section.id)) return
+      // (they may have moved on by hand while the tick was being saved)
+      if (!next || useStore.getState().sectionPanel !== section.id) return
       stepped.current = Date.now()
       goToSection(next.id)
     })
@@ -482,7 +483,7 @@ function SectionPanel({ sections }: { sections: Section[] }) {
         {section.files.map((p) => {
           const f = files?.find((x) => x.path === p)
           return (
-            <button key={p} className={'tree-row leaf' + (p === here ? ' here' : '')} aria-current={p === here ? 'true' : undefined} title={p} data-gr-panel-file={p} onClick={() => focusAnchor({ kind: 'file', file: p }, { nav: true, top: true })}>
+            <button key={p} className={'tree-row leaf' + (p === here ? ' here' : '') + (f ? '' : ' gone')} disabled={!f} aria-current={p === here ? 'true' : undefined} title={f ? p : `${p} — no longer part of this comparison`} data-gr-panel-file={p} onClick={() => focusAnchor({ kind: 'file', file: p }, { nav: true, top: true })}>
               <FileIcon path={p} /><span className="tree-name">{baseName(p)}</span>
               {f?.viewed === 'viewed' && <Icon name="check" size={12} className="tree-viewed" />}
               {f && <DiffStat add={f.add} del={f.del} />}
@@ -523,6 +524,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
   const commitView = loaded.view?.commit
   const shownCommit = commitView ? loaded.commits.find((c) => c.sha === commitView) : undefined
   const wide = useWide(1100)
+  const medium = useWide(760)
   const roomy = useWide(900)
   const widest = useWide(1600)
   const fits = useWide(SPLIT_BESIDE_SECTION)
@@ -559,7 +561,9 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
   // From 1100px the open section is a column, not a drawer over the code. Up to 1600px
   // there is no room for three columns: it takes the tree's place until it is closed, and
   // where the diff column left beside it is too narrow to read two-up, the diff is unified.
-  const forTree = secPanel && wide && !widest
+  // Between 760 and 1100px it is still a drawer, and the tree gives way just the same, or
+  // the two together would leave a sliver of the code the section is about.
+  const forTree = secPanel && medium && !widest
   const treeShown = panelOpen && !forTree
   const canSplit = roomy && !(forTree && !fits)
   const split = canSplit && (diffView ?? (wide ? 'split' : 'unified')) === 'split'
@@ -1168,7 +1172,7 @@ export function Review() {
         e.preventDefault()
         if (!st.panelOpen) st.set({ panelOpen: true })
         // on a mid-width window an open section sits in the tree's place: closing it brings the tree back
-        if (st.sectionPanel && window.matchMedia('(min-width: 1100px) and (max-width: 1599px)').matches) showSection(null)
+        if (st.sectionPanel && window.matchMedia('(min-width: 760px) and (max-width: 1599px)').matches) showSection(null)
         window.setTimeout(() => document.getElementById('gr-file-filter')?.focus(), 30)
       } else if (e.key === 'c' && hoveredLine()) {
         e.preventDefault()

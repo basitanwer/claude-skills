@@ -513,7 +513,7 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
         {expandable && open && !held && <button className="icon-btn" title="Expand all lines" aria-label="Expand all lines" onClick={() => setExpandAll((n) => n + 1)}><Icon name="unfold" /></button>}
         {section && !grouped && (
           <button className={'sec-chip' + (inPanel ? ' on' : '')} data-gr="section-chip" data-gr-reviewed={secReviewed ? 'true' : 'false'} aria-pressed={inPanel} title={`Part of “${section.name}”${section.desc ? ` — ${section.desc}` : ''}${secReviewed ? '\nYou marked this section reviewed' : ''}\nClick to ${inPanel ? 'close' : 'read'} the section beside the code`} onClick={() => showSection(inPanel ? null : section.id)}>
-            <span className="sec-dot" /><span className="clip">{section.name}</span>{secReviewed && <Icon name="check" size={12} className="sec-tick" />}
+            <span className="sec-dot" /><span className="clip">{section.name}</span>{secReviewed && <span className="sec-tick" role="img" aria-label="Reviewed"><Icon name="check" size={12} /></span>}
           </button>
         )}
         <span className="grow" />

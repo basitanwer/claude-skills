@@ -1,5 +1,5 @@
 import type { ChangedRange, FocusTarget, TourStop } from '@shared/types'
-import { useStore } from './store'
+import { typing, useStore } from './store'
 import { baseName, cssq, type Tab } from './util'
 
 function selectorsFor(t: FocusTarget): string[] {
@@ -35,9 +35,12 @@ type Spot = NonNullable<ReturnType<typeof useStore.getState>['returnTo']>
 function whereAmI(tab: Tab): Spot {
   const here = { tab, y: window.scrollY, top: null as number | null, label: TAB_NAMES[tab] }
   if (tab !== 'files') return here
-  for (const el of document.querySelectorAll<HTMLElement>('[data-gr-file]')) {
+  // the file the tree marks as the current one, when it is known; else the first one under the pinned headers
+  const cur = useStore.getState().currentFile
+  const at = cur ? document.querySelector<HTMLElement>(`[data-gr-file="${cssq(cur)}"]`) : null
+  for (const el of at ? [at] : document.querySelectorAll<HTMLElement>('[data-gr-file]')) {
     const r = el.getBoundingClientRect()
-    if (r.bottom > 160) return { ...here, top: r.top, label: baseName(el.dataset.grFile ?? ''), target: { kind: 'file', file: el.dataset.grFile ?? '' } }
+    if (at || r.bottom > 160) return { ...here, top: r.top, label: baseName(el.dataset.grFile ?? ''), target: { kind: 'file', file: el.dataset.grFile ?? '' } }
   }
   return here
 }
@@ -255,6 +258,9 @@ const CHANGED_KEY = 'changed-range'
 export async function focusChanged(r: ChangedRange): Promise<void> {
   const lines = r.end > r.start ? `lines ${r.start}–${r.end}` : `line ${r.start}`
   const was = useStore.getState()
+  // Folding in newer code redraws every diff, and with it any comment or reply being
+  // written there: that is the reviewer's to decide, with the banner's own button.
+  if (was.drift && typing()) { was.toast('The code changed since this page loaded it. Refresh first (the banner at the top) to see these lines: refreshing discards text you have not sent.', 'info', undefined, { key: CHANGED_KEY }); return }
   if (was.view.commit) await was.setView({ commit: undefined })
   else if (was.drift) await was.reload()
   const st = useStore.getState()
@@ -285,6 +291,7 @@ function flashRange(file: string, r: ChangedRange): void {
   const top = els[0].getBoundingClientRect().top; const bottom = els[els.length - 1].getBoundingClientRect().bottom
   const room = window.innerHeight
   window.scrollBy({ top: bottom - top < room * 0.6 ? (top + bottom - room) / 2 : top - room * 0.3 })
+  arriveAt(els[0])                    // the file these lines are in is where the reviewer now is
   for (const el of els) {
     el.classList.remove('gr-flash', 'gr-flash-range')
     void el.offsetWidth               // restart the animation on a repeat click
@@ -302,9 +309,11 @@ export function goToSection(id: string): void {
   const section = st.loaded?.state.walkthrough?.sections.find((s) => s.id === id)
   if (!section) return
   st.set({ sectionPanel: id })
-  const files = section.files.map((p) => st.loaded?.files.find((f) => f.path === p))
-  const file = (files.find((f) => f && f.viewed !== 'viewed') ?? files[0])?.path ?? section.files[0]
-  if (file) focusAnchor({ kind: 'file', file }, { nav: true, top: true })
+  // (a file the walkthrough names can have left the comparison since it was written)
+  const files = section.files.flatMap((p) => st.loaded?.files.find((f) => f.path === p || f.oldPath === p) ?? [])
+  const file = files.find((f) => f.viewed !== 'viewed') ?? files[0]
+  if (file) focusAnchor({ kind: 'file', file: file.path }, { nav: true, top: true })
+  else st.toast(`None of the files of “${section.name}” are part of this comparison any more, so there is no code to show for it.`, 'info', undefined, { key: 'section-gone' })
 }
 
 /** How much of the top of the window stays covered in Files changed: the requests strip

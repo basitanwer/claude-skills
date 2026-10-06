@@ -455,3 +455,5 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 @keyframes flash-range { 0%, 45% { background-color: var(--flash); box-shadow: inset 3px 0 0 var(--accent); } 100% { box-shadow: inset 3px 0 0 transparent; } }
 /* without motion the range is still marked: held, then gone */
 @media (prefers-reduced-motion: reduce) { .gr-flash-range { animation: none; background-color: var(--flash) !important; box-shadow: inset 3px 0 0 var(--accent); } }
+/* a file a section names that has left the comparison */
+.tree-row.gone { cursor: default; } .tree-row.gone .tree-name { text-decoration: line-through; color: var(--muted); }

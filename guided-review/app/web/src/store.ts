@@ -13,7 +13,7 @@ export interface Toast { id: string; text: string; kind: 'error' | 'info'; actio
 const SHOW_KEY = 'session-show'
 /** The reviewer is in the middle of writing: the caret is in a text field, or a comment,
  *  a reply, a question or an answer has text in it that moving the page could discard. */
-function typing(): boolean {
+export function typing(): boolean {
   const el = document.activeElement
   if (el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && (el.type === 'text' || el.type === 'search') && !el.readOnly)) return true
   return [...document.querySelectorAll<HTMLTextAreaElement | HTMLInputElement>('textarea, input[name="gr-field"]:not([type]):not([readonly]):not(#gr-file-filter)')].some((f) => f.value.trim() !== '')
@@ -165,6 +165,8 @@ let changedWhileLoading = false
 /** counts the reviewer's changes to the reviewed sections: a reload that was in flight
  *  when one was made carries the list from before it (the save brings another reload) */
 let sectionEdits = 0
+/** Saves of the reviewed-sections list that have not returned yet. */
+let sectionSaves = 0
 
 /** Ask for notification permission the first time the reviewer asks Claude Code for
  *  something — never on page load. */
@@ -189,7 +191,8 @@ export const useStore = create<Store>((set, get) => {
 
   const setState = (state: ReviewState): void => {
     const loaded = get().loaded
-    if (loaded) set({ loaded: { ...loaded, state }, viewedAt: state.viewedAt, reviewedSections: state.reviewedSections })
+    // (while a Reviewed tick is being saved, an answer to another call still has the list from before it)
+    if (loaded) set({ loaded: { ...loaded, state }, viewedAt: state.viewedAt, reviewedSections: sectionSaves ? get().reviewedSections : state.reviewedSections })
   }
   const patchState = (fn: (s: ReviewState) => ReviewState): void => {
     const loaded = get().loaded
@@ -465,7 +468,7 @@ export const useStore = create<Store>((set, get) => {
           if (get().sessionId !== sessionId) return     // navigated away meanwhile
           // sections ticked while this was loading stay ticked: stepping through them quickly on a
           // large review, the next tick would otherwise be saved on top of the older list
-          set({ loaded: next, viewedAt: next.state.viewedAt, reviewedSections: edits === sectionEdits ? next.state.reviewedSections : get().reviewedSections, drift: null })
+          set({ loaded: next, viewedAt: next.state.viewedAt, reviewedSections: edits === sectionEdits && !sectionSaves ? next.state.reviewedSections : get().reviewedSections, drift: null })
           refreshWsOnly()
         } else if (preview) {
           const next = await load(() => api.previewReview(preview.repo, preview.base, preview.compare, { direct: preview.direct, view: viewArg() }))
@@ -540,7 +543,8 @@ export const useStore = create<Store>((set, get) => {
       delete sectionOpen[sectionId]
       sectionEdits++
       set({ reviewedSections: next, sectionOpen })
-      try { await api.saveUiState(id, { reviewedSections: next }) } catch (e) { fail(e) }
+      sectionSaves++
+      try { await api.saveUiState(id, { reviewedSections: next }) } catch (e) { fail(e) } finally { sectionSaves-- }
     },
 
     async toggleExcluded(file) {
