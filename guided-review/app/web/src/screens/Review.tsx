@@ -13,6 +13,7 @@ import { AwayHint, CopyButton, DiffStat, FileIcon, Icon, Md, Menu, MenuItem, Pre
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
 import { FileBox, hoveredLine } from '../components/diff'
 import { VisualTab } from '../components/visual'
+import { MdDoc, isMarkdown } from '../components/mdfile'
 import { TopBar } from './Home'
 
 function useTick(ms: number): void {
@@ -1115,6 +1116,28 @@ function SpecTab({ loaded }: { loaded: LoadedReview }) {
     c.lineGone || art.lines[c.anchor.line - 1] === undefined || (c.anchor.lineContent && art.lines[c.anchor.line - 1] !== c.anchor.lineContent)
   )) : []
   const stale = loaded.state.comments.filter((c) => c.status === 'outdated' && c.anchor.kind === 'artifact')
+  // a spec or a plan is read as the document it is; its source lines are one click away
+  const [source, setSource] = useState(false)
+  const rendered = Boolean(art) && isMarkdown(art?.path ?? '') && !source
+  const index = useContext(CommentsCtx)
+  // the threads on its lines that still read what they were written on (the others are listed under it)
+  const threads = useMemo(() => {
+    const out = new Map<number, Comment[]>()
+    if (!art) return out
+    for (const [k, list] of index) {
+      if (!k.startsWith(`artifact:${art.path}:`)) continue
+      for (const c of list) {
+        if (c.anchor.kind !== 'artifact' || c.anchor.path !== art.path || c.lineGone) continue
+        const now = art.lines[c.anchor.line - 1]
+        if (now !== undefined && (!c.anchor.lineContent || c.anchor.lineContent === now)) out.set(c.anchor.line, [...(out.get(c.anchor.line) ?? []), c])
+      }
+    }
+    return out
+  }, [index, art])
+  const { keyOf, anchorOf } = useMemo(() => ({
+    keyOf: (n: number): string => `artifact:${art?.path}:${n}`,
+    anchorOf: (n: number): AnchorInput => ({ kind: 'artifact', path: art?.path ?? '', line: n, expect: art?.lines[n - 1] })
+  }), [art])
   return (
     <div className="spec">
       {wt?.planMap && <PlanCheck plan={wt.planMap} sections={wt.sections} />}
@@ -1136,13 +1159,21 @@ function SpecTab({ loaded }: { loaded: LoadedReview }) {
             <div className="file-head">
               <Icon name="book" /><span className="mono file-path">{art.path}</span><CopyButton text={art.path} title="Copy path" />
               <span className="label">{art.role}</span>
+              {isMarkdown(art.path) && (
+                <span className="seg" role="group" aria-label="How this document is shown">
+                  <button className={'seg-btn' + (rendered ? ' on' : '')} aria-pressed={rendered} data-gr="md-rendered" title="Read it as a formatted document" onClick={() => setSource(false)}>Rendered</button>
+                  <button className={'seg-btn' + (rendered ? '' : ' on')} aria-pressed={!rendered} data-gr="md-source" title="Its source, line by line" onClick={() => setSource(true)}>Source</button>
+                </span>
+              )}
               <span className="grow" />
               <label className={'viewed-box' + (approvedAt ? ' on' : '')} title={approvedAt ? `Approved at ${short(approvedAt)}` : `Approve this ${art.role}`}>
                 <input type="checkbox" name="gr-field" checked={Boolean(approvedAt)} onChange={() => void toggleArtifactApproval(art.path)} data-gr="approve-artifact" /> Approved{approvedAt ? ` at ${short(approvedAt)}` : ''}
               </label>
             </div>
             <div className="file-body">
-              <div className="diff unified doc">{art.lines.map((text, i) => <DocLine key={i} path={art.path} n={i + 1} text={text} />)}</div>
+              {rendered
+                ? <MdDoc key={art.path} lines={art.lines} keyOf={keyOf} anchorOf={anchorOf} threads={threads} />
+                : <div className="diff unified doc">{art.lines.map((text, i) => <DocLine key={i} path={art.path} n={i + 1} text={text} />)}</div>}
               {(gone.length > 0 || stale.length > 0) && (
                 <div className="unplaced" data-gr="line-gone">
                   <div className="unplaced-head">Outdated — written on lines that are no longer in the document</div>

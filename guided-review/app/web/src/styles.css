@@ -501,3 +501,52 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .viz-status.changed { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
 .viz-status.deleted { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
 @media (prefers-reduced-motion: reduce) { .viz-edge, .viz-edge-label, .viz-node { transition: none; } }
+
+/* ── a Markdown file read as a document ────────────────────── */
+.seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; flex: none; }
+.seg-btn { border: 0; background: var(--bg-soft); color: var(--text-2); font: 500 12px/22px var(--font); padding: 0 8px; cursor: pointer; }
+.seg-btn + .seg-btn { border-left: 1px solid var(--border-strong); } .seg-btn.on { background: var(--accent-soft); color: var(--accent-ink); }
+.seg-btn:hover:not(.on) { background: var(--bg-sunk); color: var(--text); }
+.md-doc { padding: 12px 52px 16px 32px; font: 15px/1.6 var(--font); max-width: 1000px; }
+.md-bar { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0 0 12px -16px; color: var(--text-2); }
+.md-doc h1, .md-doc h2, .md-doc h3, .md-doc h4, .md-doc h5, .md-doc h6 { margin: 18px 0 8px; line-height: 1.3; font-weight: 600; }
+.md-doc h1 { font-size: 1.7em; padding-bottom: 6px; border-bottom: 1px solid var(--border); } .md-doc h2 { font-size: 1.35em; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.md-doc h3 { font-size: 1.15em; } .md-doc h4, .md-doc h5, .md-doc h6 { font-size: 1em; }
+.md-doc > .md-block:first-of-type > h1, .md-doc > .md-block:first-of-type > h2 { margin-top: 4px; }
+.md-doc li { margin: 2px 0; } .md-doc li > p { margin: 0 0 6px; } .md-doc ul ul, .md-doc ol ol, .md-doc ul ol, .md-doc ol ul { margin: 2px 0; }
+.md-doc li.task-list-item { list-style: none; } .md-doc li.task-list-item > input { margin: 0 6px 0 -1.4em; }
+.md-doc blockquote { margin: 0 0 10px; padding: 2px 14px; border-left: 3px solid var(--border-strong); color: var(--text-2); }
+.md-doc hr { border: 0; border-top: 1px solid var(--border-strong); margin: 18px 0; }
+.md-doc table { margin: 0 0 10px; display: block; max-width: 100%; overflow-x: auto; overflow-wrap: normal; } .md-doc th { background: var(--bg-soft); text-align: left; }
+.md-rel { color: var(--accent-ink); text-decoration: underline dotted; cursor: help; }
+.md-img { display: inline-block; padding: 0 8px; border: 1px dashed var(--border-strong); border-radius: var(--radius); color: var(--text-2); font-size: 13px; }
+/* a block that owns lines: its mark, its "+", its threads */
+.md-block { position: relative; }
+li.md-block, blockquote.md-block { position: relative; }
+.md-block[data-md-changed]::before { content: ""; position: absolute; left: -16px; top: 2px; bottom: 2px; width: 3px; border-radius: 2px; background: var(--ok); }
+li.md-block[data-md-changed]::before { left: -30px; }
+.md-doc > .md-block[data-md-changed], .md-doc > ul > li.md-block[data-md-changed], .md-doc > ol > li.md-block[data-md-changed] { background: color-mix(in srgb, var(--add-bg) 55%, transparent); border-radius: 3px; }
+/* always in the tab order; visible on the innermost block under the pointer, and on focus */
+.md-add { position: absolute; right: -40px; top: 1px; width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; opacity: 0; z-index: 2; }
+.md-block:hover:not(:has(.md-block:hover)) > .md-add, .md-add:focus-visible { opacity: 1; } .md-add:hover { transform: scale(1.15); }
+.md-threads { margin: 6px 0 12px; font: 14px/1.5 var(--font); color: var(--text); overflow-wrap: normal; text-decoration: none; }
+.md-fold { display: flex; align-items: center; gap: 8px; width: calc(100% + 32px); margin: 8px 0 8px -16px; padding: 3px 12px; border: 0; border-radius: var(--radius); background: var(--hunk-bg); color: var(--accent-ink); font: 12px/20px var(--font); cursor: pointer; text-align: left; }
+.md-fold:hover { background: var(--hunk-edge); }
+.md-removed { margin: 0 0 10px -16px; padding: 4px 12px 4px 13px; border-left: 3px solid var(--bad); border-radius: 3px; background: color-mix(in srgb, var(--del-bg) 70%, transparent); }
+.md-removed > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--bad); } .md-removed .md { margin-top: 4px; color: var(--text-2); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--bad) 50%, transparent); }
+@media (max-width: 760px) { .md-doc { padding: 10px 40px 12px 22px; } .md-add { right: -32px; } }
+.md-removed-src { margin: 4px 0 0; padding: 0; border: 0; background: none; font: 12px/1.5 var(--mono); color: var(--text-2); white-space: pre-wrap; text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--bad) 50%, transparent); }
+/* side by side: before on the left, after on the right */
+.md-doc.split { max-width: none; padding-left: 20px; }
+.md-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 36px; }
+.md-cell { min-width: 0; padding: 0 0 0 0; } .md-cell.new { position: relative; }
+.md-cell.new::before { content: ""; position: absolute; left: -19px; top: 0; bottom: 0; border-left: 1px solid var(--border); }
+.md-cell.old { color: var(--text-2); }
+.md-row.changed > .md-cell.old:not(.empty), .md-row.removed > .md-cell.old { background: color-mix(in srgb, var(--del-bg) 70%, transparent); box-shadow: -8px 0 0 color-mix(in srgb, var(--del-bg) 70%, transparent), -11px 0 0 var(--bad); border-radius: 2px; margin-bottom: 10px; padding: 4px 6px 0 0; }
+.md-cell.empty { background: repeating-linear-gradient(135deg, transparent 0 6px, var(--bg-soft) 6px 12px); border-radius: 3px; margin-bottom: 10px; }
+.md-doc.split .md-block[data-md-changed] { background: color-mix(in srgb, var(--add-bg) 55%, transparent); border-radius: 3px; }
+.md-sides { display: grid; grid-template-columns: 1fr 1fr; column-gap: 36px; flex-basis: 100%; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; }
+.md-doc.split .md-bar { margin-left: 0; }
+/* the switch takes room in the file's header: on a mid-width window the bar of blocks gives way */
+@media (max-width: 1180px) { .file-head:has(.seg) { flex-wrap: wrap; row-gap: 4px; } .file-head:has(.seg) .grow { flex-basis: 0; } .file-head:has(.seg) .diffstat .blocks { display: none; } }
+li.md-removed-item { list-style: none; margin-left: -1.6em; } li.md-removed-item > .md-removed { margin-left: 0; }

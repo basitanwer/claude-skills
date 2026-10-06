@@ -72,7 +72,7 @@ function AskThread({ c }: { c: Comment }) {
         <div className="thread-main thread-head">
           <Who author="user" />
           <span className="label resolved" title="You resolved this conversation">Question · resolved</span>
-          <span className="clip grow muted">{c.text}{answer ? ` — ${answer.text.replace(/[*_`#>]+/g, '').replace(/\s+/g, ' ').slice(0, 200)}` : ''}</span>
+          <span className="clip grow muted">{c.text}{answer ? ` — ${answer.text.replace(/\*\*|__|`/g, '').replace(/^\s*(#{1,6}|>)\s+/gm, '').replace(/\s+/g, ' ').slice(0, 200)}` : ''}</span>
           <button className="link small nowrap" data-gr="show-resolved" onClick={() => setShown(true)}>Show resolved</button>
         </div>
       </div>

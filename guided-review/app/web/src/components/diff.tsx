@@ -5,6 +5,7 @@ import { highlightLine, langForPath } from '../highlight'
 import { pairHunkLines, wordDiffRanges, type CharRange } from '../worddiff'
 import { useStore } from '../store'
 import { showSection } from '../focus'
+import { MdFileBody, isMarkdown } from './mdfile'
 import { errText, hunksForMode, plural, secStyle } from '../util'
 import { CopyButton, DiffStat, Icon, Md, Menu, MenuItem } from './common'
 import { CommentSlot, CommentsCtx, Composer, Thread } from './comments'
@@ -51,6 +52,8 @@ export function applyMarks(html: string, ranges: CharRange[]): string {
 let hovered: string | null = null
 /** Composer key ("diff:<path>:<side>:<n>") of the diff line under the pointer. */
 export const hoveredLine = (): string | null => hovered
+/** the same for a block of a rendered Markdown file, which stands for its first line */
+const hoverLine = (key: string | null): void => { hovered = key }
 
 const keyOf = (path: string, side: 'old' | 'new', n: number): string => `diff:${path}:${side}:${n}`
 const lineKeys = (path: string, l: DiffLine): string[] => {
@@ -441,8 +444,10 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   const inPanel = useStore((s) => Boolean(section) && s.sectionPanel === section?.id)
   const secReviewed = useStore((s) => Boolean(section) && s.reviewedSections.includes(section?.id ?? ''))
   const loadLarge = useStore((s) => Boolean(s.fileLoaded[file.path]))
+  const mdChoice = useStore((s) => s.mdSource[file.path])
+  const saved = useStore((s) => s.sessionId != null)
   const [expandAll, setExpandAll] = useState(0)
-  const { setFileOpen, setFileLoaded, toggleViewed, toggleExcluded, set } = useStore.getState()
+  const { setFileOpen, setFileLoaded, setMdSource, toggleViewed, toggleExcluded, set } = useStore.getState()
 
   const viewed = file.viewed === 'viewed'
   const changed = file.viewed === 'changed'
@@ -517,6 +522,14 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   const expandable = canExpand && hunks.length > 0
   /** comments and questions on lines of a diff that is held back */
   const inside = held ? [...placed.values()].reduce((n, l) => n + l.length, 0) + outside.length : 0
+  // A Markdown file is read as a document, with the source diff one click away. (Not in a
+  // commit view, whose line numbers belong to another diff.) Reading a changed file's whole
+  // text needs a saved review, so in a draft the source diff comes first.
+  const whole = file.status === 'added' || file.status === 'deleted'
+  // (nor a deleted file in a since-view: what is left to show of it is lines of an older state)
+  const mdCan = isMarkdown(file.path) && !file.binary && !commitView && !held && !unchangedSince && hunks.length > 0 && !(file.status === 'deleted' && mode !== 'all')
+  const rendered = mdCan && !(mdChoice ?? (!saved && !(whole && mode === 'all')))
+  const onLines = useMemo(() => [...[...placed.values()].flat(), ...outside, ...hidden], [placed, outside, hidden])
   const body = <DiffBody key={`${signature}|${view?.ignoreWhitespace ? 'w' : ''}`} file={file} hunks={hunks} split={split} placed={placed} outside={outside} composer={commitView ? null : composer} canExpand={canExpand} readOnly={commitView} expandAll={expandAll} />
 
   return (
@@ -527,7 +540,13 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
         </button>
         <span className="mono file-path" title={file.path}>{file.oldPath && <span className="muted">{file.oldPath} → </span>}{file.path}</span>
         <CopyButton text={file.path} title="Copy path" />
-        {expandable && open && !held && <button className="icon-btn" title="Expand all lines" aria-label="Expand all lines" onClick={() => setExpandAll((n) => n + 1)}><Icon name="unfold" /></button>}
+        {mdCan && open && (
+          <span className="seg" role="group" aria-label="How this Markdown file is shown">
+            <button className={'seg-btn' + (rendered ? ' on' : '')} aria-pressed={rendered} data-gr="md-rendered" title="Read it as a formatted document" onClick={() => setMdSource(file.path, false)}>Rendered</button>
+            <button className={'seg-btn' + (rendered ? '' : ' on')} aria-pressed={!rendered} data-gr="md-source" title="The source diff, line by line" onClick={() => setMdSource(file.path, true)}>Source</button>
+          </span>
+        )}
+        {expandable && open && !held && !rendered && <button className="icon-btn" title="Expand all lines" aria-label="Expand all lines" onClick={() => setExpandAll((n) => n + 1)}><Icon name="unfold" /></button>}
         {section && !grouped && (
           <button className={'sec-chip' + (inPanel ? ' on' : '')} data-gr="section-chip" data-gr-reviewed={secReviewed ? 'true' : 'false'} aria-pressed={inPanel} title={`Part of “${section.name}”${section.desc ? ` — ${section.desc}` : ''}${secReviewed ? '\nYou marked this section reviewed' : ''}\nClick to ${inPanel ? 'close' : 'read'} the section beside the code`} onClick={() => showSection(inPanel ? null : section.id)}>
             <span className="sec-dot" /><span className="clip">{section.name}</span>{secReviewed && <span className="sec-tick" role="img" aria-label="Reviewed"><Icon name="check" size={12} /></span>}
@@ -589,6 +608,8 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
               <button className="btn sm" data-gr="load-diff" onClick={() => setFileLoaded(file.path)}>Load diff</button>
               {inside > 0 && <span className="small" data-gr="held-comments">{plural(inside, 'comment')} on its lines — loading the diff shows {inside === 1 ? 'it' : 'them'}.</span>}
             </div>
+          ) : rendered ? (
+            <MdFileBody file={file} hunks={hunks} split={split} comments={onLines} readOnly={commitView} stamp={`${signature}|${mode}`} onHover={hoverLine} onSource={() => setMdSource(file.path, true)} />
           ) : (
             body
           )}
@@ -598,7 +619,7 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
               {gone.map((c) => <Thread key={c.id} c={c} showAnchor />)}
             </div>
           )}
-          {hidden.length > 0 && (
+          {hidden.length > 0 && !rendered && (
             <div className="unplaced" data-gr="line-hidden">
               <div className="unplaced-head">On lines this view hides — switch to “All changes”</div>
               {hidden.map((c) => <Thread key={c.id} c={c} showAnchor />)}

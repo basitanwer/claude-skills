@@ -9,24 +9,38 @@ import { focusAnchor, goBack } from '../focus'
 import { short } from '../util'
 
 // ── markdown ──────────────────────────────────────────────────
-/** Prose written by Claude Code or the reviewer. Raw HTML in the source is not
- *  rendered (react-markdown's default), so narration can never inject markup. */
+/** Prose written by Claude Code or the reviewer, and lines quoted from a file. Raw HTML
+ *  in the source is not rendered (react-markdown's default), so it can never inject markup. */
+/** Code in Markdown: a fenced block is highlighted, a word of code is left as it is. */
+export function MdCode({ className: cn, children }: { className?: string; children?: ReactNode }) {
+  const src = String(children ?? '')
+  const lang = /language-([\w+-]+)/.exec(cn ?? '')?.[1] ?? null
+  if (lang || src.includes('\n')) {
+    return <code className="hl" dangerouslySetInnerHTML={{ __html: highlightBlock(src.replace(/\n$/, ''), lang) }} />
+  }
+  return <code>{children}</code>
+}
+const SCHEME = /^(https?:|mailto:)/i
+/** A link in Markdown. Only a full web or mail address is one: anything else (a path, a
+ *  fragment, another scheme) would lead to an address on the review server, or run. */
+export function MdLink({ href, children }: { href?: string; children?: ReactNode }) {
+  return SCHEME.test(href ?? '')
+    ? <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>
+    : <span className="md-rel" title={href ? `Links to ${href} (not followed from the review)` : undefined}>{children}</span>
+}
+/** An image in Markdown is described, never fetched: text that comes from a diff or from a
+ *  session that read one must not make the reviewer's browser call out. */
+export function MdImg({ src, alt }: { src?: string; alt?: string }) {
+  return <span className="md-img" title="Images are not loaded in a review">Image{alt ? `: ${alt}` : ''}{src ? <span className="mono"> {String(src)}</span> : null}</span>
+}
+/** What every piece of Markdown on the page is rendered with. */
+export const MD_SAFE = { a: MdLink, img: MdImg, code: MdCode }
 export const Md = memo(function Md({ text, className }: { text: string; className?: string }) {
   return (
     <div className={'md' + (className ? ' ' + className : '')}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ href, children }) => <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>,
-          code({ className: cn, children }) {
-            const src = String(children ?? '')
-            const lang = /language-([\w+-]+)/.exec(cn ?? '')?.[1] ?? null
-            if (lang || src.includes('\n')) {
-              return <code className="hl" dangerouslySetInnerHTML={{ __html: highlightBlock(src.replace(/\n$/, ''), lang) }} />
-            }
-            return <code>{children}</code>
-          }
-        }}
+        components={MD_SAFE}
       >
         {text}
       </ReactMarkdown>

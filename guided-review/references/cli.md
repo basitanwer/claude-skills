@@ -211,7 +211,7 @@ The UI and `gr` use the same two endpoints. Both reject requests whose `Origin` 
 
 Every channel, argument and data shape is declared in `app/shared/types.ts` (`Api`, `PushMap`). The server is `app/server/` (`main.mjs` HTTP and handlers, `review.mjs` assembly, anchors and reconciliation, `git.mjs` git access, `store.mjs` persistence).
 
-Routes the UI understands: `#/` (dashboard), `#/repo?path=<abs>`, `#/review?session=<id>`, `#/review?repo=<abs>&base=<ref>&compare=<ref>[&direct=1]`, each review route optionally with `&tab=conversation|commits|spec|visual|files` (default `files`), `&w=1` (hide whitespace), `&commit=<sha>` (one commit of the range, read-only) and `&focus=<url-encoded JSON target>`. Special ref inputs: `@empty` (empty tree, base only) and `@worktree` (compare only: the current branch, or the working tree itself when `HEAD` is detached).
+Routes the UI understands: `#/` (dashboard), `#/repo?path=<abs>`, `#/review?session=<id>`, `#/review?repo=<abs>&base=<ref>&compare=<ref>[&direct=1]`, each review route optionally with `&tab=conversation|commits|spec|visual|files` (default `files`; a `.md` file there, and a document under `spec`, shows rendered with a switch to its source lines), `&w=1` (hide whitespace), `&commit=<sha>` (one commit of the range, read-only) and `&focus=<url-encoded JSON target>`. Special ref inputs: `@empty` (empty tree, base only) and `@worktree` (compare only: the current branch, or the working tree itself when `HEAD` is detached).
 
 ## What costs Claude usage
 

@@ -13,6 +13,8 @@ function selectorsFor(t: FocusTarget): string[] {
       // matching old/new number, then to the file box itself
       return [
         `[data-gr-line="${cssq(`${t.file}:${t.side}:${t.line}`)}"]`,
+        // a Markdown file shown rendered: the block that line was written in
+        `${file} [data-md-side="${t.side}"] [data-md-lines~="${t.line}"]`,
         `${file} [data-${t.side}="${t.line}"]`,
         file
       ]
@@ -127,6 +129,8 @@ function jump(t: FocusTarget, origin: Spot | null, keep: boolean, top = false): 
     if (Object.keys(lift).length) st.setFilters(lift)
     st.setFileOpen(file?.path ?? t.file, true)
     if (t.kind === 'diff') {
+      // a rendered Markdown file shows its new side only: a removed line is in the source diff
+      if (t.side === 'old' && file && file.status !== 'deleted') st.setMdSource(file.path, true)
       // a line cannot be shown in a diff that is held back: load it
       st.setFileLoaded(file?.path ?? t.file)
       // a line outside the diff's hunks is fetched and shown in place by its file box
@@ -137,7 +141,7 @@ function jump(t: FocusTarget, origin: Spot | null, keep: boolean, top = false): 
   let tries = 0
   const tick = (): void => {
     // give the exact selector a few frames to mount before accepting a fallback
-    const usable = tries < (t.kind === 'diff' ? 30 : 8) ? sels.slice(0, 1) : sels
+    const usable = tries < (t.kind === 'diff' ? 30 : 8) ? sels.slice(0, t.kind === 'diff' ? 2 : 1) : sels
     const el = find(usable)
     if (el) {
       const land = (): void => {
@@ -267,6 +271,8 @@ export async function focusChanged(r: ChangedRange): Promise<void> {
   const say = (text: string): void => st.toast(text, 'info', undefined, { key: CHANGED_KEY })
   const file = st.loaded?.files.find((f) => f.path === r.file || f.oldPath === r.file)
   if (!file) { say(`${r.file} is no longer part of this comparison, so ${lines} cannot be shown.`); return }
+  // the fix is lines of the source: a Markdown file is shown as its source diff
+  st.setMdSource(file.path, true)
   focusAnchor({ kind: 'diff', file: file.path, side: 'new', line: r.start })
   const first = `[data-gr-line="${cssq(`${file.path}:new:${r.start}`)}"]`
   let tries = 0
@@ -286,6 +292,8 @@ export async function focusChanged(r: ChangedRange): Promise<void> {
 /** Go to lines of a changed file and flash all of them: the code a box of a diagram
  *  stands for. A jump like any other the reviewer did not aim at a line themselves. */
 export function focusLines(file: string, start: number, end: number): void {
+  // exact lines are asked for: a Markdown file is shown as its source
+  if (end > start) useStore.getState().setMdSource(file, true)
   focusAnchor({ kind: 'diff', file, side: 'new', line: start })
   if (end <= start) return
   // the lines of the range between the hunks are not on the page: have them fetched too

@@ -81,6 +81,9 @@ interface Store {
   fileOpen: Record<string, boolean>
   /** files whose diff is held back by default (large, generated) and was asked for */
   fileLoaded: Record<string, boolean>
+  /** Markdown files the reviewer (or a jump to an exact line) switched between the
+   *  rendered document and the source diff; absent: rendered, once the review is saved */
+  mdSource: Record<string, boolean>
   sectionOpen: Record<string, boolean>
   excludedOpen: boolean
   diffMode: DiffMode
@@ -149,6 +152,7 @@ interface Store {
   setFilters(patch: Partial<Filters>): void
   setFileOpen(path: string, open: boolean): void
   setFileLoaded(path: string): void
+  setMdSource(path: string, source: boolean): void
   setSectionOpen(id: string, open: boolean): void
   set(patch: Partial<Pick<Store, 'excludedOpen' | 'diffMode' | 'docPath' | 'visualView' | 'visualNode' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'fileQuery'>>): void
   applyAction(action: UiAction): void
@@ -279,7 +283,7 @@ export const useStore = create<Store>((set, get) => {
     set({
       loaded, sessionId, preview, loading: false,
       viewedAt: loaded.state.viewedAt, reviewedSections: loaded.state.reviewedSections,
-      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, sectionOpen: {}, excludedOpen: false, diffMode: 'all', docPath: null, visualView: null, visualNode: null,
+      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, mdSource: {}, sectionOpen: {}, excludedOpen: false, diffMode: 'all', docPath: null, visualView: null, visualNode: null,
       composer: null, tour: null, returnTo: null, sectionPanel: null, fileQuery: '', wsOnly: []
     })
     refreshWsOnly()
@@ -300,6 +304,7 @@ export const useStore = create<Store>((set, get) => {
     dismissed: [],
     fileOpen: {},
     fileLoaded: {},
+    mdSource: {},
     sectionOpen: {},
     excludedOpen: false,
     diffMode: 'all',
@@ -687,6 +692,9 @@ export const useStore = create<Store>((set, get) => {
     },
     setFileOpen(path, open) {
       set({ fileOpen: { ...get().fileOpen, [path]: open } })
+    },
+    setMdSource(path, source) {
+      if (get().mdSource[path] !== source) set({ mdSource: { ...get().mdSource, [path]: source } })
     },
     setFileLoaded(path) {
       if (!get().fileLoaded[path]) set({ fileLoaded: { ...get().fileLoaded, [path]: true } })
