@@ -390,12 +390,15 @@ const DiffBody = memo(function DiffBody({ file, hunks, split, placed, outside, c
 })
 
 // A diff is held back behind "Load diff" when it is large (by lines, or by size: a few
-// lines can still be megabytes) or generated: named like build output or a lockfile, or
-// carrying a line no person wrote. Its comments stay reachable: the prompt counts them,
+// lines can still be megabytes), or generated and more than a screenful: named like
+// build output or a lockfile, or carrying a line no person wrote. A small file under
+// such a path, or one long line in a short file, renders as usual. Its comments stay reachable: the prompt counts them,
 // and focusing one loads the diff.
 const LARGE = 1500
 const LARGE_CHARS = 300_000
 const LONG_LINE = 5000
+/** A generated file smaller than this is rendered like any other: holding it saves nothing. */
+const GENERATED_HELD = 20_000
 const GENERATED = /(^|\/)(dist|node_modules|vendor)\/|\.min\.[a-z]+$|\.map$|(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|Gemfile\.lock|poetry\.lock|uv\.lock|composer\.lock|go\.sum)$/
 const sizeText = (chars: number): string => (chars >= 1_000_000 ? `${(chars / 1_000_000).toFixed(1)} MB` : chars >= 1000 ? `${Math.round(chars / 1000)} KB` : `${chars} B`)
 
@@ -434,7 +437,7 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   }, [hunks])
   const generated = !file.binary && (GENERATED.test(file.path) || size.longest > LONG_LINE)
   const large = size.lines > LARGE || size.chars > LARGE_CHARS
-  const held = (generated || large) && hunks.length > 0 && !loadLarge
+  const held = (large || (generated && size.chars > GENERATED_HELD)) && hunks.length > 0 && !loadLarge
   const open = override ?? (!viewed && !excluded)
   // in a since-view, a file with no since-diff at all is unchanged since that baseline
   const unchangedSince = !file.untracked && ((mode === 'since' && file.sinceHunks === undefined) || (mode === 'viewed' && file.sinceViewedHunks === undefined))
@@ -484,7 +487,6 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   if (file.status === 'renamed') labels.push({ text: 'Renamed' })
   if (file.untracked) labels.push({ text: 'Untracked', cls: 'warn', title: 'Not tracked by git yet' })
   if (file.binary) labels.push({ text: 'Binary' })
-  if (generated) labels.push({ text: 'Generated', title: GENERATED.test(file.path) ? 'Looks like build output or a lockfile, going by its path' : `Has a line of ${size.longest.toLocaleString()} characters: minified or machine-written` })
   if (file.modeChange) labels.push({ text: `Mode ${file.modeChange.from} → ${file.modeChange.to}`, title: 'File mode changed' })
   if (file.conflict) labels.push({ text: 'Conflict', cls: 'bad', title: 'Unresolved merge conflict' })
   if (!file.untracked && mixed.length) labels.push({ text: mixed.length === 2 ? 'Staged + unstaged' : mixed[0] === 'staged' ? 'Staged' : 'Unstaged', cls: 'warn', title: 'Has uncommitted changes' })

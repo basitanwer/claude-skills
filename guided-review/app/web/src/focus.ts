@@ -1,4 +1,4 @@
-import type { FocusTarget } from '@shared/types'
+import type { FocusTarget, TourStop } from '@shared/types'
 import { useStore } from './store'
 import { baseName, cssq, type Tab } from './util'
 
@@ -73,8 +73,15 @@ function flash(el: HTMLElement): void {
  *  their place. `nav`: they picked the destination from a list of files — no pill. */
 export function focusAnchor(t: FocusTarget, opts: { nav?: boolean } = {}): void {
   const st = useStore.getState()
-  // stepping through a tour keeps the spot remembered when the tour started
-  jump(t, opts.nav || st.tour ? null : whereAmI(st.tab), Boolean(st.tour))
+  // during a tour the way back leads to where the tour started, from whichever stop
+  jump(t, opts.nav ? null : st.tour?.origin ?? whereAmI(st.tab), false)
+}
+/** Start a tour at one of its stops, remembering where the reviewer was. */
+export function startTour(stops: TourStop[], loop?: boolean, idx = 0): void {
+  const st = useStore.getState()
+  if (!stops[idx]) return
+  st.set({ tour: { stops, idx, loop, origin: st.tour?.origin ?? whereAmI(st.tab) } })
+  focusAnchor(stops[idx].target)
 }
 /** `origin`: where to offer the way back to, if the jump moves the reviewer. `keep`: leave
  *  an already remembered spot alone. */
@@ -90,10 +97,11 @@ function jump(t: FocusTarget, origin: Spot | null, keep: boolean): void {
     whenMounted([`[data-gr-section-panel="${cssq(t.sectionId)}"]`], flash)
     return
   }
-  // a jump that leaves the current tab remembers where the reviewer was at once; one that
-  // stays is remembered when it lands, if it went far. Any other jump makes the remembered
-  // spot stale.
-  const leaves = !beside && (t.kind === 'summary' || t.kind === 'section' ? 'conversation' : 'files') !== st.tab
+  // a jump to another tab than the one the reviewer was on remembers that place at once;
+  // one within it is remembered when it lands, if it went far. Any other jump makes the
+  // remembered spot stale.
+  const to = beside ? st.tab : t.kind === 'summary' || t.kind === 'section' ? 'conversation' : 'files'
+  const leaves = Boolean(origin) && origin?.tab !== to
   if (!keep) st.set({ returnTo: leaves ? origin : null })
   // a commit view shows another diff: targets belong to the whole comparison
   if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, origin, keep || leaves)); return }

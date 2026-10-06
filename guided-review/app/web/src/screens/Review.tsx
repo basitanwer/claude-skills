@@ -3,7 +3,7 @@ import type {
   AnchorInput, Artifact, Comment, FileDiff, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, showSection } from '../focus'
+import { focusAnchor, showSection, startTour } from '../focus'
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, driftText, elapsed, focusable, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
@@ -565,7 +565,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
             <>
               <div className="pop-head">Diff view</div>
               <MenuItem checked={split} disabled={!canSplit} title={roomy && !canSplit ? 'Not enough room beside the section — close it to split the diff' : undefined} onClick={() => { setDiffView('split'); close() }}>Split</MenuItem>
-              <MenuItem checked={!split} onClick={() => { setDiffView('unified'); close() }}>Unified</MenuItem>
+              <MenuItem checked={!split} onClick={() => { if (canSplit) setDiffView('unified'); close() }}>Unified</MenuItem>
               <label className="menu-item" title="Leave out changes that only alter whitespace"><span className="menu-check"><input type="checkbox" name="gr-field" data-gr="hide-whitespace" checked={Boolean(view.ignoreWhitespace)} onChange={(e) => { void setView({ ignoreWhitespace: e.target.checked }); close() }} /></span>Hide whitespace</label>
               <div className="pop-head">File panel</div>
               <MenuItem checked={treeView === 'tree'} onClick={() => { setTreeView('tree'); close() }}>Tree</MenuItem>
@@ -649,7 +649,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
 // ── Conversation ──────────────────────────────────────────────
 function TourCard({ stops, loop }: { stops: TourStop[]; loop?: boolean }) {
   const set = useStore((s) => s.set)
-  const start = (idx: number): void => { focusAnchor(stops[idx].target); set({ tour: { stops, idx, loop } }) }
+  const start = (idx: number): void => startTour(stops, loop, idx)
   return (
     <div className="tour-card" data-gr="chat-tour">
       <div className="pop-head">Tour · {stops.length} stops{loop ? ' · loops' : ''}</div>
@@ -1091,7 +1091,7 @@ export function Review() {
         e.preventDefault()
         if (!st.panelOpen) st.set({ panelOpen: true })
         // on a mid-width window an open section sits in the tree's place: closing it brings the tree back
-        if (st.sectionPanel && !document.getElementById('gr-file-filter') && window.matchMedia('(min-width: 1100px)').matches) showSection(null)
+        if (st.sectionPanel && window.matchMedia('(min-width: 1100px) and (max-width: 1599px)').matches) showSection(null)
         window.setTimeout(() => document.getElementById('gr-file-filter')?.focus(), 30)
       } else if (e.key === 'c' && hoveredLine()) {
         e.preventDefault()

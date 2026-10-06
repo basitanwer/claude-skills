@@ -427,5 +427,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 
 /* diffs held back (large, generated) and lines too long to show whole */
 .file-msg.held { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.more-line { display: inline-block; margin-left: 8px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 2em; background: var(--bg); color: var(--accent-ink); font: 500 12px/18px var(--font); white-space: nowrap; cursor: pointer; }
+.more-line { display: inline-block; margin-left: 8px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 2em; background: var(--bg); color: var(--accent-ink); font: 500 12px/18px var(--font); white-space: normal; max-width: 100%; user-select: none; cursor: pointer; }
 .more-line:hover { background: var(--bg-sunk); }
+/* a tour's bar sits at the bottom centre: the way back moves above it */
+.tourbar ~ .backbar { bottom: 172px; }

@@ -5,7 +5,7 @@ import type {
 } from '@shared/types'
 import { api, connect } from './api'
 import { errText, isOpen, newId, parseHash, refInput, routeHash, targetLabel, type DiffMode, type Route, type Tab } from './util'
-import { focusAnchor } from './focus'
+import { focusAnchor, startTour } from './focus'
 
 /** `key`: a newer toast with the same key takes the place of an older one. */
 export interface Toast { id: string; text: string; kind: 'error' | 'info'; action?: { label: string; run: () => void }; key?: string }
@@ -18,7 +18,11 @@ function typing(): boolean {
   if (el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && (el.type === 'text' || el.type === 'search') && !el.readOnly)) return true
   return [...document.querySelectorAll<HTMLTextAreaElement | HTMLInputElement>('textarea, input[name="gr-field"]:not([type]):not([readonly]):not(#gr-file-filter)')].some((f) => f.value.trim() !== '')
 }
-export interface Tour { stops: TourStop[]; idx: number; loop?: boolean }
+export interface Tour {
+  stops: TourStop[]; idx: number; loop?: boolean
+  /** where the reviewer was when the tour started: what "Back to …" returns to */
+  origin?: NonNullable<Store['returnTo']>
+}
 export interface Hub { repo: string; state: RepoState | null; sessions: SessionListItem[]; showArchived: boolean }
 /** The code under review moved while this view was open. */
 export interface Drift { signature: string; summary: DriftSummary | null }
@@ -173,6 +177,9 @@ function syncHash(route: Route): void {
 
 export const useStore = create<Store>((set, get) => {
   const fail = (e: unknown): void => get().toast(errText(e), 'error')
+  /** What belongs to the review on screen and must not outlive it: the way back, a tour,
+   *  the open section, and toasts that would act on it. */
+  const leftReview = (): Pick<Store, 'returnTo' | 'tour' | 'sectionPanel' | 'toasts'> => ({ returnTo: null, tour: null, sectionPanel: null, toasts: get().toasts.filter((t) => !t.action) })
 
   const setState = (state: ReviewState): void => {
     const loaded = get().loaded
@@ -327,23 +334,23 @@ export const useStore = create<Store>((set, get) => {
         const cur = get().view
         set({ route, tab: route.tab ?? 'files' })
         if (Boolean(next.ignoreWhitespace) !== Boolean(cur.ignoreWhitespace) || (next.commit ?? '') !== (cur.commit ?? '')) { set({ view: next }); await get().reload() }
-        if (route.focus) { try { const t = JSON.parse(route.focus); window.setTimeout(() => focusAnchor(t), 60) } catch { /* ignore */ } }
+        if (route.focus) { try { const t = JSON.parse(route.focus); window.setTimeout(() => focusAnchor(t, { nav: true }), 60) } catch { /* ignore */ } }
         return
       }
       set({ route, navOpen: false, tab: route.name === 'review' ? route.tab ?? 'files' : 'files', view: viewOfRoute(route), reveal: null })
       if (route.name === 'dashboard') {
         connect(null)
-        set({ loaded: null, sessionId: null, preview: null, hub: null })
+        set({ loaded: null, sessionId: null, preview: null, hub: null, ...leftReview() })
         await get().loadDashboard()
         return
       }
       if (route.name === 'hub') {
         connect(null)
-        set({ loaded: null, sessionId: null, preview: null })
+        set({ loaded: null, sessionId: null, preview: null, ...leftReview() })
         await get().loadHub(route.path, false)
         return
       }
-      set({ loading: true, loaded: null, sessionId: null, preview: null })
+      set({ loading: true, loaded: null, sessionId: null, preview: null, ...leftReview() })
       try {
         if (route.session != null) {
           const loaded = await openSession(route.session)
@@ -666,11 +673,7 @@ export const useStore = create<Store>((set, get) => {
       switch (action.kind) {
         case 'focus': focusAnchor(action.target); break
         case 'tour':
-          if (action.stops.length) {
-            // the first stop before the tour is on: it remembers where the reviewer was
-            focusAnchor(action.stops[0].target)
-            set({ tour: { stops: action.stops, idx: 0, loop: action.loop } })
-          }
+          startTour(action.stops, action.loop)
           break
         case 'status': get().set({ status: action.text }); break
         case 'navigate': window.location.hash = action.hash.replace(/^#?/, '#'); break

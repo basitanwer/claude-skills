@@ -280,6 +280,10 @@ export function stuckAfterMs(away = false): number {
   const s = typeof w === 'number' && w > 0 ? w : q > 0 ? q : away ? 30 : 300
   return s * 1000
 }
+/** When the session holding a request last showed it is on it: its latest progress line,
+ *  but never earlier than when it claimed the request (a line from before that, such as
+ *  "Sent again by the reviewer", is not its doing). */
+const lastSign = (r: ReviewRequest): number => Math.max(Date.parse(r.startedAt ?? r.createdAt), Date.parse(r.progress.at(-1)?.at ?? r.startedAt ?? r.createdAt))
 /** Why a claimed request looks dropped, if it does. `away`: no Claude Code session is
  *  reachable, so the one that took it is gone (closed terminal, crashed). `silent`: a
  *  session is attached but has reported nothing on it for a long time. Either way the
@@ -287,13 +291,13 @@ export function stuckAfterMs(away = false): number {
 export function stuckReason(r: ReviewRequest, away: boolean, now = Date.now()): 'away' | 'silent' | null {
   if (r.status !== 'running' || !r.startedAt) return null
   const limit = stuckAfterMs(away)
-  const last = Date.parse(r.progress.at(-1)?.at ?? r.startedAt)
+  const last = lastSign(r)
   return now - Date.parse(r.startedAt) >= limit && now - last >= limit ? (away ? 'away' : 'silent') : null
 }
 /** The label and its tooltip for a request that looks dropped. */
 export function stuckText(r: ReviewRequest, why: 'away' | 'silent', now = Date.now()): { label: string; title: string } {
   if (why === 'away') return { label: 'Claude Code may not be listening', title: 'A session picked this up, but no Claude Code session is reachable now: it may have closed. Send it again and the next session that listens takes it.' }
-  const quiet = elapsed(r.progress.at(-1)?.at ?? r.startedAt, now).replace(/ \d+s$/, '')
+  const quiet = elapsed(new Date(lastSign(r)).toISOString(), now).replace(/ \d+s$/, '')
   return { label: `No progress for ${quiet}`, title: 'A Claude Code session is attached but has reported nothing on this for a while. It may still be working; if it is not, send it again.' }
 }
 /** A request nobody has picked up for half a minute while no session is attached. */
