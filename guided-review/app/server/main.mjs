@@ -36,7 +36,7 @@ const IDLE_MS = Number(process.env.GUIDED_REVIEW_IDLE_MINUTES ?? 30) * 60_000
 const store = new Store(HOME)
 
 // ── push ─────────────────────────────────────────────────────
-/** @type {Set<{ res: http.ServerResponse, sessionId: number | null, repo: string | null, ui: boolean, bridge: boolean, changes: boolean }>} */
+/** @type {Set<{ res: http.ServerResponse, sessionId: number | null, repo: string | null, owner: string | null, ui: boolean, bridge: boolean, persistent: boolean, changes: boolean }>} */
 const clients = new Set()
 /** Send to every client watching this review (and to clients watching none: the dashboard).
  *  @param {string} channel @param {{ sessionId: number } & Record<string, unknown>} msg */
@@ -76,27 +76,88 @@ function notify(sessionId, title, body) {
 const seen = new Map()
 const lastPresence = new Map()
 const WORKING_WINDOW_MS = 120_000
-/** `listening`: `gr wait` is connected right now. `working`: the bridge was active in
- *  the last two minutes, or it holds a request. Otherwise `away`.
+/** How long a Claude Code session that is not connected still counts as alive after its
+ *  last call. A session using `gr wait` is disconnected while it works on a request. */
+const OWNER_GRACE_MS = Number(process.env.GUIDED_REVIEW_OWNER_GRACE_SECONDS ?? 300) * 1000
+/** A session that keeps a listener (`gr listen`) is normally connected; a gap is its
+ *  listener being restarted, which takes moments, so it is given less time. */
+const LISTENER_GRACE_MS = Math.min(OWNER_GRACE_MS, 120_000)
+/** When each Claude Code session (by its owner id) last called in, and when its last
+ *  listener disconnected. @type {Map<string, number>} */
+const ownerSeen = new Map()
+/** @type {Map<string, number>} */
+const ownerLeft = new Map()
+/** Sessions that have used a persistent listener. @type {Set<string>} */
+const ownerListens = new Set()
+const BOOT = Date.now()
+/** A listener of this session is connected right now. @param {string} owner */
+const ownerConnected = (owner) => [...clients].some((c) => c.bridge && c.owner === owner)
+/** The session behind this owner id is still there: a listener of its is connected, or
+ *  it was heard from recently. @param {string} owner */
+function ownerAlive(owner) {
+  if (ownerConnected(owner)) return true
+  // nothing is known about a session this server has not heard from since it started:
+  // it gets the benefit of the doubt, counted from the start
+  const last = Math.max(ownerSeen.get(owner) ?? BOOT, ownerLeft.get(owner) ?? 0)
+  return Date.now() - last < (ownerListens.has(owner) ? LISTENER_GRACE_MS : OWNER_GRACE_MS)
+}
+/** Which session each review last heard from (see `seen`). @type {Map<number, string | undefined>} */
+const seenBy = new Map()
+/** A claimed request somebody is still behind. One claimed without an owner id (an older
+ *  `gr`, or outside Claude Code) counts while its review heard from a session recently.
+ *  @param {number} sessionId @param {import('../shared/types.ts').ReviewRequest} r */
+const held = (sessionId, r) => r.status === 'running' && (r.owner ? ownerAlive(r.owner) : Date.now() - (seen.get(sessionId) ?? BOOT) < OWNER_GRACE_MS || anonymousBridge(sessionId))
+/** A listener that sent no owner id is connected for this review: it may be the one
+ *  holding what was claimed without an owner. @param {number} sessionId */
+function anonymousBridge(sessionId) {
+  const repo = store.sessions.get(sessionId)?.repo
+  return [...clients].some((c) => c.bridge && !c.owner && (c.sessionId === sessionId || (c.repo && c.repo === repo)))
+}
+/** Whether a Claude Code session will act on what the reviewer asks. `working`: a session
+ *  holds a request, or handled one in the last two minutes. `listening`: a listener is
+ *  connected. Otherwise `away`: a request, even a claimed one, has nobody behind it.
  *  @param {number} sessionId @returns {import('../shared/types.ts').Presence} */
 function presenceOf(sessionId) {
   const s = store.sessions.get(sessionId)
-  if (s?.state.requests.some((r) => r.status === 'running')) return 'working'
+  if (s?.state.requests.some((r) => held(sessionId, r))) return 'working'
   if ([...clients].some((c) => c.bridge && (c.sessionId === sessionId || (c.repo && c.repo === s?.repo)))) return 'listening'
-  return Date.now() - (seen.get(sessionId) ?? 0) < WORKING_WINDOW_MS ? 'working' : 'away'
+  // a session that handled a request moments ago is probably about to ask for the next
+  // one (`gr wait` between requests), unless that session is known to be gone
+  const by = seenBy.get(sessionId)
+  return Date.now() - (seen.get(sessionId) ?? 0) < WORKING_WINDOW_MS && (!by || ownerAlive(by)) ? 'working' : 'away'
 }
 /** A bridge listener connected or left: refresh the reviews it covers.
- *  @param {{ bridge: boolean, sessionId: number | null, repo: string | null }} client */
-function markBridge(client) {
+ *  @param {{ bridge: boolean, sessionId: number | null, repo: string | null, owner: string | null, persistent: boolean }} client @param {boolean} left */
+function markBridge(client, left = false) {
   if (!client.bridge) return
+  if (client.owner) {
+    if (left) ownerLeft.set(client.owner, Date.now())
+    else if (client.persistent) ownerListens.add(client.owner)
+    else ownerListens.delete(client.owner)        // it is using `gr wait` now
+  }
   const ids = client.repo ? store.list(client.repo).map((x) => x.id) : client.sessionId ? [client.sessionId] : []
-  for (const id of ids) { seen.set(id, Date.now()); refreshPresence(id) }
+  for (const id of ids) refreshPresence(id)
 }
 function refreshPresence(/** @type {number} */ sessionId) {
   const p = presenceOf(sessionId)
   if (lastPresence.get(sessionId) !== p) { lastPresence.set(sessionId, p); push('presence', { sessionId, presence: p }) }
 }
-setInterval(() => { for (const id of lastPresence.keys()) refreshPresence(id) }, 10_000).unref()
+/** Claimed requests already announced as having nobody behind them ("review:request"). @type {Set<string>} */
+const announcedOrphan = new Set()
+setInterval(() => {
+  for (const id of lastPresence.keys()) refreshPresence(id)
+  // A request whose owner has gone has to reach another listener. Listeners look again
+  // on a presence message, which the line above sends only when the review's presence
+  // changed; another request held on the same review keeps it at "working". So each
+  // request is announced once when it is found orphaned.
+  for (const s of store.sessions.values()) {
+    for (const r of s.state.requests) {
+      const key = `${s.id}:${r.id}`
+      if (r.status !== 'running' || held(s.id, r)) announcedOrphan.delete(key)
+      else if (!announcedOrphan.has(key)) { announcedOrphan.add(key); push('presence', { sessionId: s.id, presence: presenceOf(s.id) }) }
+    }
+  }
+}, 10_000).unref()
 
 // ── watcher: one fingerprint per review that somebody has open ──
 const signatures = new Map()
@@ -144,6 +205,9 @@ const locks = new Map()
  *  the pushes and notifications waiting for the commit.
  *  @type {AsyncLocalStorage<{ id: number, batch?: { pushes: [string, any][], notes: [number, string, string][] } }>} */
 const scope = new AsyncLocalStorage()
+/** Who is calling: the owner id `gr` sent with this call, if any.
+ *  @type {AsyncLocalStorage<{ owner: string | undefined }>} */
+const callerCtx = new AsyncLocalStorage()
 /** @template T @param {number} id @param {() => Promise<T>} fn @returns {Promise<T>} */
 function locked(id, fn) {
   if (scope.getStore()?.id === id) return fn() // already inside this review's lock (a batch step)
@@ -193,20 +257,36 @@ function finish(s, r, status, error) {
     const replied = r.kind === 'apply' && c.replies.some((x) => x.author === 'agent' && x.at >= r.createdAt)
     c.status = replied ? 'answered' : 'queued'
   }
+  // A thread sent only for the reviewer's reply keeps its status, so the same has to be
+  // done for the reply: if Claude Code did not answer in the thread, what the reviewer
+  // wrote last is pending again and travels with their next send.
+  const carried = (/** @type {string} */ cid) => s.state.requests.some((x) => x !== r && (x.status === 'pending' || x.status === 'running') && x.commentIds?.includes(cid))
+  for (const c of s.state.comments) {
+    const handled = c.replies.some((x) => x.author === 'agent' && x.at >= r.createdAt) || (c.resolution && c.resolution.at >= r.createdAt)
+    // a later request that is still open has the thread in hand, with every reply in it
+    if (!r.replyIds?.includes(c.id) || handled || carried(c.id)) continue
+    // only what this request sent: a reply written after it was made is pending already or belongs to a later send
+    for (let i = c.replies.length - 1; i >= 0 && c.replies[i].author === 'user'; i--) if (c.replies[i].at < r.createdAt) c.replies[i].pending = true
+  }
 }
-/** @param {Session} s @param {string} id */
+/** The request a session is reporting on. A session that no longer holds it (another
+ *  one took it over, or the reviewer sent it again and somebody else claimed it) is told
+ *  so instead of being allowed to finish it under the new holder.
+ *  @param {Session} s @param {string} id */
 function liveRequest(s, id) {
   const r = s.state.requests.find((x) => x.id === id)
   if (!r) throw new Error(`no request ${id}`)
   if (r.status === 'cancelled') throw new Error('cancelled: the reviewer cancelled this request — stop working on it')
   if (r.status !== 'pending' && r.status !== 'running') throw new Error(`request ${id} is already ${r.status}`)
+  const caller = callerCtx.getStore()?.owner
+  if (caller && r.owner && r.owner !== caller) throw new Error('displaced: another Claude Code session now holds this request — stop working on it')
   return r
 }
 
 // ── RPC handlers (the Api in app/shared/types.ts) ────────────
 /** @type {Record<string, (...args: any[]) => any>} */
 const api = {
-  info: () => ({ app: 'guided-review', version: VERSION, pid: process.pid, home: HOME, host: HOST, port: PORT, tabs: [...clients].filter((c) => c.ui).length }),
+  info: () => ({ app: 'guided-review', version: VERSION, pid: process.pid, home: HOME, host: HOST, port: PORT, tabs: [...clients].filter((c) => c.ui).length, bridges: [...clients].filter((c) => c.bridge).length }),
 
   async dashboard() {
     const all = store.all()
@@ -426,6 +506,9 @@ const api = {
     if (!r) throw new Error(`no request ${rid}`)
     if (r.status !== 'running') throw new Error(`request ${rid} is ${r.status}, not running`)
     r.status = 'pending'; delete r.startedAt
+    if (r.owner) r.wasWith = r.owner
+    delete r.owner
+    r.retried = (r.retried ?? 0) + 1
     r.progress.push({ at: now(), text: 'Sent again by the reviewer.' })
     save(s); changed(id); refreshPresence(id)
     return r
@@ -438,17 +521,36 @@ const api = {
     refreshPresence(id)
     return taken
   }),
-  async requestTakeAll(/** @type {string} */ dir, includeRunning = false) {
+  /** Claim requests for the Claude Code session `owner` (its id; absent for a caller that
+   *  has none). Always: what is pending, and what a session that is gone left claimed.
+   *  With `includeRunning` (a listener starting): also what this same session already
+   *  holds, in case it was claimed and never reached it. Never what another live
+   *  session holds. */
+  async requestTakeAll(/** @type {string} */ dir, includeRunning = false, /** @type {string | undefined} */ owner = undefined) {
     const repo = await repoOf(dir)
+    const me = typeof owner === 'string' && owner ? owner : undefined
+    if (me) ownerSeen.set(me, Date.now())
     const out = []
     for (const s of store.list(repo)) {
       const got = await locked(s.id, async () => {
-        const mine = s.state.requests.filter((r) => r.status === 'pending' || (includeRunning && r.status === 'running'))
-        const items = mine.map((r) => ({ sessionId: s.id, request: r, resumed: r.status === 'running', comments: s.state.comments.filter((c) => r.commentIds?.includes(c.id)) }))
+        /** @typedef {import('../shared/types.ts').ReviewRequest} Req */
+        // claimed, and nobody is behind it any more (a request claimed without an owner id
+        // counts as held while its review heard from a session recently)
+        const orphaned = (/** @type {Req} */ r) => r.status === 'running' && (r.owner ? r.owner !== me && !ownerAlive(r.owner) : Boolean(me) && !held(s.id, r))
+        // what this caller already holds; a caller without an id cannot tell its own from
+        // another's, so it gets back whatever was claimed without one
+        const again = (/** @type {Req} */ r) => includeRunning && r.status === 'running' && (r.owner ? r.owner === me : !me)
+        // sent again by the reviewer: it goes back to the session that had it, if that one is listening
+        const fresh = (/** @type {Req} */ r) => r.status === 'pending' && !(r.wasWith && r.wasWith !== me && ownerConnected(r.wasWith))
+        const mine = s.state.requests.filter((r) => fresh(r) || orphaned(r) || again(r))
+        const items = mine.map((r) => ({ sessionId: s.id, request: r, resumed: r.status === 'running', yours: r.status === 'running' && Boolean(me) && r.owner === me, comments: s.state.comments.filter((c) => r.commentIds?.includes(c.id)) }))
         let any = false
-        for (const r of mine) if (r.status === 'pending') { r.status = 'running'; r.startedAt = now(); any = true }
+        for (const r of mine) {
+          if (r.status === 'pending') { r.status = 'running'; r.startedAt = now(); delete r.wasWith; any = true }
+          if (r.owner !== me) { if (me) r.owner = me; else delete r.owner; any = true }
+        }
         if (any) { save(s); changed(s.id) }
-        if (mine.length) { seen.set(s.id, Date.now()); refreshPresence(s.id) }
+        if (mine.length) { seen.set(s.id, Date.now()); seenBy.set(s.id, me); refreshPresence(s.id) }
         return structuredClone(items)
       })
       out.push(...got)
@@ -558,8 +660,17 @@ async function checkAction(s, loaded, a) {
 }
 /** What a batch may contain. */
 const BATCHABLE = new Set(['commentAdd', 'commentUpdate', 'commentDelete', 'messagePost', 'requestUpdate', 'annotate', 'uiAction', 'setViewed', 'setArtifacts'])
-/** Channels the bridge uses; a call to one marks the session as present. */
+/** Sent by `gr` with every call. */
 const BRIDGE_HEADER = 'x-guided-review-bridge'
+/** The calling Claude Code session's id, when `gr` knows it. */
+const OWNER_HEADER = 'x-guided-review-owner'
+/** Calls that mean a session is handling the reviewer's requests: they mark it as
+ *  present. Reading the review, commenting or posting a note does not: it says nothing
+ *  about whether a request made now would be picked up.
+ *  @param {string} channel @param {any[]} args */
+const handling = (channel, args) => channel === 'requestTake' || channel === 'requestUpdate'
+  || (channel === 'messagePost' && Boolean(args[1]?.requestId)) || (channel === 'annotate' && Boolean(args[2]))
+  || (channel === 'batch' && Array.isArray(args[1]) && args[1].some((op) => handling(op?.channel, [args[0], ...(Array.isArray(op?.args) ? op.args : [])])))
 
 // ── HTTP ─────────────────────────────────────────────────────
 const isLoopback = (/** @type {string} */ name) => ['localhost', '127.0.0.1', '::1'].includes(name.toLowerCase().replace(/^\[|\]$/g, ''))
@@ -610,7 +721,7 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive' })
     res.write('retry: 2000\n\n')
     const sid = Number(url.searchParams.get('session'))
-    const client = { res, sessionId: Number.isInteger(sid) && sid > 0 ? sid : null, repo: url.searchParams.get('repo') || null, ui: url.searchParams.get('ui') === '1', bridge: url.searchParams.get('bridge') === '1', changes: url.searchParams.get('changes') === '1' }
+    const client = { res, sessionId: Number.isInteger(sid) && sid > 0 ? sid : null, repo: url.searchParams.get('repo') || null, owner: url.searchParams.get('owner') || null, persistent: url.searchParams.get('listen') === '1', ui: url.searchParams.get('ui') === '1', bridge: url.searchParams.get('bridge') === '1', changes: url.searchParams.get('changes') === '1' }
     clients.add(client); touch()
     markBridge(client)
     // a tab learns the current fingerprint as soon as it connects, so a change that
@@ -624,7 +735,7 @@ const server = http.createServer((req, res) => {
     const keepalive = setInterval(() => res.write(': ping\n\n'), 25_000)
     req.on('close', () => {
       clearInterval(keepalive); clients.delete(client); touch()
-      markBridge(client)
+      markBridge(client, true)
     })
     return
   }
@@ -640,8 +751,10 @@ const server = http.createServer((req, res) => {
         const raw = Buffer.concat(chunks).toString('utf8')
         const args = raw ? JSON.parse(raw) : []
         if (!Array.isArray(args)) throw new Error('the request body must be a JSON array of arguments')
-        if (req.headers[BRIDGE_HEADER] && typeof args[0] === 'number' && store.sessions.has(args[0])) { seen.set(args[0], Date.now()); refreshPresence(args[0]) }
-        const value = await fn(...args)
+        const caller = req.headers[OWNER_HEADER]
+        if (typeof caller === 'string' && caller) ownerSeen.set(caller, Date.now())
+        if (req.headers[BRIDGE_HEADER] && handling(channel, args) && typeof args[0] === 'number' && store.sessions.has(args[0])) { seen.set(args[0], Date.now()); seenBy.set(args[0], typeof caller === 'string' && caller ? caller : undefined); refreshPresence(args[0]) }
+        const value = await callerCtx.run({ owner: typeof caller === 'string' && caller ? caller : undefined }, () => fn(...args))
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ value: value ?? null }))
       } catch (err) {
         res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }))

@@ -120,6 +120,41 @@ test('a new comment Claude Code only replies to becomes answered, not pending ag
   await assert.rejects(b.rpc('commentUpdate', sid, ignored, { status: 'answered' }), /only a comment Claude Code replied to/)
 })
 
+test('a reply that was sent and never answered is pending again', async () => {
+  await userReply(note, 'Any news on this?')
+  const before = Number(/(\d+) pending/.exec(g('state'))?.[1] ?? 0)
+  const r = await b.rpc('requestCreate', sid, { kind: 'apply', commentIds: [note] })
+  assert.equal(comment(note).replies.at(-1).pending, undefined, 'sent')
+  g('wait', '--timeout', '10')
+  await b.rpc('requestCancel', sid, r.id)
+  assert.deepEqual([comment(note).replies.at(-1).text, comment(note).replies.at(-1).pending], ['Any news on this?', true], 'the cancelled request gives the reply back')
+  assert.equal(Number(/(\d+) pending/.exec(g('state'))?.[1] ?? 0), before)
+  // the same when the session fails the request, or finishes it without answering
+  const failed = await b.rpc('requestCreate', sid, { kind: 'apply', commentIds: [note] })
+  g('wait', '--timeout', '10'); g('fail', failed.id, '--text', 'could not')
+  assert.equal(comment(note).replies.at(-1).pending, true)
+  const silent = await b.rpc('requestCreate', sid, { kind: 'apply', commentIds: [note] })
+  g('wait', '--timeout', '10')
+  assert.match(g('done', silent.id), new RegExp(`\\[${note}\\] NOT answered`))
+  assert.equal(comment(note).replies.at(-1).pending, true)
+  // answered at last: nothing is left pending
+  const ok = await b.rpc('requestCreate', sid, { kind: 'apply', commentIds: [note] })
+  g('wait', '--timeout', '10'); g('reply', note, '--text', 'Here it is.'); g('done', ok.id)
+  assert.equal(comment(note).replies.some((x) => x.pending), false)
+})
+
+test('cancelling an earlier request does not take replies away from a later one that carries the thread', async () => {
+  await userReply(note, 'First.')
+  const r1 = await b.rpc('requestCreate', sid, { kind: 'apply', commentIds: [note] })
+  await userReply(note, 'Second.')
+  const r2 = await b.rpc('requestCreate', sid, { kind: 'apply', commentIds: [note] })
+  await b.rpc('requestCancel', sid, r1.id)
+  assert.equal(comment(note).replies.some((x) => x.pending), false, 'the later request has the thread, with both replies')
+  const got = b.json(fx.dir, 'wait', '--timeout', '10', ...S()).requests.find((x) => x.id === r2.id)
+  assert.deepEqual(got.comments[0].replies.slice(-2).map((x) => [x.text, x.new]), [['First.', true], ['Second.', true]])
+  g('reply', note, '--text', 'Both read.'); g('done', r2.id)
+})
+
 test('a request the session never finished can be sent again by the reviewer', async () => {
   const r = await b.rpc('requestCreate', sid, { kind: 'question', text: 'Still there?' })
   await assert.rejects(b.rpc('requestRetry', sid, r.id), /is pending, not running/)

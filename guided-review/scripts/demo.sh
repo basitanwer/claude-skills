@@ -10,7 +10,7 @@ SKILL="$(cd "$(dirname "$0")/.." && pwd)"
 GR="$SKILL/scripts/gr"
 export GUIDED_REVIEW_HOME="${TMPDIR:-/tmp}/guided-review-demo"
 export GUIDED_REVIEW_PORT="${GUIDED_REVIEW_PORT:-8799}" GUIDED_REVIEW_OS_NOTIFY=0
-"$GR" stop >/dev/null 2>&1 || true
+"$GR" stop --force >/dev/null 2>&1 || true
 rm -rf "${TMPDIR:-/tmp}/guided-review-demo"
 FX="$(cd "$SKILL/app" && node -e "import('./tests/helpers.mjs').then((m) => console.log(m.makeFixture().dir))")"
 cd "$FX"
@@ -82,7 +82,7 @@ pause
 
 step "5. close and resume"
 listen_stop
-"$GR" stop
+"$GR" stop --force
 "$GR" review --resume --session "$SID" --no-open | head -4
 listen_start
 event
@@ -114,4 +114,4 @@ listen_stop
 echo "repository: $FX"
 echo "git status: $(git status --porcelain | tr '\n' ' ')(the review committed nothing)"
 echo "review:     http://127.0.0.1:$GUIDED_REVIEW_PORT/#/review?session=$SID"
-echo "stop the demo server: GUIDED_REVIEW_HOME=\"$GUIDED_REVIEW_HOME\" \"$GR\" stop"
+echo "stop the demo server: GUIDED_REVIEW_HOME=\"$GUIDED_REVIEW_HOME\" \"$GR\" stop --force"

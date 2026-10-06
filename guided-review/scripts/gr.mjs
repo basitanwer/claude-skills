@@ -43,7 +43,7 @@ const fail = (msg, code) => { throw new Fail(msg, code) }
 const BOOL = new Set(['working-tree', 'resume', 'new', 'no-open', 'json', 'stat', 'queued', 'summary', 'title', 'all', 'unset',
   'confirmed-by-user', 'freeze', 'direct', 'force', 'full', 'list', 'include-archived', 'loop', 'on-change', 'help'])
 const VALUE = new Set(['repo', 'session', 'port', 'base', 'file', 'line', 'side', 'expect', 'text', 'as', 'section', 'question',
-  'artifact', 'step', 'status', 'verdict', 'note', 'sha', 'timeout', 'stop', 'request', 'role'])
+  'artifact', 'step', 'status', 'verdict', 'note', 'sha', 'timeout', 'stop', 'request', 'role', 'owner'])
 function parseArgs(argv) {
   const pos = []; const opt = {}
   for (let i = 0; i < argv.length; i++) {
@@ -174,8 +174,13 @@ function resolveSpec({ repo, top }, spec, opt) {
 
 // ── server ───────────────────────────────────────────────────
 const baseUrl = (port) => `http://${HOST}:${port}`
+/** Which Claude Code session this is, so the server knows who holds a request: `--owner`,
+ *  else GUIDED_REVIEW_OWNER, else the session id Claude Code puts in the environment.
+ *  Empty outside Claude Code: requests are then claimed without an owner. */
+const ownerId = (raw) => String(raw ?? '').trim().replace(/[^\x21-\x7e]/g, (ch) => encodeURIComponent(ch))   // a header value: visible ASCII only
+let OWNER = ownerId(process.env.GUIDED_REVIEW_OWNER || process.env.CLAUDE_CODE_SESSION_ID)
 function headers(extra = {}) {
-  const h = { 'x-guided-review-bridge': '1', ...extra }
+  const h = { 'x-guided-review-bridge': '1', ...(OWNER ? { 'x-guided-review-owner': OWNER } : {}), ...extra }
   if (process.env.GUIDED_REVIEW_TOKEN) h.Authorization = `Bearer ${process.env.GUIDED_REVIEW_TOKEN}`
   return h
 }
@@ -214,12 +219,19 @@ let PORT = null
  *  and another `gr` call could otherwise both find the port free and start two
  *  servers on one data directory. Returns a release function, or null if another
  *  process's start was observed to finish first. */
+/** Whether a process with this pid exists (true when it cannot be told). */
+function alive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return true
+  try { process.kill(pid, 0); return true } catch (e) { return e.code !== 'ESRCH' }
+}
 async function startLock(first) {
   const lock = path.join(HOME, 'start.lock')
   fs.mkdirSync(HOME, { recursive: true })
   for (let i = 0; i < 150; i++) {
     try { fs.writeFileSync(lock, String(process.pid), { flag: 'wx' }); return () => { try { fs.unlinkSync(lock) } catch { /* gone */ } } } catch { /* held by another gr */ }
-    try { if (Date.now() - fs.statSync(lock).mtimeMs > 20_000) fs.unlinkSync(lock) } catch { /* released meanwhile */ }
+    // a lock whose holder is no longer running (killed mid-start) is stale at once; one
+    // whose holder cannot be told is stale after 20 s
+    try { if (!alive(Number(fs.readFileSync(lock, 'utf8'))) || Date.now() - fs.statSync(lock).mtimeMs > 20_000) fs.unlinkSync(lock) } catch { /* released meanwhile */ }
     await sleep(100)
     const info = await probe(Number(readState().port || first))
     if (info && sameHome(info)) return null
@@ -271,6 +283,7 @@ function openBrowser(url) {
 const reviewUrl = (port, sessionId, focus) => `${baseUrl(port)}/#/review?session=${sessionId}${focus ? `&focus=${encodeURIComponent(JSON.stringify(focus))}` : ''}`
 
 /** Open the event stream; resolves once connected, then yields { channel, msg }. */
+const ownerQuery = () => (OWNER ? `&owner=${encodeURIComponent(OWNER)}` : '')
 async function openEvents(port, query, signal) {
   const res = await fetch(`${baseUrl(port)}/events?${query}`, { signal, headers: headers() })
   if (!res.ok) fail(`event stream: HTTP ${res.status}`)
@@ -478,6 +491,8 @@ function threadOf(c, r, questions) {
 function requestEvent(item, loaded) {
   const r = item.request; const s = item.sessionId
   const ev = { type: 'request', session: s, id: r.id, kind: r.kind, resumed: Boolean(item.resumed) }
+  if (item.resumed) ev.yours = Boolean(item.yours)
+  if (r.retried) ev.retried = true
   if (r.text) ev.text = r.text
   if (r.anchor) ev.anchor = { label: anchorLabel(r.anchor), ...(r.anchor.lineContent != null ? { line: r.anchor.lineContent } : {}) }
   if (r.kind === 'walkthrough') ev.update = Boolean(r.update)
@@ -495,6 +510,8 @@ function printRequest(item, loaded) {
   out(`REQUEST ${r.id} ${r.kind}${r.update ? ' (update)' : ''}`)
   out(`  review #${s}${loaded ? `: ${pairLabel(loaded.session.pair, loaded.session.direct)}` : ''}`)
   if (item.resumed) out('  (resumed: claimed earlier and never finished)')
+  if (item.resumed && item.yours) out('  (it was claimed by this same session: if you are already handling it, carry on)')
+  if (r.retried) out('  (the reviewer pressed "Send again": if you are already handling it, carry on; do not start over)')
   if (r.kind === 'walkthrough') {
     out(r.update ? '  the reviewer asked for the walkthrough to be UPDATED for what changed since it was written' : '  the reviewer asked for a walkthrough of this comparison')
     if (r.text) out(`  steer: ${r.text}`)
@@ -524,6 +541,10 @@ async function forRequest(id, fn) {
   try { return await fn() } catch (e) {
     if (id && e instanceof Fail && /^cancelled/.test(e.server ?? '')) {
       process.stderr.write(`CANCELLED: the reviewer cancelled request ${id} — stop working on it\n`)
+      throw Object.assign(new Fail('', 130), { quiet: true })
+    }
+    if (id && e instanceof Fail && /^displaced/.test(e.server ?? '')) {
+      process.stderr.write(`DISPLACED: another Claude Code session now holds request ${id} — stop working on it\n`)
       throw Object.assign(new Fail('', 130), { quiet: true })
     }
     throw e
@@ -668,10 +689,16 @@ const commands = {
     out(`guided-review server: ${baseUrl(port)} (pid ${info.pid}, version ${info.version})`)
     out(`data: ${info.home}\nlog: ${LOG_FILE}`)
   },
-  async stop() {
+  async stop(pos, opt) {
     const st = readState()
     const info = st.port ? await probe(st.port) : null
     if (!info || !sameHome(info)) { out('no guided-review server is running'); return }
+    // one server serves every review on this machine: stopping it cuts off other
+    // sessions' listeners and the reviewer's open tabs, so that has to be asked for
+    if ((info.tabs || info.bridges) && !opt.force) {
+      const who = [info.tabs ? `${info.tabs} review tab(s)` : '', info.bridges ? `${info.bridges} listening Claude Code session(s)` : ''].filter(Boolean).join(' and ')
+      fail(`not stopped: ${who} connected to this server, possibly for other reviews. It stops by itself when idle. To stop it anyway: gr stop --force`)
+    }
     try { process.kill(info.pid, 'SIGTERM') } catch { /* already gone */ }
     for (let i = 0; i < 40 && await probe(st.port); i++) await sleep(100)
     out(`stopped server pid ${info.pid}`)
@@ -945,12 +972,13 @@ const commands = {
     process.stdout.on('error', () => process.exit(0)) // the reader went away
     const delivered = new Set()
     const deliver = async (port, includeRunning) => {
-      const items = await rpcAt(port, 'requestTakeAll', [repo, includeRunning])
+      const items = await rpcAt(port, 'requestTakeAll', [repo, includeRunning, OWNER || undefined])
       const loaded = new Map()
       for (const item of items) {
         const key = `${item.sessionId}:${item.request.id}`
         // on a reconnect, a request this process already handed over is not news
-        if (item.resumed && delivered.has(key)) continue
+        // (one that went to another session and came back is: it is printed again)
+        if (item.resumed && (item.yours || !OWNER) && delivered.has(key)) continue
         delivered.add(key)
         if ((item.request.kind === 'apply' || item.request.kind === 'decisions') && !loaded.has(item.sessionId)) {
           loaded.set(item.sessionId, await rpcAt(port, 'loadSession', [item.sessionId]).catch(() => null))
@@ -964,7 +992,7 @@ const commands = {
       try {
         PORT = null
         const port = await ensureServer(opt)
-        const events = await openEvents(port, `bridge=1&repo=${encodeURIComponent(repo)}${opt['on-change'] ? '&changes=1' : ''}`, ac.signal)
+        const events = await openEvents(port, `bridge=1&listen=1&repo=${encodeURIComponent(repo)}${ownerQuery()}${opt['on-change'] ? '&changes=1' : ''}`, ac.signal)
         const reviews = (await rpcAt(port, 'listSessions', [repo])).map((s) => s.id)
         if (!ready) emit({ type: 'ready', repo, url: `${baseUrl(port)}/#/repo?path=${encodeURIComponent(repo)}`, reviews })
         else log(`reconnected to ${baseUrl(port)}`)
@@ -972,7 +1000,8 @@ const commands = {
         await deliver(port, true) // includes requests an earlier session claimed and never finished
         for await (const { channel, msg } of events) {
           try {
-            if (channel === 'session:changed') await deliver(port, false)
+            // a presence change can mean another session went away and left a request claimed
+            if (channel === 'session:changed' || channel === 'presence') await deliver(port, false)
             else if (channel === 'request:cancelled') emit({ type: 'cancelled', session: msg.sessionId, id: msg.requestId })
             else if (channel === 'repo:changed' && opt['on-change']) {
               const loaded = await rpcAt(port, 'loadSession', [msg.sessionId])
@@ -1010,19 +1039,19 @@ const commands = {
     const port = await ensureServer()
     const repo = (await rpcAt(port, 'loadSession', [sessionId])).session.repo // also fails early on an unknown review
     const ac = new AbortController()
-    const events = await openEvents(port, `bridge=1&repo=${encodeURIComponent(repo)}&session=${sessionId}`, ac.signal)
+    const events = await openEvents(port, `bridge=1&repo=${encodeURIComponent(repo)}&session=${sessionId}${ownerQuery()}`, ac.signal)
     let result = null
     const timer = opt.timeout ? setTimeout(() => { result ??= { type: 'timeout' }; ac.abort() }, Number(opt.timeout) * 1000) : null
     const take = async (includeRunning) => {
       if (result) return
-      const items = await rpcAt(port, 'requestTakeAll', [repo, includeRunning])
+      const items = await rpcAt(port, 'requestTakeAll', [repo, includeRunning, OWNER || undefined])
       if (items.length) result ??= { type: 'requests', items }
     }
     try {
       await take(true)
       if (!result) {
         for await (const { channel, msg } of events) {
-          if (channel === 'session:changed') await take(false)
+          if (channel === 'session:changed' || channel === 'presence') await take(false)
           else if (channel === 'repo:changed' && opt['on-change'] && msg.sessionId === sessionId) result ??= { type: 'change', signature: msg.signature, headSha: msg.headSha, dirty: msg.dirty }
           if (result) break
         }
@@ -1085,9 +1114,10 @@ const commands = {
     }
     let results
     try { ({ results } = await rpc('batch', sessionId, built.map(({ channel, args }) => ({ channel, args })))) } catch (e) {
-      const m = /^operation (\d+) \([^)]*\) failed: cancelled/.exec(e.server ?? '')
+      const m = /^operation (\d+) \([^)]*\) failed: (cancelled|displaced)/.exec(e.server ?? '')
       if (!m) throw e
-      process.stderr.write(`CANCELLED: the reviewer cancelled request ${built[Number(m[1]) - 1]?.request} — stop working on it\n(operation ${m[1]} of the batch; nothing in the batch was applied)\n`)
+      const rid = built[Number(m[1]) - 1]?.request
+      process.stderr.write(`${m[2] === 'cancelled' ? `CANCELLED: the reviewer cancelled request ${rid}` : `DISPLACED: another Claude Code session now holds request ${rid}`} — stop working on it\n(operation ${m[1]} of the batch; nothing in the batch was applied)\n`)
       throw Object.assign(new Fail('', 130), { quiet: true })
     }
     if (opt.json) return printJson({ applied: built.length, results })
@@ -1119,7 +1149,7 @@ const commands = {
   batch --file ops.json | -              many writes in one atomic call (comment, reply, resolve, answer, done, …)
   artifact add PATH --role spec|plan | remove PATH | list
   viewed --file P   section-reviewed ID   approve --confirmed-by-user   unapprove
-  serve / stop / status / doctor / rpc <channel> '[json]'
+  serve / stop [--force] / status / doctor / rpc <channel> '[json]'
 
   <anchor>: --file P [--line N [--side new|old] [--expect TEXT]] | --section ID | --summary
             | --title | --question ID | --artifact PATH --line N | --step N
@@ -1135,6 +1165,7 @@ async function main() {
   if (!fn) fail(`unknown command: ${cmd}. Run: gr help`)
   const { pos, opt } = parseArgs(rest)
   if (opt.help) return commands.help()
+  if (opt.owner) OWNER = ownerId(opt.owner)
   await fn(pos, opt)
 }
 // exit only once stdout has drained — a piped reader would otherwise lose the tail

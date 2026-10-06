@@ -8,7 +8,7 @@ Contents: [Verified column](#verified-column) · [Limn features and what became 
 
 ## Verified column
 
-- **T:** an automated integration test in `app/tests/` (`loop` = `loop.test.mjs`, 15 tests; `sem` = `semantics.test.mjs`, 14 tests; `filelines.test.mjs`, 6 tests for expand-context, comments outside the hunks, hide whitespace, single-commit view and the list's approved state; `idle.test.mjs`, 1 test; plus tests for `gr listen`, `gr batch`, two-way thread replies and request retry). They drive the real server through `gr` against real git repositories, and play the browser's part by calling the same HTTP channels the UI calls. All 55 pass.
+- **T:** an automated integration test in `app/tests/` (`loop` = `loop.test.mjs`, 15 tests; `sem` = `semantics.test.mjs`, 14 tests; `filelines.test.mjs`, 6 tests for expand-context, comments outside the hunks, hide whitespace, single-commit view and the list's approved state; `idle.test.mjs`, 1 test; plus tests for `gr listen`, `gr batch`, two-way thread replies and request retry). They drive the real server through `gr` against real git repositories, and play the browser's part by calling the same HTTP channels the UI calls. All 67 pass.
 - **UI:** exercised in Chrome against the running server, with HTTP calls standing in for the Claude Code session.
 - **UI + gr:** additionally re-checked in Chrome with the real `gr` as the session: a review with a walkthrough rendered, the indicator read *listening* while `gr wait` was blocked, a question created from the page woke `gr wait`, the indicator read *working*, a `gr progress` line was accepted, and `gr answer` with an anchor scrolled the tab to the cited line and cleared the request. No console errors.
 - **UI (built):** implemented and compiles, but that control was not exercised.
@@ -73,6 +73,7 @@ Requested for this skill and not in Limn.
 | A2a | Two-way threads: the reviewer's reply under any comment is pending until sent, delivered with the next send, answered by the session in the same thread | `main.mjs`, UI, `gr reply` | T; UI; checked end to end with a real Claude Code Monitor: reply in the page → event in the session → `gr batch` reply shown in the thread |
 | A2b | `gr batch`: many writes as one atomic update | `main.mjs` `batch`, `gr.mjs` | T (happy path, atomic failure, cancelled request) |
 | A2c | Stuck-request recovery: elapsed counter, "Send again" after five minutes without progress; unfinished requests re-delivered to the next listener | `requestRetry`, `requestTakeAll`, UI | T; UI |
+| A2d | Request ownership: a claimed request belongs to the Claude Code session that claimed it; another session leaves it alone while its owner is alive and takes it over when the owner is gone; `gr stop` is refused while tabs or other sessions are connected; a sent reply nobody answered is pending again; a comment answered by reply becomes `answered` | `main.mjs` (`ownerAlive`, `requestTakeAll`, `finish`), `gr.mjs` | T (`owners.test.mjs`, 10 tests: takeover, restart, retry, id-less sessions, the stop guard; thread tests) |
 | A3 | A single historical commit as a comparison | `gr.mjs` `resolveSpec` | T sem |
 | A4 | Root commits (empty-tree base) | `review.mjs` | T sem; UI |
 | A5 | Merge commits: first parent, stated | `gr.mjs` | T sem |
@@ -117,7 +118,7 @@ Requested for this skill and not in Limn.
 
 ```bash
 cd ~/.claude/skills/guided-review/app
-npm test            # 55 integration tests, about 130 s, needs only Node and git
+npm test            # 67 integration tests, about 160 s, needs only Node and git
 npx tsc --noEmit    # contract + web UI type-check (needs the dev dependencies)
 ../scripts/demo.sh  # the whole loop on a throwaway repository, browser open
 ```

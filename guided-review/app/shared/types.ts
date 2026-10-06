@@ -193,6 +193,12 @@ export interface ReviewRequest {
   editable?: boolean
   /** when a session claimed it */
   startedAt?: string
+  /** which Claude Code session claimed it (its session id); cleared when it is sent again */
+  owner?: string
+  /** how many times the reviewer pressed "Send again" */
+  retried?: number
+  /** after "Send again": the session that held it, which gets it back if it is listening */
+  wasWith?: string
   /** walkthrough: fold new changes into the existing one instead of starting over */
   update?: boolean
   /** apply: the reviewer asked for the edits to be committed */
@@ -202,8 +208,9 @@ export interface ReviewRequest {
   createdAt: string
   finishedAt?: string
 }
-/** `listening`: `gr wait` is connected. `working`: the session was active recently or
- *  has a request in hand. `away`: nothing has been heard from a session. */
+/** Whether a Claude Code session will act on what the reviewer asks. `listening`: a
+ *  listener is connected. `working`: a session holds a request, or handled one moments
+ *  ago. `away`: nobody is reachable; requests wait. */
 export type Presence = 'listening' | 'working' | 'away'
 
 // ── review state ─────────────────────────────────────────────
@@ -305,6 +312,8 @@ export interface ServerInfo {
   app: 'guided-review'; version: string; pid: number; home: string; host: string; port: number
   /** browser tabs connected right now */
   tabs: number
+  /** Claude Code listeners (`gr listen` / `gr wait`) connected right now */
+  bridges: number
 }
 
 // ── RPC: POST /rpc/<channel> with a JSON array of arguments ──
@@ -352,9 +361,11 @@ export interface Api {
   // bridge: used by the Claude Code session through scripts/gr
   /** Claim every pending request (they become `running`). */
   requestTake(sessionId: number): Promise<ReviewRequest[]>
-  /** The same for every review of a repository. With `includeRunning`, requests an
-   *  earlier session claimed and never finished are handed over again. */
-  requestTakeAll(repo: string, includeRunning?: boolean): Promise<{ sessionId: number; request: ReviewRequest; comments: Comment[]; resumed: boolean }[]>
+  /** The same for every review of a repository, for the Claude Code session `owner`.
+   *  Requests a session that is gone left claimed are handed over (`resumed`); with
+   *  `includeRunning`, so are the ones this same session already holds (`yours`).
+   *  What another live session holds is never returned. */
+  requestTakeAll(repo: string, includeRunning?: boolean, owner?: string): Promise<{ sessionId: number; request: ReviewRequest; comments: Comment[]; resumed: boolean; yours: boolean }[]>
   /** Several bridge calls as one atomic update: all succeed and the page refreshes once,
    *  or none is applied and the error names the failing operation. */
   batch(sessionId: number, ops: BatchOp[]): Promise<{ results: unknown[] }>

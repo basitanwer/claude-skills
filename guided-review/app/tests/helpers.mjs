@@ -85,10 +85,12 @@ export async function until(fn, ms = 8000) {
 /** An isolated bridge: its own state directory and port, and no browser.
  *  `gr(cwd, ...args)` throws on a non-zero exit; `try` returns { code, out, err };
  *  `json` appends --json and parses; `rpc` calls the server the way the web UI does. */
+/** Environment for a `gr` that has no session id (an older `gr`, or outside Claude Code). */
+export const OWNERLESS = { GUIDED_REVIEW_OWNER: '', CLAUDE_CODE_SESSION_ID: '' }
 export async function makeBridge(extraEnv = {}) {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gr home ')))
   const port = await freePort()
-  const env = { ...process.env, GUIDED_REVIEW_HOME: home, GUIDED_REVIEW_PORT: String(port), GUIDED_REVIEW_NO_OPEN: '1', GUIDED_REVIEW_OS_NOTIFY: '0', ...extraEnv }
+  const env = { ...process.env, GUIDED_REVIEW_HOME: home, GUIDED_REVIEW_PORT: String(port), GUIDED_REVIEW_NO_OPEN: '1', GUIDED_REVIEW_OS_NOTIFY: '0', GUIDED_REVIEW_OWNER: 'tests', ...extraEnv }
   const run = (cwd, args, input) => {
     const r = spawnSync(process.execPath, [GR, ...args], { cwd, env, encoding: 'utf8', timeout: 60_000, ...(input != null ? { input } : {}) })
     return { code: r.status ?? -1, out: r.stdout ?? '', err: r.stderr ?? '' }
@@ -105,8 +107,10 @@ export async function makeBridge(extraEnv = {}) {
     batch: (cwd, ops, ...args) => run(cwd, ['batch', '-', ...args], JSON.stringify(ops)),
     /** Start `gr listen` the way a Monitor does: every stdout line must be one JSON
      *  object. `next(pred)` resolves with the first line (from `from` on) that matches. */
-    listener(cwd, ...args) {
-      const child = spawn(process.execPath, [GR, 'listen', ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    listener(cwd, ...args) { return this.listenerWith({}, cwd, ...args) },
+    /** The same with extra environment, e.g. `OWNERLESS` for a `gr` that knows no session id. */
+    listenerWith(extra, cwd, ...args) {
+      const child = spawn(process.execPath, [GR, 'listen', ...args], { cwd, env: { ...env, ...extra }, stdio: ['ignore', 'pipe', 'pipe'] })
       const lines = []; const bad = []; let buf = ''; let err = ''
       child.stdout.on('data', (d) => {
         buf += d
@@ -134,9 +138,11 @@ export async function makeBridge(extraEnv = {}) {
       return { child, done }
     },
     /** Subscribe to the event stream the way a browser tab on `sessionId` does. */
-    async listen(sessionId) {
+    /** An open event stream: a browser tab on a review, or with `query` any other client
+     *  (e.g. a session's listener that is connected but never claims anything). */
+    async listen(sessionId, query = `ui=1&session=${sessionId}`) {
       const ac = new AbortController()
-      const res = await fetch(`http://127.0.0.1:${port}/events?ui=1&session=${sessionId}`, { signal: ac.signal })
+      const res = await fetch(`http://127.0.0.1:${port}/events?${query}`, { signal: ac.signal })
       const events = []
       ;(async () => {
         const dec = new TextDecoder(); let buf = ''
@@ -164,6 +170,6 @@ export async function makeBridge(extraEnv = {}) {
       if (body.error) throw new Error(body.error)
       return body.value
     },
-    stop() { run(home, ['stop']) }
+    stop() { run(home, ['stop', '--force']) }
   }
 }
