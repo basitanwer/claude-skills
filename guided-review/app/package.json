@@ -1,0 +1,30 @@
+{
+  "name": "guided-review-app",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Local guided code review webapp driven by a Claude Code session: a dependency-free Node server, a React web UI, and the gr bridge.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "vite build --config web/vite.config.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "serve": "node server/main.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "highlight.js": "^11.11.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "typescript": "^6.0.3",
+    "vite": "^7.3.5",
+    "zustand": "^5.0.14"
+  }
+}
