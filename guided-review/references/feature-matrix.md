@@ -8,7 +8,7 @@ Contents: [Verified column](#verified-column) · [Limn features and what became 
 
 ## Verified column
 
-- **T:** an automated integration test in `app/tests/` (`loop` = `loop.test.mjs`, 15 tests; `sem` = `semantics.test.mjs`, 14 tests; `filelines.test.mjs`, 6 tests for expand-context, comments outside the hunks, hide whitespace, single-commit view and the list's approved state; `idle.test.mjs`, 1 test; plus tests for `gr listen`, `gr batch`, two-way thread replies and request retry). They drive the real server through `gr` against real git repositories, and play the browser's part by calling the same HTTP channels the UI calls. All 54 pass.
+- **T:** an automated integration test in `app/tests/` (`loop` = `loop.test.mjs`, 15 tests; `sem` = `semantics.test.mjs`, 14 tests; `filelines.test.mjs`, 6 tests for expand-context, comments outside the hunks, hide whitespace, single-commit view and the list's approved state; `idle.test.mjs`, 1 test; plus tests for `gr listen`, `gr batch`, two-way thread replies and request retry). They drive the real server through `gr` against real git repositories, and play the browser's part by calling the same HTTP channels the UI calls. All 55 pass.
 - **UI:** exercised in Chrome against the running server, with HTTP calls standing in for the Claude Code session.
 - **UI + gr:** additionally re-checked in Chrome with the real `gr` as the session: a review with a walkthrough rendered, the indicator read *listening* while `gr wait` was blocked, a question created from the page woke `gr wait`, the indicator read *working*, a `gr progress` line was accepted, and `gr answer` with an anchor scrolled the tab to the cited line and cleared the request. No console errors.
 - **UI (built):** implemented and compiles, but that control was not exercised.
@@ -117,7 +117,7 @@ Requested for this skill and not in Limn.
 
 ```bash
 cd ~/.claude/skills/guided-review/app
-npm test            # 54 integration tests, about 130 s, needs only Node and git
+npm test            # 55 integration tests, about 130 s, needs only Node and git
 npx tsc --noEmit    # contract + web UI type-check (needs the dev dependencies)
 ../scripts/demo.sh  # the whole loop on a throwaway repository, browser open
 ```

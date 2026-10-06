@@ -453,7 +453,7 @@ function guidance(r, s) {
   const steps = []
   const resolve = `gr resolve <commentId> ${S} --verdict addressed|reworked|skipped --note "…"`
   if (r.editable === false) {
-    steps.push(`this comparison cannot be edited (it ends at a fixed commit, or its branch is not checked out): do not change files; answer in the threads with gr reply <commentId> ${S} --text "…", record each comment with: ${resolve}, then: gr done ${r.id} ${S}`)
+    steps.push(`this comparison cannot be edited (it ends at a fixed commit, or its branch is not checked out): do not change files; answer in the threads with gr reply <commentId> ${S} --text "…" (a comment you reply to shows as answered); only for a change request you cannot make, also record it with: ${resolve}; then: gr done ${r.id} ${S}`)
   } else {
     steps.push(`reply in threads with: gr reply <commentId> ${S} --text "…"; for a change request make the edits, record each with: ${resolve}, then: gr done ${r.id} ${S}`)
     steps.push(r.commit ? 'the reviewer asked for the edits to be committed: commit only your own edits and pass --sha <commit> to gr resolve' : 'do NOT commit: leave the edits uncommitted in the working tree')
@@ -611,7 +611,8 @@ const builders = {
         return [`request ${o.request} done`, ...(mine.length ? ['resolutions:'] : []),
           ...mine.map((c) => (c.resolution ? `  [${c.id}] ${c.resolution.verdict} — ${c.resolution.note}`
             : r.replyIds?.includes(c.id) ? `  [${c.id}] ${c.replies.at(-1)?.author === 'agent' ? 'replied' : 'NOT answered'} (${c.status})`
-              : `  [${c.id}] NOT handled (back to ${c.status})`))]
+              : c.status === 'answered' ? `  [${c.id}] replied (answered: no longer pending)`
+                : `  [${c.id}] NOT handled (back to ${c.status})`))]
       },
       needsComments: true
     }

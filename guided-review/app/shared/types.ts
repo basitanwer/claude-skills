@@ -138,9 +138,11 @@ export interface Comment {
   author: 'user' | 'agent'
   text: string
   /** `note`: an agent remark, never queued. `queued`: waiting for the reviewer to send.
-   *  `sent`: handed to Claude Code in an apply request. `resolved`: outcome recorded.
+   *  `sent`: handed to Claude Code in an apply request. `answered`: Claude Code replied in
+   *  the thread without recording an outcome; open, and not waiting to be sent.
+   *  `resolved`: outcome recorded.
    *  `outdated`: the line it was written on no longer exists. */
-  status: 'note' | 'queued' | 'sent' | 'resolved' | 'outdated'
+  status: 'note' | 'queued' | 'sent' | 'answered' | 'resolved' | 'outdated'
   /** for note/resolved comments on a line that no longer exists */
   lineGone?: boolean
   resolution?: { verdict: 'addressed' | 'reworked' | 'skipped'; note: string; commit?: string; at: string }
@@ -379,7 +381,9 @@ export interface PushMap {
   'session:changed': { sessionId: number }
   /** the code under review changed on disk or in git */
   'repo:changed': { sessionId: number; signature: string; headSha: string; dirty: boolean }
-  'ui:action': { sessionId: number; action: UiAction }
+  /** `answerTo`: the action came with the answer to that request, so the page offers it
+   *  instead of playing it (a direct `gr focus` / `gr tour` plays at once) */
+  'ui:action': { sessionId: number; action: UiAction; answerTo?: string }
   presence: { sessionId: number; presence: Presence }
   /** the reviewer cancelled a request a session had claimed */
   'request:cancelled': { sessionId: number; requestId: string }

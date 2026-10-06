@@ -1,5 +1,6 @@
+import type { CSSProperties } from 'react'
 import type {
-  AnchorInput, Comment, CommentAnchor, DriftSummary, FileDiff, FocusTarget, Hunk, LoadedReview, RefSide, ReviewRequest, Section
+  AnchorInput, Comment, CommentAnchor, DriftSummary, FileDiff, FocusTarget, Hunk, LoadedReview, Message, RefSide, ReviewRequest, Section
 } from '@shared/types'
 
 // ── routing ───────────────────────────────────────────────────
@@ -177,6 +178,11 @@ export function targetLabel(t: FocusTarget): string {
   return t.kind === 'diff' ? `${t.file}:${t.line}` : t.kind === 'file' ? t.file : t.kind === 'section' ? `section ${t.sectionId}` : 'summary'
 }
 
+/** A walkthrough section's colour, from its position in the walkthrough: sets `--sec` on
+ *  an element (and so on everything inside it). Eight colours, then they repeat. */
+export const secStyle = (no: number | undefined): CSSProperties | undefined =>
+  no == null || no < 0 ? undefined : ({ '--sec': `var(--sec-${(no % 8) + 1})` } as CSSProperties)
+
 /** The part of an anchor the review can scroll to, if any. */
 export function focusable(a: CommentAnchor): FocusTarget | null {
   if (a.kind === 'diff') return { kind: 'diff', file: a.file, side: a.side, line: a.line }
@@ -194,6 +200,25 @@ export function indexComments(comments: Comment[]): Map<string, Comment[]> {
     const list = out.get(k)
     if (list) list.push(c)
     else out.set(k, [c])
+  }
+  return out
+}
+
+// ── questions asked from a spot ───────────────────────────────
+/** The id prefix of a thread that is a question and its answer, not a comment. */
+export const ASK = 'ask:'
+/** Questions the reviewer asked about a specific spot ("Ask Claude Code" on a line, a
+ *  file, a section), shaped as threads so they show at that spot as well as in the
+ *  conversation: the question, then Claude's answer as its reply. Read-only. */
+export function askThreads(messages: Message[]): Comment[] {
+  const out: Comment[] = []
+  for (const m of messages) {
+    if (m.role !== 'user' || !m.anchor || !m.requestId) continue
+    const answers = messages.filter((a) => a.role === 'agent' && a.requestId === m.requestId)
+    out.push({
+      id: ASK + m.requestId, anchor: m.anchor, author: 'user', text: m.text, status: 'note', createdAt: m.at, iteration: 0,
+      replies: answers.map((a) => ({ author: 'agent', text: a.text, at: a.at }))
+    })
   }
   return out
 }

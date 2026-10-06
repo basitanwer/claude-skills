@@ -4,8 +4,8 @@ import { api } from '../api'
 import { highlightLine, langForPath } from '../highlight'
 import { pairHunkLines, wordDiffRanges, type CharRange } from '../worddiff'
 import { useStore } from '../store'
-import { focusAnchor } from '../focus'
-import { errText, hunksForMode } from '../util'
+import { showSection } from '../focus'
+import { errText, hunksForMode, secStyle } from '../util'
 import { CopyButton, DiffStat, Icon, Md, Menu, MenuItem } from './common'
 import { CommentSlot, CommentsCtx, Composer, Thread } from './comments'
 
@@ -375,8 +375,12 @@ const DiffBody = memo(function DiffBody({ file, hunks, split, placed, outside, c
 const LARGE = 1500
 
 /** A changed file, in the shape of a GitHub "Files changed" box. */
-export function FileBox({ file, split, section, note, whitespaceOnly }: {
+export function FileBox({ file, split, section, sectionNo, grouped, note, whitespaceOnly }: {
   file: FileDiff; split: boolean; section?: Section; note?: string
+  /** the section's position in the walkthrough: picks its colour */
+  sectionNo?: number
+  /** the file sits under its section's header, which already says what it belongs to */
+  grouped?: boolean
   /** with whitespace hidden, nothing of this file's change is left */
   whitespaceOnly?: boolean
 }) {
@@ -389,6 +393,7 @@ export function FileBox({ file, split, section, note, whitespaceOnly }: {
   const signature = useStore((s) => s.loaded?.signature)
   const commitView = Boolean(view?.commit)
   const [notesOpen, setNotesOpen] = useState(true)
+  const inPanel = useStore((s) => Boolean(section) && s.sectionPanel === section?.id)
   const [loadLarge, setLoadLarge] = useState(false)
   const [expandAll, setExpandAll] = useState(0)
   const { setFileOpen, toggleViewed, toggleExcluded, set } = useStore.getState()
@@ -460,7 +465,7 @@ export function FileBox({ file, split, section, note, whitespaceOnly }: {
   const body = <DiffBody key={`${signature}|${view?.ignoreWhitespace ? 'w' : ''}`} file={file} hunks={hunks} split={split} placed={placed} outside={outside} composer={commitView ? null : composer} canExpand={canExpand} readOnly={commitView} expandAll={expandAll} />
 
   return (
-    <div className={'file' + (open ? ' open' : '')} data-gr-file={file.path} data-gr-viewed={viewed ? 'true' : changed ? 'changed' : 'false'}>
+    <div className={'file' + (open ? ' open' : '') + (section && !grouped ? ' in-sec' : '')} style={section ? secStyle(sectionNo) : undefined} data-gr-file={file.path} data-gr-file-section={section?.id} data-gr-viewed={viewed ? 'true' : changed ? 'changed' : 'false'}>
       <div className="file-head">
         <button className="icon-btn" aria-expanded={open} aria-label={open ? 'Collapse file' : 'Expand file'} onClick={() => setFileOpen(file.path, !open)}>
           <Icon name={open ? 'chevDown' : 'chevRight'} />
@@ -468,6 +473,11 @@ export function FileBox({ file, split, section, note, whitespaceOnly }: {
         <span className="mono file-path" title={file.path}>{file.oldPath && <span className="muted">{file.oldPath} → </span>}{file.path}</span>
         <CopyButton text={file.path} title="Copy path" />
         {expandable && open && <button className="icon-btn" title="Expand all lines" aria-label="Expand all lines" onClick={() => setExpandAll((n) => n + 1)}><Icon name="unfold" /></button>}
+        {section && !grouped && (
+          <button className={'sec-chip' + (inPanel ? ' on' : '')} data-gr="section-chip" aria-pressed={inPanel} title={`Part of “${section.name}”${section.desc ? ` — ${section.desc}` : ''}\nClick to ${inPanel ? 'close' : 'read'} the section beside the code`} onClick={() => showSection(inPanel ? null : section.id)}>
+            <span className="sec-dot" /><span className="clip">{section.name}</span>
+          </button>
+        )}
         <span className="grow" />
         {labels.map((l) => <span key={l.text} className={'label ' + (l.cls ?? '')} title={l.title}>{l.text}</span>)}
         {changed && <span className="label warn" title="Tick Viewed to mark it viewed as it is now">Changed since last view</span>}
@@ -491,21 +501,13 @@ export function FileBox({ file, split, section, note, whitespaceOnly }: {
       </div>
       {open && (
         <div className="file-body">
-          {(note || section) && (
+          {note && (
             <div className={'notes' + (notesOpen ? ' open' : '')} data-gr="claude-notes">
               <button className="notes-head" aria-expanded={notesOpen} onClick={() => setNotesOpen(!notesOpen)}>
                 <Icon name={notesOpen ? 'chevDown' : 'chevRight'} size={12} /><span className="avatar agent sm" aria-hidden="true">C</span>Claude’s notes
               </button>
               {notesOpen && (
-                <div className="notes-body">
-                  {section && (
-                    <div className="notes-section">
-                      Part of <button className="link" onClick={() => focusAnchor({ kind: 'section', sectionId: section.id })}>{section.name}</button>
-                      {section.desc && <span className="muted"> — {section.desc}</span>}
-                    </div>
-                  )}
-                  {note && <Md text={note} />}
-                </div>
+                <div className="notes-body"><Md text={note} /></div>
               )}
             </div>
           )}

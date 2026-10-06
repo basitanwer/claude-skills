@@ -94,6 +94,32 @@ test('a reply the reviewer writes while a request is running waits for the next 
   assert.match(g('state'), /comments: 2 · 1 pending/)
 })
 
+test('a new comment Claude Code only replies to becomes answered, not pending again', async () => {
+  const asked = (await b.rpc('commentAdd', sid, { anchor: { kind: 'file', file: 'src/c.ts' }, text: 'Is c used anywhere?', author: 'user' })).id
+  const ignored = (await b.rpc('commentAdd', sid, { anchor: { kind: 'file', file: 'src/b.ts' }, text: 'Rename b.', author: 'user' })).id
+  const pendingBefore = Number(/(\d+) pending/.exec(g('state'))?.[1] ?? 0)
+  const r = await b.rpc('requestCreate', sid, { kind: 'apply', commentIds: [asked, ignored] })
+  g('wait', '--timeout', '10')
+  g('reply', asked, '--text', 'Not yet: nothing imports it.')
+  const done = g('done', r.id)
+  assert.match(done, new RegExp(`\\[${asked}\\] replied \\(answered: no longer pending\\)`))
+  assert.match(done, new RegExp(`\\[${ignored}\\] NOT handled \\(back to queued\\)`))
+  assert.deepEqual([comment(asked).status, comment(ignored).status], ['answered', 'queued'], 'answered leaves the queue; an untouched comment returns to it')
+  assert.equal(Number(/(\d+) pending/.exec(g('state'))?.[1] ?? 0), pendingBefore - 1, 'only the untouched comment is pending again')
+  await assert.rejects(b.rpc('requestCreate', sid, { kind: 'apply', commentIds: [asked] }), /none of those comments is waiting to be sent/, 'an answered comment is not sent again')
+
+  // the reviewer can carry on in the thread: the reply travels as a reply, the thread stays answered
+  await userReply(asked, 'Then remove it.')
+  const again = await b.rpc('requestCreate', sid, { kind: 'apply', commentIds: [asked] })
+  assert.deepEqual([again.replyIds, comment(asked).status], [[asked], 'answered'])
+  g('wait', '--timeout', '10')
+  g('resolve', asked, '--verdict', 'skipped', '--note', 'Kept: the plan adds a caller next.')
+  g('resolve', ignored, '--verdict', 'skipped', '--note', 'Out of scope.')
+  g('done', again.id)
+  assert.equal(comment(asked).status, 'resolved')
+  await assert.rejects(b.rpc('commentUpdate', sid, ignored, { status: 'answered' }), /only a comment Claude Code replied to/)
+})
+
 test('a request the session never finished can be sent again by the reviewer', async () => {
   const r = await b.rpc('requestCreate', sid, { kind: 'question', text: 'Still there?' })
   await assert.rejects(b.rpc('requestRetry', sid, r.id), /is pending, not running/)

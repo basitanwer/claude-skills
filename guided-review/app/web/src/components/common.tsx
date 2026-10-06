@@ -5,7 +5,7 @@ import type { Presence, RefOptions } from '@shared/types'
 import { api } from '../api'
 import { highlightBlock } from '../highlight'
 import { useStore } from '../store'
-import { focusAnchor } from '../focus'
+import { focusAnchor, goBack } from '../focus'
 import { short } from '../util'
 
 // ── markdown ──────────────────────────────────────────────────
@@ -50,6 +50,7 @@ export function Toasts() {
       {toasts.map((t) => (
         <div key={t.id} className={'toast ' + t.kind} data-gr="toast">
           <span className="toast-text">{t.text}</span>
+          {t.action && <button className="btn sm" data-gr="toast-action" onClick={() => { t.action?.run(); dismiss(t.id) }}>{t.action.label}</button>}
           <button className="icon-btn" aria-label="Dismiss" onClick={() => dismiss(t.id)}>×</button>
         </div>
       ))}
@@ -333,6 +334,19 @@ export function TourBar() {
         <button className="btn sm" onClick={() => focusAnchor(stop.target)}>Show again</button>
         <button className="btn sm primary" disabled={!tour.loop && tour.idx === n - 1} onClick={() => step(1)}>Next</button>
       </div>
+    </div>
+  )
+}
+
+/** After a link took the reviewer to another tab: one click back to where they were. */
+export function BackBar() {
+  const back = useStore((s) => s.returnTo)
+  const set = useStore((s) => s.set)
+  if (!back) return null
+  return (
+    <div className="backbar" data-gr="back">
+      <button className="backbar-go" title="Return to where you were before the jump" onClick={goBack}><Icon name="arrowLeft" size={14} />Back to <strong className="clip">{back.label}</strong></button>
+      <button className="icon-btn" aria-label="Dismiss" onClick={() => set({ returnTo: null })}>×</button>
     </div>
   )
 }

@@ -2,7 +2,7 @@ import { createContext, useContext, useState } from 'react'
 import type { AnchorInput, Comment } from '@shared/types'
 import { useStore } from '../store'
 import { focusAnchor } from '../focus'
-import { ago, anchorLabel, focusable, hasPendingReply, isOpen } from '../util'
+import { ago, anchorLabel, ASK, focusable, hasPendingReply, isOpen } from '../util'
 import { Icon, Md, Menu, MenuItem } from './common'
 
 /** Comments indexed by anchor key (see util.indexComments). */
@@ -14,6 +14,7 @@ export const STATUS: Record<Comment['status'], { cls: string; text: string; titl
   note: { cls: 'note', text: 'Note', title: 'A remark from Claude. It is not waiting on anyone.' },
   queued: { cls: 'pending', text: 'Pending', title: 'Not sent yet. Use Review to send your pending comments to Claude Code.' },
   sent: { cls: 'sent', text: 'With Claude Code', title: 'Handed to Claude Code to address' },
+  answered: { cls: 'note', text: 'Answered', title: 'Claude Code replied. Nothing is waiting to be sent; reply to continue, or resolve it from the menu.' },
   resolved: { cls: 'resolved', text: 'Resolved', title: 'An outcome was recorded' },
   outdated: { cls: 'outdated', text: 'Outdated', title: 'The line it was written on no longer exists' }
 }
@@ -31,6 +32,47 @@ export function Who({ author }: { author: 'user' | 'agent' }) {
  *  is two-way: the reviewer can reply at any time; a reply stays "Pending" until the
  *  review is sent, and Claude's answer arrives in the same thread. */
 export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) {
+  return c.id.startsWith(ASK) ? <AskThread c={c} /> : <CommentThread c={c} showAnchor={showAnchor} />
+}
+
+/** A question the reviewer asked Claude Code about this spot, with the answer under it.
+ *  The same exchange is in the Conversation tab; here it sits beside what it is about. */
+function AskThread({ c }: { c: Comment }) {
+  const request = useStore((s) => s.loaded?.state.requests.find((r) => r.id === c.id.slice(ASK.length)))
+  const cancel = useStore((s) => s.cancelRequest)
+  const setTab = useStore((s) => s.setTab)
+  const waiting = Boolean(request && isOpen(request)) && c.replies.length === 0
+  return (
+    <div className="thread user ask" data-gr-ask={request?.id} data-gr-ask-status={c.replies.length ? 'answered' : request?.status ?? 'unknown'}>
+      <div className="thread-main">
+        <div className="thread-head">
+          <Who author="user" />
+          <span className="label note" title="A question to Claude Code, not a review comment: it is answered here and is not part of what you send with your review">Question</span>
+          <span className="muted">{ago(c.createdAt)}</span>
+          <span className="grow" />
+          <button className="link small nowrap" title="The same question and answer in the Conversation tab" onClick={() => setTab('conversation')}>In Conversation</button>
+        </div>
+        <div className="thread-body pre-wrap">{c.text}</div>
+      </div>
+      {c.replies.map((r, i) => (
+        <div key={i} className="thread-main reply agent" data-gr-reply="agent">
+          <div className="thread-head"><Who author="agent" /><span className="muted">{ago(r.at)}</span></div>
+          <Md text={r.text} className="thread-body" />
+        </div>
+      ))}
+      {waiting && request && (
+        <div className="thread-main reply waiting" data-gr="with-claude">
+          <span className="spinner" /><span className="muted">{request.status === 'pending' ? 'Waiting for Claude Code to pick this up' : 'Claude Code is answering'} — the answer will appear here</span>
+          <span className="grow" /><button className="link small" onClick={() => void cancel(request.id)}>Cancel</button>
+        </div>
+      )}
+      {c.replies.length === 0 && request?.status === 'failed' && <div className="thread-main reply waiting"><span className="muted">Claude Code could not answer: {request.error ?? 'no reason given'}</span></div>}
+      {c.replies.length === 0 && request?.status === 'cancelled' && <div className="thread-main reply waiting"><span className="muted">Cancelled.</span></div>}
+    </div>
+  )
+}
+
+function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) {
   const updateComment = useStore((s) => s.updateComment)
   const removeComment = useStore((s) => s.removeComment)
   // handed to Claude Code in a request that is not finished yet
@@ -43,6 +85,12 @@ export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
   const st = STATUS[c.status]
   const mine = c.author === 'user'
   const pendingReply = hasPendingReply(c)
+  // the reviewer closes and reopens their own threads; one Claude Code is working on waits
+  const canResolve = mine && (c.status === 'queued' || c.status === 'answered') && !withClaude
+  const canReopen = mine && c.status === 'resolved' && !withClaude
+  // Reopened, a thread Claude Code only replied to is open again as answered. One it
+  // recorded an outcome for, or never saw, becomes pending: it can be sent (again).
+  const reopenTo = !c.resolution && c.replies.some((r) => r.author === 'agent') ? 'answered' : 'queued'
   // A resolved thread folds away, as on GitHub — unless the conversation went on after
   // it was resolved: a reply waiting to be sent, one being handled, or Claude's answer.
   const lastReply = c.replies.at(-1)
@@ -94,8 +142,8 @@ export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
               {(close) => (
                 <>
                   {mine && <MenuItem onClick={() => { setText(c.text); setMode('edit'); close() }}>Edit</MenuItem>}
-                  {mine && c.status === 'queued' && <MenuItem title="Close it yourself, without sending it to Claude Code" onClick={() => { void updateComment(c.id, { status: 'resolved' }); close() }}>Resolve</MenuItem>}
-                  {mine && c.status === 'resolved' && <MenuItem title="Make it pending again" onClick={() => { void updateComment(c.id, { status: 'queued' }); close() }}>Reopen</MenuItem>}
+                  {mine && (c.status === 'queued' || c.status === 'answered') && <MenuItem title={c.status === 'queued' ? 'Close it yourself, without sending it to Claude Code' : 'Close the thread'} onClick={() => { void updateComment(c.id, { status: 'resolved' }); close() }}>Resolve</MenuItem>}
+                  {canReopen && <MenuItem title={reopenTo === 'queued' ? 'Make it pending again' : 'Open the thread again'} onClick={() => { void updateComment(c.id, { status: reopenTo }); close() }}>Reopen</MenuItem>}
                   <MenuItem danger onClick={() => { void removeComment(c.id); close() }}>Delete</MenuItem>
                 </>
               )}
@@ -131,7 +179,11 @@ export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
       )}
       <div className="thread-foot">
         {mode === 'view' ? (
-          <input name="gr-field" className="reply-stub" placeholder="Reply…" aria-label="Reply" readOnly onFocus={() => { setText(''); setMode('reply') }} />
+          <div className="row gap">
+            <input name="gr-field" className="reply-stub" placeholder="Reply…" aria-label="Reply" readOnly onFocus={() => { setText(''); setMode('reply') }} />
+            {canResolve && <button className="btn sm nowrap" data-gr="thread-resolve" title="Close this thread yourself. It folds away; nothing is sent to Claude Code." onClick={() => void updateComment(c.id, { status: 'resolved' })}><Icon name="check" size={14} /> Resolve</button>}
+            {canReopen && <button className="btn sm nowrap" data-gr="thread-reopen" title={reopenTo === 'queued' ? 'Open it again as a pending comment, to send to Claude Code' : 'Open the thread again'} onClick={() => void updateComment(c.id, { status: reopenTo })}>Reopen</button>}
+          </div>
         ) : (
           <>
             <textarea name="gr-text" autoFocus value={text} rows={3} placeholder={mode === 'reply' ? 'Reply…' : ''}
@@ -154,7 +206,6 @@ export function Composer({ anchor, k }: { anchor: AnchorInput; k: string }) {
   const addComment = useStore((s) => s.addComment)
   const request = useStore((s) => s.request)
   const set = useStore((s) => s.set)
-  const setTab = useStore((s) => s.setTab)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const close = (): void => set({ composer: null })
@@ -167,7 +218,8 @@ export function Composer({ anchor, k }: { anchor: AnchorInput; k: string }) {
   const ask = (): void => {
     if (!text.trim() || busy) return
     setBusy(true)
-    void request({ kind: 'question', text: text.trim(), anchor }).then((r) => { setBusy(false); if (r) { close(); setTab('conversation') } })
+    // the question and its answer show right here (and in Conversation): stay put
+    void request({ kind: 'question', text: text.trim(), anchor }).then((r) => { setBusy(false); if (r) close() })
   }
   return (
     <div className="composer" data-gr="composer" data-gr-composer={k}>
@@ -177,7 +229,7 @@ export function Composer({ anchor, k }: { anchor: AnchorInput; k: string }) {
       />
       <div className="row gap end wrap">
         <button className="btn sm" onClick={close}>Cancel</button>
-        <button className="btn sm" data-gr="comment-ask" disabled={!text.trim() || busy} onClick={ask} title="Ask Claude Code about this spot. It is delivered when Claude Code is listening; the answer arrives in Conversation.">Ask Claude Code</button>
+        <button className="btn sm" data-gr="comment-ask" disabled={!text.trim() || busy} onClick={ask} title="Ask Claude Code about this spot. It is delivered when Claude Code is listening; the answer appears here and in Conversation.">Ask Claude Code</button>
         <button className="btn sm primary" data-gr="comment-add" disabled={!text.trim() || busy} onClick={add} title="Add as a pending comment (⌘/Ctrl + Enter). Nothing is sent until you submit your review.">Add comment</button>
       </div>
     </div>

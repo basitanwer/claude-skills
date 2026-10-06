@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent, type PointerEvent as RPointerEvent, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent, type PointerEvent as RPointerEvent, type ReactNode } from 'react'
 import type {
   AnchorInput, Artifact, Comment, FileDiff, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor } from '../focus'
+import { focusAnchor, showSection } from '../focus'
 import {
-  ago, anchorKey, anchorLabel, baseName, driftText, elapsed, focusable, hasPendingReply, indexComments, isOpen, isStuck, isUnclaimed, pendingLabel,
-  pendingThreads, plural, requestTitle, routeHash, short, SIDE_KIND,
+  ago, anchorKey, anchorLabel, askThreads, baseName, driftText, elapsed, focusable, hasPendingReply, indexComments, isOpen, isStuck, isUnclaimed, pendingLabel,
+  pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
   sinceActive, symLabel, targetLabel, type DiffMode, type Tab
 } from '../util'
 import { AwayHint, CopyButton, DiffStat, FileIcon, Icon, Md, Menu, MenuItem, PresenceDot, currentTheme, setTheme } from '../components/common'
@@ -152,7 +152,7 @@ function Tabs({ loaded }: { loaded: LoadedReview }) {
     <div className="tabs-row">
       <nav className="tabs" role="tablist" aria-label="Review">
         {items.map((t) => (
-          <button key={t.id} role="tab" aria-selected={tab === t.id} className={'tab' + (tab === t.id ? ' on' : '')} data-gr-tab={t.id} onClick={() => setTab(t.id)}>
+          <button key={t.id} role="tab" aria-selected={tab === t.id} className={'tab' + (tab === t.id ? ' on' : '')} data-gr-tab={t.id} onClick={() => { useStore.getState().set({ returnTo: null }); setTab(t.id) }}>
             <Icon name={t.icon} />{t.label}<span className="counter">{t.n}</span>
           </button>
         ))}
@@ -234,6 +234,7 @@ function CommentsMenu({ loaded }: { loaded: LoadedReview }) {
   const groups: { title: string; list: Comment[] }[] = [
     { title: 'Pending', list: all.filter((c) => c.status === 'queued' || hasPendingReply(c)) },
     { title: 'With Claude Code', list: all.filter((c) => c.status === 'sent') },
+    { title: 'Answered by Claude', list: all.filter((c) => c.status === 'answered') },
     { title: 'Notes from Claude', list: all.filter((c) => c.status === 'note') },
     { title: 'Resolved', list: all.filter((c) => c.status === 'resolved') },
     { title: 'Outdated', list: all.filter((c) => c.status === 'outdated') }
@@ -311,8 +312,9 @@ const TREE_STEP = 16
 const STATUS_MARK: Record<FileDiff['status'], string> = { added: 'A', deleted: 'D', renamed: 'R', modified: '' }
 /** `nested`: the row is in the folder tree, so it keeps an empty slot where a folder has its chevron. */
 function TreeFile({ file, depth, comments, showDir, nested }: { file: FileDiff; depth: number; comments: number; showDir?: boolean; nested?: boolean }) {
+  const sec = useContext(SectionsCtx).get(file.path)
   return (
-    <button className="tree-row leaf" style={{ paddingLeft: `${8 + depth * TREE_STEP}px` }} title={`${file.path} (${file.status})`} data-gr-tree-file={file.path} data-gr-status={file.status} onClick={() => focusAnchor({ kind: 'file', file: file.path })}>
+    <button className={'tree-row leaf' + (sec ? ' in-sec' : '')} style={{ paddingLeft: `${8 + depth * TREE_STEP}px`, ...(sec ? secStyle(sec.no) : {}) }} title={`${file.path} (${file.status})${sec ? ` · ${sec.section.name}` : ''}`} data-gr-tree-file={file.path} data-gr-status={file.status} onClick={() => focusAnchor({ kind: 'file', file: file.path })}>
       {nested && <span className="tree-chev" />}
       <FileIcon path={file.path} />
       <span className={'tree-name' + (file.status === 'deleted' ? ' gone' : '')}>{baseName(file.path)}{showDir && file.path.includes('/') && <span className="muted small"> {file.path.slice(0, file.path.lastIndexOf('/'))}</span>}</span>
@@ -323,6 +325,11 @@ function TreeFile({ file, depth, comments, showDir, nested }: { file: FileDiff; 
     </button>
   )
 }
+/** For the file tree: each file's walkthrough section and its position (empty when the
+ *  tree is already grouped by section, where the group's row carries the colour). */
+type SectionMap = Map<string, { section: Section; no: number }>
+const NO_SECTIONS: SectionMap = new Map()
+const SectionsCtx = createContext<SectionMap>(NO_SECTIONS)
 function TreeDir({ node, depth, closed, toggle, counts }: { node: DirNode; depth: number; closed: Set<string>; toggle: (p: string) => void; counts: Map<string, number> }) {
   const open = !closed.has(node.path)
   return (
@@ -336,14 +343,14 @@ function TreeDir({ node, depth, closed, toggle, counts }: { node: DirNode; depth
   )
 }
 
-function SectionHeader({ section, files }: { section: Section; files: FileDiff[] }) {
+function SectionHeader({ section, files, no }: { section: Section; files: FileDiff[]; no: number }) {
   const reviewed = useStore((s) => s.reviewedSections.includes(section.id))
   const toggle = useStore((s) => s.toggleSectionReviewed)
   const k = anchorKey({ kind: 'section', sectionId: section.id })
   return (
-    <div className="sec-head" data-gr-section={section.id} data-gr-reviewed={reviewed ? 'true' : 'false'}>
+    <div className="sec-head" style={secStyle(no)} data-gr-section={section.id} data-gr-reviewed={reviewed ? 'true' : 'false'}>
       <div className="sec-title-row">
-        <span className="avatar agent sm" aria-hidden="true">C</span>
+        <span className="sec-dot" />
         <h3>{section.name}</h3>
         <span className="muted small">{plural(files.length, 'file')}</span>
         <span className="grow" />
@@ -355,6 +362,63 @@ function SectionHeader({ section, files }: { section: Section; files: FileDiff[]
       <Diagram section={section} />
       <CommentSlot anchor={{ kind: 'section', sectionId: section.id }} k={k} />
     </div>
+  )
+}
+/** A walkthrough section beside the code: what it says, its files, and the same
+ *  Reviewed mark and comment thread it has in the Conversation tab. Opened from a file's
+ *  section chip, so reading about a group of files never means leaving them. */
+function SectionPanel({ sections }: { sections: Section[] }) {
+  const id = useStore((s) => s.sectionPanel)
+  const reviewed = useStore((s) => (id ? s.reviewedSections.includes(id) : false))
+  const toggle = useStore((s) => s.toggleSectionReviewed)
+  const files = useStore((s) => s.loaded?.files)
+  const set = useStore((s) => s.set)
+  const no = sections.findIndex((s) => s.id === id)
+  const section = sections[no]
+  useEffect(() => {
+    if (!section) return
+    const onKey = (e: KeyboardEvent): void => {
+      const typing = e.target instanceof Element && e.target.closest('input, textarea, [role="menu"]')
+      if (e.key === 'Escape' && !typing) showSection(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [section, set])
+  if (!section) return null
+  const k = anchorKey({ kind: 'section', sectionId: section.id })
+  const step = (d: number): void => set({ sectionPanel: sections[(no + d + sections.length) % sections.length].id })
+  return (
+    <aside className="sec-panel" style={secStyle(no)} aria-label="Walkthrough section" data-gr="section-panel" data-gr-section-panel={section.id} data-gr-reviewed={reviewed ? 'true' : 'false'}>
+      <div className="sec-panel-head">
+        <span className="sec-dot" /><span className="muted small">Section {no + 1} of {sections.length}</span>
+        <span className="grow" />
+        {sections.length > 1 && <button className="icon-btn" title="Previous section" aria-label="Previous section" onClick={() => step(-1)}><Icon name="chevUp" /></button>}
+        {sections.length > 1 && <button className="icon-btn" title="Next section" aria-label="Next section" onClick={() => step(1)}><Icon name="chevDown" /></button>}
+        <button className="icon-btn" title="Close (Esc)" aria-label="Close section" data-gr="section-panel-close" onClick={() => showSection(null)}><Icon name="x" /></button>
+      </div>
+      <h3>{section.name}</h3>
+      {section.desc && <div className="sec-desc">{section.desc}</div>}
+      <div className="row gap">
+        <label className={'viewed-box' + (reviewed ? ' on' : '')}><input type="checkbox" name="gr-field" checked={reviewed} onChange={() => void toggle(section.id)} data-gr="section-reviewed" /> Reviewed</label>
+        <button className="btn sm" data-gr="section-comment" onClick={() => set({ composer: k })}><Icon name="comment" size={14} /> Comment</button>
+      </div>
+      <CommentSlot anchor={{ kind: 'section', sectionId: section.id }} k={k} />
+      {section.what && <Md text={section.what} />}
+      <Diagram section={section} />
+      <div className="sec-panel-files">
+        <div className="side-title">{plural(section.files.length, 'file')}</div>
+        {section.files.map((p) => {
+          const f = files?.find((x) => x.path === p)
+          return (
+            <button key={p} className="tree-row leaf" title={p} onClick={() => focusAnchor({ kind: 'file', file: p })}>
+              <FileIcon path={p} /><span className="tree-name">{baseName(p)}</span>
+              {f?.viewed === 'viewed' && <Icon name="check" size={12} className="tree-viewed" />}
+              {f && <DiffStat add={f.add} del={f.del} />}
+            </button>
+          )
+        })}
+      </div>
+    </aside>
   )
 }
 function Diagram({ section }: { section: Section }) {
@@ -409,6 +473,15 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
     for (const s of wt?.sections ?? []) for (const p of s.files) m.set(p, s)
     return m
   }, [wt])
+  // each file's section and that section's position in the walkthrough (its colour)
+  const sections = useMemo(() => {
+    const m: SectionMap = new Map()
+    for (const [no, s] of (wt?.sections ?? []).entries()) for (const p of s.files) m.set(p, { section: s, no })
+    return m
+  }, [wt])
+  const sectionNo = (s: Section | null | undefined): number => (s ? (wt?.sections ?? []).indexOf(s) : -1)
+  const secPanelId = useStore((s) => s.sectionPanel)
+  const secPanel = Boolean(secPanelId && wt?.sections.some((s) => s.id === secPanelId))
 
   const wsOnly = useStore((s) => s.wsOnly)
   const wsPaths = useMemo(() => new Set(wsOnly.map((f) => f.path)), [wsOnly])
@@ -482,8 +555,9 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
           <button className="btn sm" onClick={() => void setView({ commit: undefined })}>Show all changes</button>
         </div>
       )}
-      <div className={'files-layout' + (panelOpen ? '' : ' no-panel')} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties}>
+      <div className={'files-layout' + (panelOpen ? '' : ' no-panel') + (secPanel ? ' with-sec' : '')} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties}>
         {panelOpen && (
+          <SectionsCtx.Provider value={bySection ? NO_SECTIONS : sections}>
           <aside className="tree-panel" aria-label="Files" data-gr="files-view" data-gr-files-view={bySection ? 'sections' : treeView}>
             <ResizeHandle width={treeWidth} onChange={setTreeWidth} />
             <div className="tree-filter">
@@ -505,8 +579,8 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
               {bySection
                 ? groups.map((g) => (
                     <div key={g.section?.id ?? '-'}>
-                      <button className="tree-row dir sec" title={g.section?.desc} onClick={() => { if (g.section) { const el = document.querySelector(`[data-gr-section="${g.section.id}"]`); el?.scrollIntoView({ block: 'start' }) } }}>
-                        <span className="tree-name">{g.section?.name ?? 'Not in the walkthrough'}</span><span className="muted small">{g.files.length}</span>
+                      <button className="tree-row dir sec" style={g.section ? secStyle(sectionNo(g.section)) : undefined} title={g.section?.desc} onClick={() => { if (g.section) { const el = document.querySelector(`[data-gr-section="${g.section.id}"]`); el?.scrollIntoView({ block: 'start' }) } }}>
+                        {g.section && <span className="sec-dot" />}<span className="tree-name">{g.section?.name ?? 'Not in the walkthrough'}</span><span className="muted small">{g.files.length}</span>
                       </button>
                       {g.files.map((f) => <TreeFile key={f.path} file={f} depth={1} comments={counts.get(f.path) ?? 0} showDir />)}
                     </div>
@@ -516,16 +590,17 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
                   : visible.map((f) => <TreeFile key={f.path} file={f} depth={0} comments={counts.get(f.path) ?? 0} showDir />)}
             </div>
           </aside>
+          </SectionsCtx.Provider>
         )}
         <div className="files-list">
           {kept.length === 0 && <div className="blankslate"><h3>No changes</h3><p className="muted">The two sides of this comparison are identical.</p></div>}
           {kept.length > 0 && visible.length === 0 && <div className="blankslate"><h3>No files match</h3><p className="muted">Change the filter or the “{modeLabel}” view.</p></div>}
           {groups.map((g) => (
-            <div key={g.section?.id ?? '-'} className="file-group">
+            <div key={g.section?.id ?? '-'} className={'file-group' + (bySection && g.section ? ' sec' : '')} style={bySection && g.section ? secStyle(sectionNo(g.section)) : undefined}>
               {bySection && (g.section
-                ? <SectionHeader section={g.section} files={g.files} />
+                ? <SectionHeader section={g.section} files={g.files} no={sectionNo(g.section)} />
                 : <div className="sec-head plain" id="gr-loose"><h3>Not in the walkthrough</h3><span className="muted small">{plural(g.files.length, 'file')}</span></div>)}
-              {g.files.map((f) => <FileBox key={f.path} file={f} split={split} whitespaceOnly={wsPaths.has(f.path)} section={bySection ? undefined : sectionOf.get(f.path)} note={sectionOf.get(f.path)?.plainNotes?.[f.path]} />)}
+              {g.files.map((f) => <FileBox key={f.path} file={f} split={split} whitespaceOnly={wsPaths.has(f.path)} section={sectionOf.get(f.path)} sectionNo={sections.get(f.path)?.no} grouped={bySection} note={sectionOf.get(f.path)?.plainNotes?.[f.path]} />)}
             </div>
           ))}
           {filters.showExcluded && excluded.length > 0 && (
@@ -535,6 +610,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
             </div>
           )}
         </div>
+        {secPanel && <SectionPanel sections={wt?.sections ?? []} />}
       </div>
     </div>
   )
@@ -692,7 +768,7 @@ function Description({ loaded }: { loaded: LoadedReview }) {
           const k = anchorKey({ kind: 'section', sectionId: s.id })
           const done = reviewed.includes(s.id)
           return (
-            <div key={s.id} className={'sec-item' + (open ? ' open' : '')} data-gr-section={s.id} data-gr-reviewed={done ? 'true' : 'false'}>
+            <div key={s.id} className={'sec-item' + (open ? ' open' : '')} style={secStyle(wt.sections.indexOf(s))} data-gr-section={s.id} data-gr-reviewed={done ? 'true' : 'false'}>
               <div className="sec-item-head">
                 <button className="sec-toggle" aria-expanded={open} onClick={() => setSectionOpen(s.id, !open)}>
                   <Icon name={open ? 'chevDown' : 'chevRight'} size={12} /><strong>{s.name}</strong>{s.desc && <span className="muted"> — {s.desc}</span>}
@@ -833,7 +909,7 @@ function ConversationTab({ loaded }: { loaded: LoadedReview }) {
         <div className="side-block">
           <div className="side-title">Comments</div>
           {pendingThreads(st.comments).all.length > 0 && <div className="side-stat" data-gr="side-pending"><span>Pending</span><span>{pendingThreads(st.comments).all.length}</span></div>}
-          {(['sent', 'note', 'resolved', 'outdated'] as Comment['status'][]).filter((s) => count(s) > 0).map((s) => <div key={s} className="side-stat"><span>{s === 'note' ? 'Notes from Claude' : STATUS[s].text}</span><span>{count(s)}</span></div>)}
+          {(['sent', 'answered', 'note', 'resolved', 'outdated'] as Comment['status'][]).filter((s) => count(s) > 0).map((s) => <div key={s} className="side-stat"><span>{s === 'note' ? 'Notes from Claude' : STATUS[s].text}</span><span>{count(s)}</span></div>)}
           {st.comments.length === 0 && <div className="muted">None yet</div>}
         </div>
       </aside>
@@ -972,7 +1048,8 @@ export function Review() {
   const loaded = useStore((s) => s.loaded)
   const loading = useStore((s) => s.loading)
   const tab = useStore((s) => s.tab)
-  const index = useMemo(() => indexComments(loaded?.state.comments ?? []), [loaded?.state.comments])
+  // comments, plus the questions asked from a spot, which show at that spot too
+  const index = useMemo(() => indexComments([...(loaded?.state.comments ?? []), ...askThreads(loaded?.state.messages ?? [])]), [loaded?.state.comments, loaded?.state.messages])
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {

@@ -1,13 +1,13 @@
 import { create } from 'zustand'
 import type {
-  AnchorInput, Comment, CommentPatch, DashboardData, DriftSummary, FileDiff, LoadedReview, Presence, PushMap,
+  AnchorInput, Comment, CommentPatch, DashboardData, DriftSummary, FileDiff, FocusTarget, LoadedReview, Presence, PushMap,
   RepoState, RequestKind, ReviewRequest, ReviewState, ReviewView, SessionListItem, TourStop, UiAction, ViewMark
 } from '@shared/types'
 import { api, connect } from './api'
 import { errText, isOpen, newId, parseHash, refInput, routeHash, type DiffMode, type Route, type Tab } from './util'
 import { focusAnchor } from './focus'
 
-export interface Toast { id: string; text: string; kind: 'error' | 'info' }
+export interface Toast { id: string; text: string; kind: 'error' | 'info'; action?: { label: string; run: () => void } }
 export interface Tour { stops: TourStop[]; idx: number; loop?: boolean }
 export interface Hub { repo: string; state: RepoState | null; sessions: SessionListItem[]; showArchived: boolean }
 /** The code under review moved while this view was open. */
@@ -70,10 +70,16 @@ interface Store {
   docPath: string | null
   composer: string | null
   tour: Tour | null
+  /** Where the reviewer was before a link took them to another tab: offered back by the
+   *  "Back to …" bar. `top` is how far down the window the thing the link sat in was
+   *  (restored exactly); `y` is the page's scroll position, used if that thing is gone. */
+  returnTo: { tab: Tab; y: number; top: number | null; label: string; target?: FocusTarget } | null
+  /** the walkthrough section open in the panel beside the code (Files changed), by id */
+  sectionPanel: string | null
   status: string | null
   navOpen: boolean
 
-  toast(text: string, kind?: Toast['kind']): void
+  toast(text: string, kind?: Toast['kind'], action?: Toast['action']): void
   dismissToast(id: string): void
   go(route: Route): void
   applyRoute(route: Route): Promise<void>
@@ -116,7 +122,7 @@ interface Store {
   setFilters(patch: Partial<Filters>): void
   setFileOpen(path: string, open: boolean): void
   setSectionOpen(id: string, open: boolean): void
-  set(patch: Partial<Pick<Store, 'excludedOpen' | 'diffMode' | 'docPath' | 'composer' | 'tour' | 'status' | 'navOpen' | 'panelOpen' | 'fileQuery'>>): void
+  set(patch: Partial<Pick<Store, 'excludedOpen' | 'diffMode' | 'docPath' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'fileQuery'>>): void
   applyAction(action: UiAction): void
 
   onStreamOpen(): void
@@ -237,7 +243,7 @@ export const useStore = create<Store>((set, get) => {
       loaded, sessionId, preview, loading: false,
       viewedAt: loaded.state.viewedAt, reviewedSections: loaded.state.reviewedSections,
       drift: null, dismissed: [], fileOpen: {}, sectionOpen: {}, excludedOpen: false, diffMode: 'all', docPath: null,
-      composer: null, tour: null, fileQuery: '', wsOnly: []
+      composer: null, tour: null, returnTo: null, sectionPanel: null, fileQuery: '', wsOnly: []
     })
     refreshWsOnly()
   }
@@ -272,13 +278,15 @@ export const useStore = create<Store>((set, get) => {
     filters: { hideViewed: false, onlyCommented: false, bySection: pref('gr-by-section', ['1'] as const, null) === '1', showExcluded: false },
     treeView: pref('gr-files-view', ['tree', 'list'] as const, 'tree') ?? 'tree',
     tour: null,
+    returnTo: null,
+    sectionPanel: null,
     status: null,
     navOpen: false,
 
-    toast(text, kind = 'error') {
+    toast(text, kind = 'error', action) {
       const id = newId('t')
-      set({ toasts: [...get().toasts.slice(-4), { id, text, kind }] })
-      if (kind === 'info') window.setTimeout(() => get().dismissToast(id), 6000)
+      set({ toasts: [...get().toasts.slice(-4), { id, text, kind, ...(action ? { action } : {}) }] })
+      if (kind === 'info') window.setTimeout(() => get().dismissToast(id), action ? 15_000 : 6000)
     },
     dismissToast(id) {
       set({ toasts: get().toasts.filter((t) => t.id !== id) })
@@ -671,8 +679,12 @@ export const useStore = create<Store>((set, get) => {
       }).catch(() => { /* the pill still shows, without the counts */ })
     },
 
-    onUiAction({ sessionId, action }) {
-      if (get().sessionId === sessionId) get().applyAction(action)
+    onUiAction({ sessionId, action, answerTo }) {
+      if (get().sessionId !== sessionId) return
+      // an answer never moves the page by itself: it shows where the question was asked,
+      // and the code it cites is one click away
+      if (answerTo) get().toast('Claude Code answered.', 'info', { label: action.kind === 'tour' ? 'Start the tour' : 'Show the code it cites', run: () => get().applyAction(action) })
+      else get().applyAction(action)
     },
 
     onPresence({ sessionId, presence }: { sessionId: number; presence: Presence }) {

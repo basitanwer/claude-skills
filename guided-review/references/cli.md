@@ -81,7 +81,7 @@ Common options: `--repo DIR` (default: cwd), `--session N` (default: the review 
 | `annotate --file F.json` (`-` = stdin) `[--request ID]` | Store the walkthrough (see walkthrough-schema.md). |
 | `artifact add PATH --role spec\|plan` · `artifact remove PATH` · `artifact list` | Attach or detach spec/plan files the review is judged against. |
 | `comment <anchor> --text T [--expect TEXT] [--as user] [--queued]` | Add a comment. From this session it is a `note`; `--queued` or `--as user` puts it in the reviewer's queue. |
-| `comments [--status note\|queued\|sent\|resolved\|outdated]` | List comments. |
+| `comments [--status note\|queued\|sent\|answered\|resolved\|outdated]` | List comments. |
 | `reply ID --text T` · `resolve ID --verdict addressed\|reworked\|skipped --note T [--sha C]` · `reopen ID` · `delete-comment ID` | Manage a comment thread and its resolution. |
 | `focus <anchor>` | Scroll every open tab of this review to a spot and highlight it. Opens a tab if none is open. |
 | `tour --stop "path:line[:old] \| note" …` or `--file stops.json` | A 2–8 stop walkthrough card in the UI. Stops may also be `section:ID`, a bare path, or `summary`. `--loop` to cycle. |
@@ -122,7 +122,7 @@ Lifecycle: `pending` → `running` (claimed by a listener) → `done` | `failed`
 - **Cancellation.** The reviewer can cancel a pending or running request. `gr listen` prints a `cancelled` line at once; in any case the next `gr progress`, `gr answer`, `gr done` or `gr annotate --request` for it fails with exit code 130.
 - **Stuck requests.** If a running request shows no progress for five minutes the page offers "Send again", which puts it back in the queue for the next listener.
 - **Failure.** `gr fail ID --text "why"` ends a request with a reason the page shows.
-- **Unresolved comments.** When an apply or decisions request ends in any way, comments still `sent` return to pending, so nothing is lost.
+- **Comments without an outcome.** When an apply or decisions request ends in any way, a comment still `sent` that Claude Code replied to during the request becomes `answered`: an open thread that is no longer waiting to be sent (the reviewer can reply again, or resolve it). One it never touched returns to pending, so nothing is lost.
 - **Edits and permissions.** Edits are made by this Claude Code session with its normal tools, so Claude Code's own permission prompts and settings apply; the skill additionally has the session confirm in the terminal before the first edit a request asks for. A request on a fixed commit has `editable: false`: it can be answered but not edited.
 - **Presence.** The page shows whether a session is attached: *listening* while `gr listen` or `gr wait` is connected, *working* for two minutes after any `gr` call for that review or while a request is running, otherwise *not attached*. Requests made while nothing is attached wait.
 - **Notifications.** Completing a request or storing a walkthrough notifies the reviewer: a browser notification when the tab is in the background, or a macOS banner when no tab is open on that review.

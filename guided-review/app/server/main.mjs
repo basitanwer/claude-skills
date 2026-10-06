@@ -185,7 +185,14 @@ async function resolvePair(repo, baseIn, compareIn) {
 function finish(s, r, status, error) {
   r.status = status; r.finishedAt = now()
   if (error) r.error = error
-  for (const c of s.state.comments) if (r.commentIds?.includes(c.id) && c.status === 'sent') c.status = 'queued'
+  for (const c of s.state.comments) {
+    if (!r.commentIds?.includes(c.id) || c.status !== 'sent') continue
+    // Claude Code replied in the thread without recording an outcome: the comment was
+    // answered, so it is no longer waiting to be sent. One it never touched goes back
+    // to the reviewer's pending comments.
+    const replied = r.kind === 'apply' && c.replies.some((x) => x.author === 'agent' && x.at >= r.createdAt)
+    c.status = replied ? 'answered' : 'queued'
+  }
 }
 /** @param {Session} s @param {string} id */
 function liveRequest(s, id) {
@@ -316,7 +323,8 @@ const api = {
       c.status = 'resolved'
       c.resolution = { verdict: patch.resolution.verdict, note: String(patch.resolution.note ?? ''), ...(patch.resolution.commit ? { commit: String(patch.resolution.commit) } : {}), at: now() }
     } else if (patch?.status) {
-      if (!['note', 'queued', 'resolved'].includes(patch.status)) throw new Error(`cannot set status ${patch.status}`)
+      if (!['note', 'queued', 'resolved', 'answered'].includes(patch.status)) throw new Error(`cannot set status ${patch.status}`)
+      if (patch.status === 'answered' && !c.replies.some((x) => x.author === 'agent')) throw new Error('only a comment Claude Code replied to can be marked answered')
       c.status = patch.status
       if (patch.status !== 'resolved') delete c.resolution
     }
@@ -501,8 +509,9 @@ const api = {
     s.state.messages.push(m)
     if (r) { finish(s, r, 'done'); notify(id, 'Claude Code answered', text.slice(0, 120)) }
     save(s); changed(id); refreshPresence(id)
-    // the first focus/tour also plays live, so the answer lands with the code it cites on screen
-    if (actions[0]) push('ui:action', { sessionId: id, action: actions[0] })
+    // The first focus/tour is also sent to the open tabs. With an answer the page offers it
+    // ("Show") instead of moving: the reviewer asked from somewhere and is still reading there.
+    if (actions[0]) push('ui:action', { sessionId: id, action: actions[0], ...(r ? { answerTo: r.id } : {}) })
     return m
   }),
   annotate: (/** @type {number} */ id, /** @type {any} */ raw, /** @type {string} */ requestId) => locked(id, async () => {
