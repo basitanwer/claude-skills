@@ -8,10 +8,11 @@
 set -e
 SKILL="$(cd "$(dirname "$0")/.." && pwd)"
 GR="$SKILL/scripts/gr"
-export GUIDED_REVIEW_HOME="${TMPDIR:-/tmp}/guided-review-demo"
+# GUIDED_REVIEW_DEMO_HOME and GUIDED_REVIEW_PORT let several demos run side by side.
+export GUIDED_REVIEW_HOME="${GUIDED_REVIEW_DEMO_HOME:-${TMPDIR:-/tmp}/guided-review-demo}"
 export GUIDED_REVIEW_PORT="${GUIDED_REVIEW_PORT:-8799}" GUIDED_REVIEW_OS_NOTIFY=0
 "$GR" stop --force >/dev/null 2>&1 || true
-rm -rf "${TMPDIR:-/tmp}/guided-review-demo"
+rm -rf "$GUIDED_REVIEW_HOME"
 FX="$(cd "$SKILL/app" && node -e "import('./tests/helpers.mjs').then((m) => console.log(m.makeFixture().dir))")"
 cd "$FX"
 step() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
