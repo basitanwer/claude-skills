@@ -45,6 +45,10 @@ function AskThread({ c }: { c: Comment }) {
   const requests = useStore((s) => s.loaded?.state.requests)
   const request = useStore((s) => s.request)
   const cancel = useStore((s) => s.cancelRequest)
+  const resolved = useStore((s) => Boolean(s.loaded?.state.resolvedAsks?.includes(root)))
+  const resolveAsk = useStore((s) => s.resolveAsk)
+  // a resolved thread folds away, as a resolved comment does; the reviewer can look into it
+  const [shown, setShown] = useState(false)
   // what is being typed lives here, in a component keyed by the thread, so a background refresh that
   // leaves the code as it is does not lose it (folding in changed code redraws the diff, and it is lost)
   const [mode, setMode] = useState<'view' | 'reply'>('view')
@@ -61,8 +65,21 @@ function AskThread({ c }: { c: Comment }) {
     void request({ kind: 'question', text: body.trim(), follows }).then((r) => { setBusy(false); if (r) sent?.() })
   }
   const submit = (): void => { if (last) send(text, last.id, () => { setText(''); setMode('view') }) }
+  if (resolved && !shown && !waiting) {
+    const answer = exchanges.flatMap((x) => x.answers).at(-1)
+    return (
+      <div className="thread user ask folded" data-gr-ask={root} data-gr-ask-status="resolved" data-gr-folded="true">
+        <div className="thread-main thread-head">
+          <Who author="user" />
+          <span className="label resolved" title="You resolved this conversation">Question · resolved</span>
+          <span className="clip grow muted">{c.text}{answer ? ` — ${answer.text.replace(/[*_`#>]+/g, '').replace(/\s+/g, ' ').slice(0, 200)}` : ''}</span>
+          <button className="link small nowrap" data-gr="show-resolved" onClick={() => setShown(true)}>Show resolved</button>
+        </div>
+      </div>
+    )
+  }
   return (
-    <div className="thread user ask" data-gr-ask={root} data-gr-ask-status={last ? askStatus(last) : 'unknown'}>
+    <div className="thread user ask" data-gr-ask={root} data-gr-ask-status={resolved ? 'resolved' : last ? askStatus(last) : 'unknown'}>
       {exchanges.map((x, i) => {
         const st = askStatus(x)
         return (
@@ -72,7 +89,9 @@ function AskThread({ c }: { c: Comment }) {
                 <Who author="user" />
                 {i === 0 && <span className="label note" title="A question to Claude Code, not a review comment: it is answered here and is not part of what you send with your review">Question</span>}
                 <span className="muted">{ago(x.at)}</span>
+                {i === 0 && resolved && <span className="label resolved" title="You resolved this conversation">Resolved</span>}
                 <span className="grow" />
+                {i === 0 && resolved && <button className="link small nowrap" onClick={() => setShown(false)}>Hide resolved</button>}
                 {i === 0 && <button className="link small nowrap" data-gr="ask-in-conversation" title="Show this question and its answer in the Conversation tab" onClick={() => focusQuestion(root)}>In Conversation</button>}
               </div>
               <div className="thread-body pre-wrap">{x.text}</div>
@@ -102,7 +121,12 @@ function AskThread({ c }: { c: Comment }) {
       {last && !waiting && (
         <div className="thread-foot">
           {mode === 'view' ? (
-            <input name="gr-field" className="reply-stub" data-gr="ask-follow-up" placeholder="Ask a follow-up…" aria-label="Ask a follow-up" readOnly onFocus={() => setMode('reply')} />
+            <div className="row gap">
+              <input name="gr-field" className="reply-stub" data-gr="ask-follow-up" placeholder="Ask a follow-up…" aria-label="Ask a follow-up" readOnly onFocus={() => setMode('reply')} />
+              {resolved
+                ? <button className="btn sm nowrap" data-gr="ask-unresolve" title="Open this conversation again" onClick={() => { setShown(false); void resolveAsk(root, false) }}>Unresolve conversation</button>
+                : <button className="btn sm nowrap" data-gr="ask-resolve" title="You have your answer: fold this conversation away. Asking a follow-up opens it again." onClick={() => { setShown(false); void resolveAsk(root, true) }}>Resolve conversation</button>}
+            </div>
           ) : (
             <>
               <textarea name="gr-text" autoFocus value={text} rows={3} placeholder="Ask a follow-up…" aria-label="Ask a follow-up"

@@ -29,7 +29,7 @@ export const pairIdentity = (pair, direct) => `${identity(pair.base)}→${identi
 /** @returns {ReviewState} */
 export function emptyState() {
   return {
-    iterations: [], comments: [], messages: [], requests: [], viewedAt: {}, reviewedSections: [],
+    iterations: [], comments: [], messages: [], requests: [], viewedAt: {}, reviewedSections: [], resolvedAsks: [],
     fileExcluded: {}, approvals: [], artifactApprovals: {}, artifacts: []
   }
 }

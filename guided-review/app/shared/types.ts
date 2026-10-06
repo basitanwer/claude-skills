@@ -296,6 +296,9 @@ export interface ReviewState {
   requests: ReviewRequest[]
   viewedAt: Record<string, ViewMark>
   reviewedSections: string[]
+  /** Question threads the reviewer closed, each by the request id of its first question.
+   *  A resolved thread folds away where it sits; asking a follow-up in it opens it again. */
+  resolvedAsks: string[]
   /** reviewer's include/exclude override for untracked files */
   fileExcluded: Record<string, boolean>
   /** compare commit when the walkthrough was last written */
@@ -416,6 +419,8 @@ export interface Api {
   unapprove(sessionId: number): Promise<ReviewState>
   approveArtifact(sessionId: number, path: string, approved: boolean): Promise<ReviewState>
   setArtifacts(sessionId: number, refs: { role: 'spec' | 'plan'; path: string }[]): Promise<ReviewState>
+  /** Close a Question thread (or open it again). `root`: the request id of its first question. */
+  askResolve(sessionId: number, root: string, resolved: boolean): Promise<ReviewState>
   getPrefs(): Promise<Record<string, string>>
   setPref(key: string, value: string): Promise<void>
 

@@ -130,6 +130,8 @@ interface Store {
   updateComment(id: string, patch: CommentPatch): Promise<void>
   removeComment(id: string): Promise<void>
 
+  /** Close a Question thread, by its first question's request id, or open it again. */
+  resolveAsk(root: string, resolved: boolean): Promise<void>
   /** Ask the attached Claude Code session for something. */
   request(input: { kind: RequestKind; text?: string; anchor?: AnchorInput; commentIds?: string[]; update?: boolean; commit?: boolean; follows?: string }): Promise<ReviewRequest | null>
   cancelRequest(id: string): Promise<void>
@@ -612,6 +614,15 @@ export const useStore = create<Store>((set, get) => {
         fail(e)
         return null
       }
+    },
+
+    async resolveAsk(root, resolved) {
+      const id = get().sessionId
+      if (id == null) return
+      try {
+        const st = await api.askResolve(id, root, resolved)
+        patchState((s) => ({ ...s, resolvedAsks: st.resolvedAsks ?? [] }))
+      } catch (e) { fail(e) }
     },
 
     async cancelRequest(requestId) {

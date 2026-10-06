@@ -461,6 +461,19 @@ const api = {
     save(s); changed(id)
     return s.state
   }),
+  askResolve: (/** @type {number} */ id, /** @type {string} */ rid, /** @type {boolean} */ resolved) => locked(id, async () => {
+    const s = store.get(id)
+    const root = s.state.requests.find((x) => x.id === String(rid))
+    if (!root || root.kind !== 'question') throw new Error(`this review has no question ${rid}`)
+    if (root.threadId) throw new Error(`${rid} is a follow-up: a thread is resolved by its first question, ${root.threadId}`)
+    // a thread Claude Code still owes an answer in stays open: the answer would arrive in a folded thread
+    const open = s.state.requests.some((r) => (r.threadId ?? r.id) === root.id && (r.status === 'pending' || r.status === 'running'))
+    if (resolved && open) throw new Error('Claude Code has not answered in this thread yet: cancel the question, or wait for the answer')
+    s.state.resolvedAsks = s.state.resolvedAsks.filter((x) => x !== root.id)
+    if (resolved) s.state.resolvedAsks.push(root.id)
+    save(s); changed(id)
+    return s.state
+  }),
   getPrefs: () => store.index.prefs,
   setPref: (/** @type {string} */ key, /** @type {string} */ value) => { store.setPref(String(key), String(value)) },
 
@@ -490,6 +503,8 @@ const api = {
       if (input.anchor) r.anchor = await makeAnchor(loaded, input.anchor, sideReader(s.repo, loaded))
       if (root) {
         r.follows = String(input.follows); r.threadId = root.id
+        // the conversation goes on: a thread the reviewer had resolved is open again
+        s.state.resolvedAsks = s.state.resolvedAsks.filter((x) => x !== root.id)
         // asked from the thread, so it is about the same spot; the anchor is copied as it
         // is, not checked again: the line may have changed since the first question
         if (!r.anchor && root.anchor) r.anchor = structuredClone(root.anchor)

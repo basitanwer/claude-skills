@@ -131,3 +131,23 @@ test('gr wait prints the thread before the follow-up; a first question prints as
   assert.deepEqual(Object.keys(p), ['type', 'session', 'id', 'kind', 'resumed', 'yours', 'text', 'do'])
   for (const r of [next, plain]) answer(r.id, 'Yes.')
 })
+
+test('a Question thread can be resolved and opened again; a follow-up opens it', async () => {
+  const resolved = async () => (await state()).resolvedAsks
+  assert.deepEqual(await resolved(), [])
+  assert.deepEqual((await b.rpc('askResolve', sid, q.id, true)).resolvedAsks, [q.id])
+  await b.rpc('askResolve', sid, q.id, true)
+  assert.deepEqual(await resolved(), [q.id], 'resolving twice keeps one entry')
+  await b.rpc('askResolve', sid, q.id, false)
+  assert.deepEqual(await resolved(), [])
+  // only a thread's first question names it, and only a question can be resolved
+  await assert.rejects(b.rpc('askResolve', sid, f1.id, true), /is a follow-up: a thread is resolved by its first question/)
+  await assert.rejects(b.rpc('askResolve', sid, 'r999', true), /no question r999/)
+
+  await b.rpc('askResolve', sid, q.id, true)
+  const again = await ask('One more thing?', { follows: q.id })
+  assert.deepEqual(await resolved(), [], 'the conversation went on, so the thread is open again')
+  await assert.rejects(b.rpc('askResolve', sid, q.id, true), /has not answered in this thread yet/)
+  answer(again.id, 'Nothing more.')
+  assert.deepEqual((await b.rpc('askResolve', sid, q.id, true)).resolvedAsks, [q.id])
+})
