@@ -192,10 +192,11 @@ function unquote(s) {
   return s.replace(/\\(["\\tn])/g, (_, c) => (c === 't' ? '\t' : c === 'n' ? '\n' : c))
 }
 
-/** Diff between two commits/trees. `extra` adds git diff flags (e.g. `-w`).
- *  @param {string} dir @param {string} a @param {string} b @param {string[]} [extra] */
-export async function diffTrees(dir, a, b, extra = []) {
-  return parsePatch(await git(dir, [...DIFF, ...extra, a, b, '--']))
+/** Diff between two commits/trees. `extra` adds git diff flags (e.g. `-w`); `paths`
+ *  limits it to those files.
+ *  @param {string} dir @param {string} a @param {string} b @param {string[]} [extra] @param {string[]} [paths] */
+export async function diffTrees(dir, a, b, extra = [], paths = []) {
+  return parsePatch(await git(dir, [...DIFF, ...extra, a, b, '--', ...paths]))
 }
 /** Diff from a commit/tree to the working tree of `dir`, untracked files included
  *  as added files. The index is not touched.
@@ -216,13 +217,16 @@ export async function untrackedFiles(dir) {
   const out = []
   for (const p of paths) {
     let stat
-    try { stat = fs.statSync(path.join(dir, p)) } catch { continue }
-    if (!stat.isFile()) continue
+    try { stat = fs.lstatSync(path.join(dir, p)) } catch { continue }
+    // a symlink is the path it points at, as git would store it: its target may be
+    // outside the repository and is never read
+    const link = stat.isSymbolicLink()
+    if (!stat.isFile() && !link) continue
     /** @type {FileDiff} */
     const blob = { path: p, status: 'added', binary: true, untracked: true, add: 0, del: 0, hunks: [] }
     if (stat.size > MAX_INLINE_BYTES) { out.push(blob); continue }
     let content
-    try { content = fs.readFileSync(path.join(dir, p), 'utf8') } catch { continue }
+    try { content = link ? fs.readlinkSync(path.join(dir, p)) : fs.readFileSync(path.join(dir, p), 'utf8') } catch { continue }
     if (content.includes('\0')) { out.push(blob); continue }
     const lines = content.split('\n')
     if (lines[lines.length - 1] === '') lines.pop()

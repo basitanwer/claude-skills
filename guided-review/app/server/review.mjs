@@ -256,7 +256,10 @@ export async function changedByCommit(repo, loaded, sha, read) {
   const parent = (await tryGit(repo, ['rev-parse', '--verify', '--quiet', `${sha}^`]))?.trim() || EMPTY_TREE
   /** @type {import('../shared/types.ts').ChangedRange[]} */
   const out = []
-  for (const cf of await diffTrees(repo, parent, sha)) {
+  // only the review's files, under both names of a rename: a merge of a large branch is not parsed whole
+  const paths = [...new Set(loaded.files.flatMap((f) => [f.path, ...(f.oldPath ? [f.oldPath] : [])]))]
+  if (!paths.length) return { changed: [], more: 0 }
+  for (const cf of await diffTrees(repo, parent, sha, [], paths)) {
     const f = loaded.files.find((x) => x.path === cf.path) ?? loaded.files.find((x) => x.oldPath === cf.path)
     if (!f || f.binary) continue
     const added = new Map(cf.hunks.flatMap((h) => h.lines.filter((l) => l.kind === 'add').map((l) => [/** @type {number} */ (l.new), l.text])))
@@ -265,7 +268,7 @@ export async function changedByCommit(repo, loaded, sha, read) {
     const nums = [...added.keys()].sort((a, b) => a - b)
     for (let i = 0; i < nums.length; i++) {
       let j = i; while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++
-      if (full[nums[i] - 1] === added.get(nums[i]) && full[nums[j] - 1] === added.get(nums[j])) out.push({ file: f.path, start: nums[i], end: nums[j], lineContent: full[nums[i] - 1] })
+      if (nums.slice(i, j + 1).every((n) => full[n - 1] === added.get(n))) out.push({ file: f.path, start: nums[i], end: nums[j], lineContent: full[nums[i] - 1] })
       i = j
     }
   }
@@ -350,7 +353,14 @@ export const artifactRole = (p) => ARTIFACT_RULES.find(([re]) => re.test(p))?.[1
  *  else from the compare commit. @param {string} repo @param {string | null} workdir @param {string} head @param {string} rel */
 export async function readAt(repo, workdir, head, rel) {
   if (rel.split('/').some((s) => s === '..' || s === '') || path.isAbsolute(rel)) return null
-  if (workdir) { try { return fs.readFileSync(path.join(workdir, rel), 'utf8') } catch { /* fall through to the commit */ } }
+  if (workdir) {
+    try {
+      const at = path.join(workdir, rel)
+      // a symlink reads as git stores it, the path it points at: following it would show
+      // (and let a line anchor copy) a file that may be outside the repository
+      return fs.lstatSync(at).isSymbolicLink() ? fs.readlinkSync(at) : fs.readFileSync(at, 'utf8')
+    } catch { /* fall through to the commit */ }
+  }
   return tryGit(repo, ['show', `${head}:${rel}`])
 }
 /** Spec/plan files for a comparison: every recognised file the diff touches;

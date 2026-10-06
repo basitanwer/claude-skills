@@ -244,3 +244,55 @@ test('a comparison that cannot be edited accepts ranges that exist, and its inst
   assert.equal(comment(m).resolution.changed[0].lineContent, 'line 61, uncommitted')
   git(fx.dir, 'checkout', '-q', '--', 'src/many.ts')
 })
+
+test('a symlink is read as the link it is, never as the file it points at', async () => {
+  // outside the repository, three lines; git has the link as one line: the path it points at
+  const outside = path.join(fx.root, 'outside.txt')
+  fs.writeFileSync(outside, 'secret 1\nsecret 2\nsecret 3\n')
+  fs.symlinkSync(outside, path.join(fx.dir, 'link.txt'))
+  git(fx.dir, 'add', 'link.txt'); git(fx.dir, 'commit', '-q', '-m', 'a link')
+  const c = await ask('link.txt')
+  const past = resolve(c, '--changed', 'link.txt:3')
+  assert.equal(past.code, 1)
+  assert.match(past.err, /changed link\.txt:3: link\.txt has 1 lines on the compare side; line 3 does not exist/)
+  assert.equal(comment(c).status, 'queued')
+  assert.equal(resolve(c, '--changed', 'link.txt:1').code, 0)
+  assert.deepEqual(comment(c).resolution.changed, [{ file: 'link.txt', start: 1, end: 1, lineContent: outside }])
+  assert.doesNotMatch(JSON.stringify(gj('state', '--full')), /secret/, 'nothing of the target reaches the review')
+  // an untracked link is shown the same way
+  fs.symlinkSync(outside, path.join(fx.dir, 'loose-link.txt'))
+  const loose = (await b.rpc('loadSession', sid)).files.find((f) => f.path === 'loose-link.txt')
+  assert.deepEqual(loose.hunks[0].lines.map((l) => l.text), [outside])
+  fs.rmSync(path.join(fx.dir, 'loose-link.txt'))
+})
+
+test('--sha naming a commit outside the comparison records the commit, not its lines', async () => {
+  const c = await ask()
+  const res = resolve(c, '--sha', 'v0')
+  assert.equal(res.code, 0, res.err)
+  const r = comment(c).resolution
+  assert.deepEqual([Object.keys(r), r.commit.length], [['verdict', 'note', 'commit', 'at'], 40], 'v0 is the base of this review: nothing of it is what the review changed')
+})
+
+test('a derived run is kept only if every line of it still reads as the commit left it', async () => {
+  write(fx.dir, 'src/run.ts', lines(['r1', 'r2', 'r3', 'r4', 'r5']))
+  const sha = commit(fx.dir, 'add run')
+  write(fx.dir, 'src/run.ts', lines(['r1', 'X', 'Y', 'Z', 'r5']))      // the ends still match; the middle does not
+  const c = await ask('src/run.ts')
+  assert.equal(resolve(c, '--sha', sha).code, 0)
+  assert.equal(comment(c).resolution.changed, undefined)
+  git(fx.dir, 'checkout', '--', 'src/run.ts')
+  const d = await ask('src/run.ts')
+  assert.equal(resolve(d, '--sha', sha).code, 0)
+  assert.deepEqual(comment(d).resolution.changed, [{ file: 'src/run.ts', start: 1, end: 5, lineContent: 'r1' }])
+})
+
+test('a refused status leaves the comment as it was, text and replies included', async () => {
+  const c = await ask('src/a.ts', 'Original.')
+  await assert.rejects(b.rpc('commentUpdate', sid, c, { text: 'REWRITTEN', reply: { author: 'user', text: 'ORPHAN' }, status: 'bogus' }), /cannot set status bogus/)
+  await assert.rejects(b.rpc('commentUpdate', sid, c, { text: 'REWRITTEN', reply: { author: 'user', text: 'ORPHAN' }, status: 'answered' }), /only a comment Claude Code replied to/)
+  assert.deepEqual([comment(c).text, comment(c).replies.length, comment(c).status], ['Original.', 0, 'queued'])
+  // a reply from Claude Code sent along with it is what makes "answered" true
+  await b.rpc('commentUpdate', sid, c, { reply: { author: 'agent', text: 'Here.' }, status: 'answered' })
+  assert.deepEqual([comment(c).replies.length, comment(c).status], [1, 'answered'])
+})

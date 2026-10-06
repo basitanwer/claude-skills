@@ -525,7 +525,8 @@ function requestEvent(item, loaded) {
   if (r.text) ev.text = r.text
   if (r.anchor) ev.anchor = { label: anchorLabel(r.anchor), ...(r.anchor.lineContent != null ? { line: r.anchor.lineContent } : {}) }
   // a follow-up comes with its thread so far, so it can be answered in context
-  if (r.follows) { ev.follows = r.follows; if (loaded) ev.thread = earlier(r, loaded) }
+  // (null: the review could not be read just now, so the earlier exchange is missing; gr state has it)
+  if (r.follows) { ev.follows = r.follows; ev.thread = loaded ? earlier(r, loaded) : null }
   if (r.kind === 'walkthrough') ev.update = Boolean(r.update)
   if (r.kind === 'apply') {
     ev.commit = Boolean(r.commit); ev.editable = r.editable !== false
@@ -549,7 +550,8 @@ function printRequest(item, loaded) {
   } else if (r.kind === 'question') {
     if (r.follows) {
       out(`  a follow-up to ${r.follows}; earlier in this thread:`)
-      for (const m of earlier(r, loaded)) out(`    ${m.role}: ${m.text.replace(/\n/g, '\n      ')}`)
+      if (!loaded) out('    (could not be read just now: see gr state for the conversation)')
+      else for (const m of earlier(r, loaded)) out(`    ${m.role}: ${m.text.replace(/\n/g, '\n      ')}`)
       out('  the reviewer now asks:')
     }
     out(`  ${r.text}`)
@@ -1025,7 +1027,8 @@ const commands = {
         delivered.add(key)
         // (a follow-up question needs the review too: its thread so far is read from it)
         if ((item.request.kind === 'apply' || item.request.kind === 'decisions' || item.request.follows) && !loaded.has(item.sessionId)) {
-          loaded.set(item.sessionId, await rpcAt(port, 'loadSession', [item.sessionId]).catch(() => null))
+          const load = () => rpcAt(port, 'loadSession', [item.sessionId]).catch(() => null)
+          loaded.set(item.sessionId, await load() ?? await sleep(300).then(load))      // once more: the request is claimed and will not be printed again
         }
         emit(requestEvent(item, loaded.get(item.sessionId)))
       }

@@ -403,6 +403,11 @@ const api = {
     if (!c) throw new Error(`no comment ${cid}`)
     // checked in full before anything is applied: a refused range leaves the comment as it was
     const resolution = patch?.resolution ? await resolutionOf(s, patch.resolution) : null
+    if (!resolution && patch?.status) {
+      if (!['note', 'queued', 'resolved', 'answered'].includes(patch.status)) throw new Error(`cannot set status ${patch.status}`)
+      // (a reply sent along with it counts: it is applied first)
+      if (patch.status === 'answered' && !(patch.reply?.text && patch.reply.author === 'agent') && !c.replies.some((x) => x.author === 'agent')) throw new Error('only a comment Claude Code replied to can be marked answered')
+    }
     if (typeof patch?.text === 'string' && patch.text.trim()) c.text = patch.text.trim()
     if (patch?.reply?.text) {
       const author = patch.reply.author === 'agent' ? 'agent' : 'user'
@@ -413,8 +418,6 @@ const api = {
       c.status = 'resolved'
       c.resolution = resolution
     } else if (patch?.status) {
-      if (!['note', 'queued', 'resolved', 'answered'].includes(patch.status)) throw new Error(`cannot set status ${patch.status}`)
-      if (patch.status === 'answered' && !c.replies.some((x) => x.author === 'agent')) throw new Error('only a comment Claude Code replied to can be marked answered')
       c.status = patch.status
       if (patch.status !== 'resolved') delete c.resolution
     }
@@ -640,11 +643,18 @@ const api = {
     const loaded = await load(s)
     if (loaded.refMissing) throw new Error('a side of this comparison no longer resolves')
     const { walkthrough, warnings } = reconcile(loaded.files, raw)
+    const before = s.state.walkthrough
     s.state.walkthrough = walkthrough
     s.state.iterations.push({ n: s.state.iterations.length + 1, at: now(), endSha: loaded.headSha, title: walkthrough.title, summary: walkthrough.summary })
     s.state.reviewedAtSha = loaded.headSha
     s.state.reviewedSignature = loaded.signature
-    s.state.reviewedSections = s.state.reviewedSections.filter((sid) => walkthrough.sections.some((x) => x.id === sid))
+    // A Reviewed mark stays with a section that is still the same files. An id reused for
+    // other files is a section the reviewer has not seen.
+    const same = (/** @type {string} */ sid) => {
+      const was = before?.sections.find((x) => x.id === sid)?.files; const is = walkthrough.sections.find((x) => x.id === sid)?.files
+      return Boolean(is) && (!was || (was.length === is?.length && was.every((p) => is.includes(p))))
+    }
+    s.state.reviewedSections = s.state.reviewedSections.filter(same)
     for (const p of Array.isArray(raw.artifactPaths) ? raw.artifactPaths.map(String) : []) {
       const role = artifactRole(p)
       if (role && !s.state.artifacts.some((a) => a.path === p) && (await tryGit(s.repo, ['cat-file', '-e', `${loaded.headSha}:${p}`])) !== null) s.state.artifacts.push({ role, path: p })
@@ -677,9 +687,14 @@ async function resolutionOf(s, input) {
     const read = sideReader(s.repo, loaded)
     if (named) where.changed = await makeChanged(loaded, input.changed, read)
     else {
-      // a commit this repository does not have is recorded as given, as before, with no lines
+      // A commit this repository does not have is recorded as given, as before, with no
+      // lines. So is one outside the comparison (not reachable from its compare side, or
+      // already part of its base): its lines are not what this review changed. And so is
+      // one whose diff cannot be read: the outcome still stands without them.
       const sha = /^-|[\0\n]/.test(commit) ? null : await commitOf(s.repo, commit)
-      if (sha) where = await changedByCommit(s.repo, loaded, sha, read)
+      const within = sha !== null && (await tryGit(s.repo, ['merge-base', '--is-ancestor', sha, loaded.headSha])) !== null
+        && (await tryGit(s.repo, ['merge-base', '--is-ancestor', sha, loaded.diffBase])) === null
+      if (sha && within) where = await changedByCommit(s.repo, loaded, sha, read).catch(() => ({ changed: [], more: 0 }))
     }
   }
   return { verdict: input.verdict, note: String(input.note ?? ''), ...(commit ? { commit } : {}), ...(where.changed.length ? { changed: where.changed } : {}), ...(where.more ? { changedMore: where.more } : {}), at: now() }
