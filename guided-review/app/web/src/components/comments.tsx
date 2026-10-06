@@ -1,7 +1,7 @@
 import { createContext, useContext, useState } from 'react'
 import type { AnchorInput, Comment } from '@shared/types'
 import { useStore } from '../store'
-import { focusAnchor } from '../focus'
+import { focusAnchor, focusQuestion } from '../focus'
 import { ago, anchorLabel, ASK, focusable, hasPendingReply, isOpen } from '../util'
 import { Icon, Md, Menu, MenuItem } from './common'
 
@@ -40,7 +40,6 @@ export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
 function AskThread({ c }: { c: Comment }) {
   const request = useStore((s) => s.loaded?.state.requests.find((r) => r.id === c.id.slice(ASK.length)))
   const cancel = useStore((s) => s.cancelRequest)
-  const setTab = useStore((s) => s.setTab)
   const waiting = Boolean(request && isOpen(request)) && c.replies.length === 0
   return (
     <div className="thread user ask" data-gr-ask={request?.id} data-gr-ask-status={c.replies.length ? 'answered' : request?.status ?? 'unknown'}>
@@ -50,7 +49,7 @@ function AskThread({ c }: { c: Comment }) {
           <span className="label note" title="A question to Claude Code, not a review comment: it is answered here and is not part of what you send with your review">Question</span>
           <span className="muted">{ago(c.createdAt)}</span>
           <span className="grow" />
-          <button className="link small nowrap" title="The same question and answer in the Conversation tab" onClick={() => setTab('conversation')}>In Conversation</button>
+          <button className="link small nowrap" data-gr="ask-in-conversation" title="Show this question and its answer in the Conversation tab" onClick={() => focusQuestion(c.id.slice(ASK.length))}>In Conversation</button>
         </div>
         <div className="thread-body pre-wrap">{c.text}</div>
       </div>
@@ -72,6 +71,8 @@ function AskThread({ c }: { c: Comment }) {
   )
 }
 
+/** how much of the line a comment was written on is quoted (a minified line runs to 100,000s of characters) */
+const LINE_QUOTE = 400
 function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) {
   const updateComment = useStore((s) => s.updateComment)
   const removeComment = useStore((s) => s.removeComment)
@@ -151,7 +152,7 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
           )}
         </div>
         {showAnchor && (c.anchor.kind === 'diff' || c.anchor.kind === 'artifact') && c.anchor.lineContent && (
-          <pre className="thread-line" data-gr="comment-line">{c.anchor.lineContent}</pre>
+          <pre className="thread-line" data-gr="comment-line">{c.anchor.lineContent.length > LINE_QUOTE ? c.anchor.lineContent.slice(0, LINE_QUOTE) + '…' : c.anchor.lineContent}</pre>
         )}
         {mode !== 'edit' && <Md text={c.text} className="thread-body" />}
         {c.resolution && (

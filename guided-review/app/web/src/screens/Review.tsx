@@ -1,13 +1,13 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent, type PointerEvent as RPointerEvent, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent, type PointerEvent as RPointerEvent, type ReactNode } from 'react'
 import type {
   AnchorInput, Artifact, Comment, FileDiff, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, treeWidthLimits, type Filters } from '../store'
 import { focusAnchor, showSection } from '../focus'
 import {
-  ago, anchorKey, anchorLabel, askThreads, baseName, driftText, elapsed, focusable, hasPendingReply, indexComments, isOpen, isStuck, isUnclaimed, pendingLabel,
+  ago, anchorKey, anchorLabel, askThreads, baseName, driftText, elapsed, focusable, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
-  sinceActive, symLabel, targetLabel, type DiffMode, type Tab
+  sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Tab
 } from '../util'
 import { AwayHint, CopyButton, DiffStat, FileIcon, Icon, Md, Menu, MenuItem, PresenceDot, currentTheme, setTheme } from '../components/common'
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
@@ -108,26 +108,44 @@ function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
   const { cancelRequest, dismissRequest, retryRequest, setTab } = useStore.getState()
   const away = loaded.presence === 'away'
   const rows = loaded.state.requests.filter((r) => isOpen(r) || (r.status === 'failed' && !dismissed.includes(r.id) && Date.now() - Date.parse(r.finishedAt ?? r.createdAt) < 600_000))
-  if (rows.length === 0) return null
+  // Everything that sticks below the strip (toolbar, file headers, tree, section panel)
+  // is offset by its height, which varies: rows stack, and wrap on a narrow window.
+  const strip = useRef<HTMLDivElement>(null)
+  const shown = rows.length > 0
+  useLayoutEffect(() => {
+    const el = strip.current
+    const page = el?.parentElement
+    if (!el || !page) return
+    const measure = (): void => page.style.setProperty('--strip-h', `${el.offsetHeight}px`)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => { ro.disconnect(); page.style.removeProperty('--strip-h') }
+  }, [shown])
+  if (!shown) return null
   return (
-    <div className="req-strip" data-gr="requests">
-      {rows.map((r) => (
-        <div key={r.id} className={'req-row ' + r.status} data-gr-request={r.id} data-gr-request-kind={r.kind} data-gr-request-status={r.status}>
-          {isOpen(r) ? <span className="spinner" /> : <Icon name="x" size={14} />}
-          <button className="link strong" onClick={() => setTab('conversation')}>{requestTitle(r)}</button>
-          <span className="muted" data-gr="request-state">
-            {r.status === 'pending' ? 'waiting for Claude Code' : r.status === 'running' ? `working for ${elapsed(r.startedAt) || '0s'}` : `failed: ${r.error ?? 'no reason given'}`}
-          </span>
-          {isStuck(r) && <span className="label warn" data-gr="request-stuck" title="It was picked up but has reported nothing for a while; the session may have closed">Claude Code may not be listening</span>}
-          {isOpen(r) && r.progress.length > 0 && <span className="req-progress" title={r.progress.map((p) => p.text).join('\n')}>{r.progress[r.progress.length - 1].text}</span>}
-          <span className="grow" />
-          {isUnclaimed(r, away) && <span className="away-hint small" data-gr="request-unclaimed" title="In Claude Code run /guided-review --resume — it will pick this up">nothing is listening — run /guided-review --resume</span>}
-          {isStuck(r) && <button className="btn sm" data-gr="request-retry" title="Put it back in the queue for the next Claude Code session that listens" onClick={() => void retryRequest(r.id)}>Send again</button>}
-          {isOpen(r)
-            ? <button className="btn sm" data-gr="request-cancel" onClick={() => void cancelRequest(r.id)}>Cancel</button>
-            : <button className="icon-btn" aria-label="Dismiss" onClick={() => dismissRequest(r.id)}><Icon name="x" size={14} /></button>}
-        </div>
-      ))}
+    <div className="req-strip" data-gr="requests" ref={strip}>
+      {rows.map((r) => {
+        const stuck = stuckReason(r, away)
+        const why = stuck && stuckText(r, stuck)
+        return (
+          <div key={r.id} className={'req-row ' + r.status} data-gr-request={r.id} data-gr-request-kind={r.kind} data-gr-request-status={r.status}>
+            {isOpen(r) ? <span className="spinner" /> : <Icon name="x" size={14} />}
+            <button className="link strong" onClick={() => setTab('conversation')}>{requestTitle(r)}</button>
+            <span className="muted" data-gr="request-state">
+              {r.status === 'pending' ? 'waiting for Claude Code' : r.status === 'running' ? `${stuck === 'away' ? 'picked up' : 'working for'} ${elapsed(r.startedAt) || '0s'}${stuck === 'away' ? ' ago' : ''}` : `failed: ${r.error ?? 'no reason given'}`}
+            </span>
+            {why && <span className="label warn" data-gr="request-stuck" data-gr-stuck={stuck} title={why.title}>{why.label}</span>}
+            {isOpen(r) && r.progress.length > 0 && <span className="req-progress" title={r.progress.map((p) => p.text).join('\n')}>{r.progress[r.progress.length - 1].text}</span>}
+            <span className="grow" />
+            {isUnclaimed(r, away) && <span className="away-hint small" data-gr="request-unclaimed" title="In Claude Code run /guided-review --resume — it will pick this up">nothing is listening — run /guided-review --resume</span>}
+            {stuck && <button className="btn sm" data-gr="request-retry" title="Put it back in the queue for the next Claude Code session that listens" onClick={() => void retryRequest(r.id)}>Send again</button>}
+            {isOpen(r)
+              ? <button className="btn sm" data-gr="request-cancel" onClick={() => void cancelRequest(r.id)}>Cancel</button>
+              : <button className="icon-btn" aria-label="Dismiss" onClick={() => dismissRequest(r.id)}><Icon name="x" size={14} /></button>}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -265,6 +283,10 @@ function CommentsMenu({ loaded }: { loaded: LoadedReview }) {
 }
 
 // ── Files changed ─────────────────────────────────────────────
+/** The narrowest window in which a diff stays split while a section is docked in the
+ *  tree's place: its column is then as wide (about 730px) as the narrowest one that is
+ *  split by default with the tree showing. */
+const SPLIT_BESIDE_SECTION = 1200
 /** Drag (or arrow keys) to resize the file panel; double-click resets it. */
 function ResizeHandle({ width, onChange }: { width: number; onChange: (px: number | null) => void }) {
   const drag = useRef<{ x: number; w: number } | null>(null)
@@ -314,7 +336,7 @@ const STATUS_MARK: Record<FileDiff['status'], string> = { added: 'A', deleted: '
 function TreeFile({ file, depth, comments, showDir, nested }: { file: FileDiff; depth: number; comments: number; showDir?: boolean; nested?: boolean }) {
   const sec = useContext(SectionsCtx).get(file.path)
   return (
-    <button className={'tree-row leaf' + (sec ? ' in-sec' : '')} style={{ paddingLeft: `${8 + depth * TREE_STEP}px`, ...(sec ? secStyle(sec.no) : {}) }} title={`${file.path} (${file.status})${sec ? ` · ${sec.section.name}` : ''}`} data-gr-tree-file={file.path} data-gr-status={file.status} onClick={() => focusAnchor({ kind: 'file', file: file.path })}>
+    <button className={'tree-row leaf' + (sec ? ' in-sec' : '')} style={{ paddingLeft: `${8 + depth * TREE_STEP}px`, ...(sec ? secStyle(sec.no) : {}) }} title={`${file.path} (${file.status})${sec ? ` · ${sec.section.name}` : ''}`} data-gr-tree-file={file.path} data-gr-status={file.status} onClick={() => focusAnchor({ kind: 'file', file: file.path }, { nav: true })}>
       {nested && <span className="tree-chev" />}
       <FileIcon path={file.path} />
       <span className={'tree-name' + (file.status === 'deleted' ? ' gone' : '')}>{baseName(file.path)}{showDir && file.path.includes('/') && <span className="muted small"> {file.path.slice(0, file.path.lastIndexOf('/'))}</span>}</span>
@@ -410,7 +432,7 @@ function SectionPanel({ sections }: { sections: Section[] }) {
         {section.files.map((p) => {
           const f = files?.find((x) => x.path === p)
           return (
-            <button key={p} className="tree-row leaf" title={p} onClick={() => focusAnchor({ kind: 'file', file: p })}>
+            <button key={p} className="tree-row leaf" title={p} onClick={() => focusAnchor({ kind: 'file', file: p }, { nav: true })}>
               <FileIcon path={p} /><span className="tree-name">{baseName(p)}</span>
               {f?.viewed === 'viewed' && <Icon name="check" size={12} className="tree-viewed" />}
               {f && <DiffStat add={f.add} del={f.del} />}
@@ -452,7 +474,8 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
   const shownCommit = commitView ? loaded.commits.find((c) => c.sha === commitView) : undefined
   const wide = useWide(1100)
   const roomy = useWide(900)
-  const split = roomy && (diffView ?? (wide ? 'split' : 'unified')) === 'split'
+  const widest = useWide(1600)
+  const fits = useWide(SPLIT_BESIDE_SECTION)
   const [closed, setClosed] = useState<Set<string>>(() => new Set())
   const [, bump] = useState(0)
   const wt = loaded.state.walkthrough
@@ -482,6 +505,13 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
   const sectionNo = (s: Section | null | undefined): number => (s ? (wt?.sections ?? []).indexOf(s) : -1)
   const secPanelId = useStore((s) => s.sectionPanel)
   const secPanel = Boolean(secPanelId && wt?.sections.some((s) => s.id === secPanelId))
+  // From 1100px the open section is a column, not a drawer over the code. Up to 1600px
+  // there is no room for three columns: it takes the tree's place until it is closed, and
+  // where the diff column left beside it is too narrow to read two-up, the diff is unified.
+  const forTree = secPanel && wide && !widest
+  const treeShown = panelOpen && !forTree
+  const canSplit = roomy && !(forTree && !fits)
+  const split = canSplit && (diffView ?? (wide ? 'split' : 'unified')) === 'split'
 
   const wsOnly = useStore((s) => s.wsOnly)
   const wsPaths = useMemo(() => new Set(wsOnly.map((f) => f.path)), [wsOnly])
@@ -509,7 +539,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
   return (
     <div className="files-tab">
       <div className="files-toolbar">
-        <button className="btn sm icon" title={panelOpen ? 'Hide the file tree' : 'Show the file tree'} aria-label="Toggle file tree" aria-pressed={panelOpen} onClick={() => set({ panelOpen: !panelOpen })}><Icon name="sidebar" /></button>
+        <button className="btn sm icon" title={treeShown ? 'Hide the file tree' : forTree ? 'Show the file tree (closes the section beside the code)' : 'Show the file tree'} aria-label="Toggle file tree" aria-pressed={treeShown} onClick={() => { if (forTree) { showSection(null); set({ panelOpen: true }) } else set({ panelOpen: !panelOpen }) }}><Icon name="sidebar" /></button>
         <Menu label={<><Icon name="commit" /><span className="mode-label">{modeLabel}</span><Icon name="chevDown" size={12} /></>} className="btn sm mode-btn" hook="diff-mode" title="Which changes to show">
           {(close) => (
             <div className="commit-menu">
@@ -534,7 +564,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
           {(close) => (
             <>
               <div className="pop-head">Diff view</div>
-              <MenuItem checked={split} disabled={!roomy} onClick={() => { setDiffView('split'); close() }}>Split</MenuItem>
+              <MenuItem checked={split} disabled={!canSplit} title={roomy && !canSplit ? 'Not enough room beside the section — close it to split the diff' : undefined} onClick={() => { setDiffView('split'); close() }}>Split</MenuItem>
               <MenuItem checked={!split} onClick={() => { setDiffView('unified'); close() }}>Unified</MenuItem>
               <label className="menu-item" title="Leave out changes that only alter whitespace"><span className="menu-check"><input type="checkbox" name="gr-field" data-gr="hide-whitespace" checked={Boolean(view.ignoreWhitespace)} onChange={(e) => { void setView({ ignoreWhitespace: e.target.checked }); close() }} /></span>Hide whitespace</label>
               <div className="pop-head">File panel</div>
@@ -555,8 +585,8 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
           <button className="btn sm" onClick={() => void setView({ commit: undefined })}>Show all changes</button>
         </div>
       )}
-      <div className={'files-layout' + (panelOpen ? '' : ' no-panel') + (secPanel ? ' with-sec' : '')} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties}>
-        {panelOpen && (
+      <div className={'files-layout' + (treeShown ? '' : ' no-panel') + (secPanel ? ' with-sec' : '')} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties}>
+        {treeShown && (
           <SectionsCtx.Provider value={bySection ? NO_SECTIONS : sections}>
           <aside className="tree-panel" aria-label="Files" data-gr="files-view" data-gr-files-view={bySection ? 'sections' : treeView}>
             <ResizeHandle width={treeWidth} onChange={setTreeWidth} />
@@ -619,7 +649,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
 // ── Conversation ──────────────────────────────────────────────
 function TourCard({ stops, loop }: { stops: TourStop[]; loop?: boolean }) {
   const set = useStore((s) => s.set)
-  const start = (idx: number): void => { set({ tour: { stops, idx, loop } }); focusAnchor(stops[idx].target) }
+  const start = (idx: number): void => { focusAnchor(stops[idx].target); set({ tour: { stops, idx, loop } }) }
   return (
     <div className="tour-card" data-gr="chat-tour">
       <div className="pop-head">Tour · {stops.length} stops{loop ? ' · loops' : ''}</div>
@@ -639,17 +669,18 @@ function Progress({ r }: { r: ReviewRequest }) {
   const cancel = useStore((s) => s.cancelRequest)
   const retry = useStore((s) => s.retryRequest)
   const away = useStore((s) => s.loaded?.presence === 'away')
-  const stuck = isStuck(r)
+  const stuck = stuckReason(r, away)
+  const why = stuck && stuckText(r, stuck)
   return (
     <div className="tl-progress" data-gr-request={r.id}>
       <div className="row gap wrap">
         <span className="spinner" />
-        <span data-gr="request-state">{r.status === 'pending' ? 'Waiting for Claude Code to pick this up' : `Claude Code is working on it — working for ${elapsed(r.startedAt) || '0s'}`}</span>
-        {stuck && <span className="label warn" data-gr="request-stuck">Claude Code may not be listening</span>}
+        <span data-gr="request-state">{r.status === 'pending' ? 'Waiting for Claude Code to pick this up' : stuck === 'away' ? `A Claude Code session picked this up ${elapsed(r.startedAt) || '0s'} ago` : `Claude Code is working on it — working for ${elapsed(r.startedAt) || '0s'}`}</span>
+        {why && <span className="label warn" data-gr="request-stuck" data-gr-stuck={stuck} title={why.title}>{why.label}</span>}
         {stuck && <button className="link" data-gr="request-retry" onClick={() => void retry(r.id)}>Send again</button>}
         <button className="link" data-gr="request-cancel" onClick={() => void cancel(r.id)}>Cancel</button>
       </div>
-      {isUnclaimed(r, away) && <AwayHint />}
+      {(isUnclaimed(r, away) || stuck === 'away') && <AwayHint />}
       {r.progress.map((p, i) => <div key={i} className="progress-line small"><span className="muted">{ago(p.at)}</span> {p.text}</div>)}
     </div>
   )
@@ -1059,6 +1090,8 @@ export function Review() {
       if (e.key === 't' && st.tab === 'files') {
         e.preventDefault()
         if (!st.panelOpen) st.set({ panelOpen: true })
+        // on a mid-width window an open section sits in the tree's place: closing it brings the tree back
+        if (st.sectionPanel && !document.getElementById('gr-file-filter') && window.matchMedia('(min-width: 1100px)').matches) showSection(null)
         window.setTimeout(() => document.getElementById('gr-file-filter')?.focus(), 30)
       } else if (e.key === 'c' && hoveredLine()) {
         e.preventDefault()

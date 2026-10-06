@@ -270,22 +270,31 @@ export function elapsed(sinceIso: string | undefined, now = Date.now()): string 
   return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`
 }
 /** How long a running request may go without a progress line before the page offers
- *  "Send again". Five minutes; for testing it can be lowered, in seconds, with
- *  `window.__grStuckSeconds = 10` in the console or `?stuck=10` in the page URL
- *  (before the `#`). */
-export function stuckAfterMs(): number {
+ *  "Send again". With a session attached, five minutes: silence may only mean a long
+ *  job. With none reachable (`away`), half a minute: nobody is there to finish it. For
+ *  testing, both can be set, in seconds, with `window.__grStuckSeconds = 10` in the
+ *  console or `?stuck=10` in the page URL (before the `#`). */
+export function stuckAfterMs(away = false): number {
   const w = (window as unknown as { __grStuckSeconds?: number }).__grStuckSeconds
   const q = Number(new URLSearchParams(window.location.search).get('stuck'))
-  const s = typeof w === 'number' && w > 0 ? w : q > 0 ? q : 300
+  const s = typeof w === 'number' && w > 0 ? w : q > 0 ? q : away ? 30 : 300
   return s * 1000
 }
-/** A claimed request that has been silent for too long: the session that took it may
- *  be gone (closed terminal, crashed), so the reviewer can put it back in the queue. */
-export function isStuck(r: ReviewRequest, now = Date.now()): boolean {
-  if (r.status !== 'running' || !r.startedAt) return false
-  const limit = stuckAfterMs()
+/** Why a claimed request looks dropped, if it does. `away`: no Claude Code session is
+ *  reachable, so the one that took it is gone (closed terminal, crashed). `silent`: a
+ *  session is attached but has reported nothing on it for a long time. Either way the
+ *  reviewer can put it back in the queue; they are different claims and read differently. */
+export function stuckReason(r: ReviewRequest, away: boolean, now = Date.now()): 'away' | 'silent' | null {
+  if (r.status !== 'running' || !r.startedAt) return null
+  const limit = stuckAfterMs(away)
   const last = Date.parse(r.progress.at(-1)?.at ?? r.startedAt)
-  return now - Date.parse(r.startedAt) >= limit && now - last >= limit
+  return now - Date.parse(r.startedAt) >= limit && now - last >= limit ? (away ? 'away' : 'silent') : null
+}
+/** The label and its tooltip for a request that looks dropped. */
+export function stuckText(r: ReviewRequest, why: 'away' | 'silent', now = Date.now()): { label: string; title: string } {
+  if (why === 'away') return { label: 'Claude Code may not be listening', title: 'A session picked this up, but no Claude Code session is reachable now: it may have closed. Send it again and the next session that listens takes it.' }
+  const quiet = elapsed(r.progress.at(-1)?.at ?? r.startedAt, now).replace(/ \d+s$/, '')
+  return { label: `No progress for ${quiet}`, title: 'A Claude Code session is attached but has reported nothing on this for a while. It may still be working; if it is not, send it again.' }
 }
 /** A request nobody has picked up for half a minute while no session is attached. */
 export const isUnclaimed = (r: ReviewRequest, away: boolean, now = Date.now()): boolean =>

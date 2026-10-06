@@ -5,7 +5,7 @@ import { highlightLine, langForPath } from '../highlight'
 import { pairHunkLines, wordDiffRanges, type CharRange } from '../worddiff'
 import { useStore } from '../store'
 import { showSection } from '../focus'
-import { errText, hunksForMode, secStyle } from '../util'
+import { errText, hunksForMode, plural, secStyle } from '../util'
 import { CopyButton, DiffStat, Icon, Md, Menu, MenuItem } from './common'
 import { CommentSlot, CommentsCtx, Composer, Thread } from './comments'
 
@@ -105,6 +105,23 @@ type Item =
 function Code({ text, lang, marks }: { text: string; lang: string | null; marks: CharRange[] }) {
   return <code className="hl" dangerouslySetInnerHTML={{ __html: applyMarks(highlightLine(text, lang), marks) || '&nbsp;' }} />
 }
+/** How much of one line is rendered before the rest waits behind "show more", and how
+ *  much each click adds. A minified bundle is a single line of 150,000 characters: shown
+ *  whole and wrapped, that one line is 300,000px tall. */
+const LINE_MAX = 2000
+const LINE_MORE = 10_000
+/** A line longer than LINE_MAX, cut short. Not highlighted: nobody reads it as code, and
+ *  the highlighter is slow on it. */
+function LongCode({ text, marks }: { text: string; marks: CharRange[] }) {
+  const [n, setN] = useState(LINE_MAX)
+  const rest = text.length - n
+  return (
+    <>
+      <Code text={rest > 0 ? text.slice(0, n) : text} lang={null} marks={marks} />
+      {rest > 0 && <button className="more-line" data-gr="line-more" title={`This line is ${text.length.toLocaleString()} characters long`} onClick={() => setN(n + LINE_MORE)}>… show {Math.min(rest, LINE_MORE).toLocaleString()} more of {rest.toLocaleString()} hidden characters</button>}
+    </>
+  )
+}
 
 /** One side of a line: number gutter + code, with the "+" that opens the composer. */
 function Half({ path, l, side, lang, marks, onAdd, bare }: {
@@ -130,7 +147,7 @@ function Half({ path, l, side, lang, marks, onAdd, bare }: {
       >
         {onAdd && <button className="add-line" title="Comment on this line (c)" aria-label={`Comment on line ${n}`} onClick={() => onAdd(key)}><Icon name="plus" size={12} /></button>}
         <span className="sg">{l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ''}</span>
-        <Code text={l.text} lang={lang} marks={marks} />
+        {l.text.length > LINE_MAX ? <LongCode text={l.text} marks={marks} /> : <Code text={l.text} lang={lang} marks={marks} />}
       </span>
     </>
   )
@@ -372,7 +389,15 @@ const DiffBody = memo(function DiffBody({ file, hunks, split, placed, outside, c
   )
 })
 
+// A diff is held back behind "Load diff" when it is large (by lines, or by size: a few
+// lines can still be megabytes) or generated: named like build output or a lockfile, or
+// carrying a line no person wrote. Its comments stay reachable: the prompt counts them,
+// and focusing one loads the diff.
 const LARGE = 1500
+const LARGE_CHARS = 300_000
+const LONG_LINE = 5000
+const GENERATED = /(^|\/)(dist|node_modules|vendor)\/|\.min\.[a-z]+$|\.map$|(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|Gemfile\.lock|poetry\.lock|uv\.lock|composer\.lock|go\.sum)$/
+const sizeText = (chars: number): string => (chars >= 1_000_000 ? `${(chars / 1_000_000).toFixed(1)} MB` : chars >= 1000 ? `${Math.round(chars / 1000)} KB` : `${chars} B`)
 
 /** A changed file, in the shape of a GitHub "Files changed" box. */
 export function FileBox({ file, split, section, sectionNo, grouped, note, whitespaceOnly }: {
@@ -394,15 +419,22 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   const commitView = Boolean(view?.commit)
   const [notesOpen, setNotesOpen] = useState(true)
   const inPanel = useStore((s) => Boolean(section) && s.sectionPanel === section?.id)
-  const [loadLarge, setLoadLarge] = useState(false)
+  const loadLarge = useStore((s) => Boolean(s.fileLoaded[file.path]))
   const [expandAll, setExpandAll] = useState(0)
-  const { setFileOpen, toggleViewed, toggleExcluded, set } = useStore.getState()
+  const { setFileOpen, setFileLoaded, toggleViewed, toggleExcluded, set } = useStore.getState()
 
   const viewed = file.viewed === 'viewed'
   const changed = file.viewed === 'changed'
   const excluded = Boolean(file.excluded)
   const hunks = hunksForMode(file, mode)
-  const lineCount = useMemo(() => hunks.reduce((n, h) => n + h.lines.length, 0), [hunks])
+  const size = useMemo(() => {
+    let lines = 0; let chars = 0; let longest = 0
+    for (const h of hunks) for (const l of h.lines) { lines++; chars += l.text.length; if (l.text.length > longest) longest = l.text.length }
+    return { lines, chars, longest }
+  }, [hunks])
+  const generated = !file.binary && (GENERATED.test(file.path) || size.longest > LONG_LINE)
+  const large = size.lines > LARGE || size.chars > LARGE_CHARS
+  const held = (generated || large) && hunks.length > 0 && !loadLarge
   const open = override ?? (!viewed && !excluded)
   // in a since-view, a file with no since-diff at all is unchanged since that baseline
   const unchangedSince = !file.untracked && ((mode === 'since' && file.sinceHunks === undefined) || (mode === 'viewed' && file.sinceViewedHunks === undefined))
@@ -452,6 +484,7 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   if (file.status === 'renamed') labels.push({ text: 'Renamed' })
   if (file.untracked) labels.push({ text: 'Untracked', cls: 'warn', title: 'Not tracked by git yet' })
   if (file.binary) labels.push({ text: 'Binary' })
+  if (generated) labels.push({ text: 'Generated', title: GENERATED.test(file.path) ? 'Looks like build output or a lockfile, going by its path' : `Has a line of ${size.longest.toLocaleString()} characters: minified or machine-written` })
   if (file.modeChange) labels.push({ text: `Mode ${file.modeChange.from} → ${file.modeChange.to}`, title: 'File mode changed' })
   if (file.conflict) labels.push({ text: 'Conflict', cls: 'bad', title: 'Unresolved merge conflict' })
   if (!file.untracked && mixed.length) labels.push({ text: mixed.length === 2 ? 'Staged + unstaged' : mixed[0] === 'staged' ? 'Staged' : 'Unstaged', cls: 'warn', title: 'Has uncommitted changes' })
@@ -462,6 +495,8 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
     useStore.setState({ fileOpen: Object.fromEntries(files.map((f) => [f.path, openAll])) })
   }
   const expandable = canExpand && hunks.length > 0
+  /** comments and questions on lines of a diff that is held back */
+  const inside = held ? [...placed.values()].reduce((n, l) => n + l.length, 0) + outside.length : 0
   const body = <DiffBody key={`${signature}|${view?.ignoreWhitespace ? 'w' : ''}`} file={file} hunks={hunks} split={split} placed={placed} outside={outside} composer={commitView ? null : composer} canExpand={canExpand} readOnly={commitView} expandAll={expandAll} />
 
   return (
@@ -472,7 +507,7 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
         </button>
         <span className="mono file-path" title={file.path}>{file.oldPath && <span className="muted">{file.oldPath} → </span>}{file.path}</span>
         <CopyButton text={file.path} title="Copy path" />
-        {expandable && open && <button className="icon-btn" title="Expand all lines" aria-label="Expand all lines" onClick={() => setExpandAll((n) => n + 1)}><Icon name="unfold" /></button>}
+        {expandable && open && !held && <button className="icon-btn" title="Expand all lines" aria-label="Expand all lines" onClick={() => setExpandAll((n) => n + 1)}><Icon name="unfold" /></button>}
         {section && !grouped && (
           <button className={'sec-chip' + (inPanel ? ' on' : '')} data-gr="section-chip" aria-pressed={inPanel} title={`Part of “${section.name}”${section.desc ? ` — ${section.desc}` : ''}\nClick to ${inPanel ? 'close' : 'read'} the section beside the code`} onClick={() => showSection(inPanel ? null : section.id)}>
             <span className="sec-dot" /><span className="clip">{section.name}</span>
@@ -527,8 +562,13 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
             </div>
             {body}
             </>
-          ) : lineCount > LARGE && !loadLarge ? (
-            <div className="file-msg"><button className="link" onClick={() => setLoadLarge(true)}>Load diff</button><div className="muted small">Large diffs are not rendered by default.</div></div>
+          ) : held ? (
+            <div className="file-msg held" data-gr="diff-held" data-gr-held={generated ? 'generated' : 'large'}>
+              <strong>{generated ? 'Generated file' : 'Large diff'}</strong>
+              <span className="muted small">{generated ? 'Build output, lockfiles and minified code are not rendered by default' : 'Large diffs are not rendered by default'} — {plural(size.lines, 'line')}, {sizeText(size.chars)}.</span>
+              <button className="btn sm" data-gr="load-diff" onClick={() => setFileLoaded(file.path)}>Load diff</button>
+              {inside > 0 && <span className="small" data-gr="held-comments">{plural(inside, 'comment')} on its lines — loading the diff shows {inside === 1 ? 'it' : 'them'}.</span>}
+            </div>
           ) : (
             body
           )}

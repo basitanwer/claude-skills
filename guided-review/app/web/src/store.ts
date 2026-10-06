@@ -4,10 +4,20 @@ import type {
   RepoState, RequestKind, ReviewRequest, ReviewState, ReviewView, SessionListItem, TourStop, UiAction, ViewMark
 } from '@shared/types'
 import { api, connect } from './api'
-import { errText, isOpen, newId, parseHash, refInput, routeHash, type DiffMode, type Route, type Tab } from './util'
+import { errText, isOpen, newId, parseHash, refInput, routeHash, targetLabel, type DiffMode, type Route, type Tab } from './util'
 import { focusAnchor } from './focus'
 
-export interface Toast { id: string; text: string; kind: 'error' | 'info'; action?: { label: string; run: () => void } }
+/** `key`: a newer toast with the same key takes the place of an older one. */
+export interface Toast { id: string; text: string; kind: 'error' | 'info'; action?: { label: string; run: () => void }; key?: string }
+/** the toast that offers a jump the session asked for while the reviewer was writing */
+const SHOW_KEY = 'session-show'
+/** The reviewer is in the middle of writing: the caret is in a text field, or a comment,
+ *  a reply, a question or an answer has text in it that moving the page could discard. */
+function typing(): boolean {
+  const el = document.activeElement
+  if (el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && (el.type === 'text' || el.type === 'search') && !el.readOnly)) return true
+  return [...document.querySelectorAll<HTMLTextAreaElement | HTMLInputElement>('textarea, input[name="gr-field"]:not([type]):not([readonly]):not(#gr-file-filter)')].some((f) => f.value.trim() !== '')
+}
 export interface Tour { stops: TourStop[]; idx: number; loop?: boolean }
 export interface Hub { repo: string; state: RepoState | null; sessions: SessionListItem[]; showArchived: boolean }
 /** The code under review moved while this view was open. */
@@ -64,14 +74,16 @@ interface Store {
   filters: Filters
   treeView: 'tree' | 'list'
   fileOpen: Record<string, boolean>
+  /** files whose diff is held back by default (large, generated) and was asked for */
+  fileLoaded: Record<string, boolean>
   sectionOpen: Record<string, boolean>
   excludedOpen: boolean
   diffMode: DiffMode
   docPath: string | null
   composer: string | null
   tour: Tour | null
-  /** Where the reviewer was before a link took them to another tab: offered back by the
-   *  "Back to …" bar. `top` is how far down the window the thing the link sat in was
+  /** Where the reviewer was before a jump took them to another tab or far down the same
+   *  one: offered back by the "Back to …" bar. `top` is how far down the window the thing the link sat in was
    *  (restored exactly); `y` is the page's scroll position, used if that thing is gone. */
   returnTo: { tab: Tab; y: number; top: number | null; label: string; target?: FocusTarget } | null
   /** the walkthrough section open in the panel beside the code (Files changed), by id */
@@ -79,7 +91,8 @@ interface Store {
   status: string | null
   navOpen: boolean
 
-  toast(text: string, kind?: Toast['kind'], action?: Toast['action']): void
+  /** `opts.key`: see Toast. `opts.keep`: stays until dismissed or acted on. */
+  toast(text: string, kind?: Toast['kind'], action?: Toast['action'], opts?: { key?: string; keep?: boolean }): void
   dismissToast(id: string): void
   go(route: Route): void
   applyRoute(route: Route): Promise<void>
@@ -121,6 +134,7 @@ interface Store {
   setTreeView(view: 'tree' | 'list'): void
   setFilters(patch: Partial<Filters>): void
   setFileOpen(path: string, open: boolean): void
+  setFileLoaded(path: string): void
   setSectionOpen(id: string, open: boolean): void
   set(patch: Partial<Pick<Store, 'excludedOpen' | 'diffMode' | 'docPath' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'fileQuery'>>): void
   applyAction(action: UiAction): void
@@ -242,7 +256,7 @@ export const useStore = create<Store>((set, get) => {
     set({
       loaded, sessionId, preview, loading: false,
       viewedAt: loaded.state.viewedAt, reviewedSections: loaded.state.reviewedSections,
-      drift: null, dismissed: [], fileOpen: {}, sectionOpen: {}, excludedOpen: false, diffMode: 'all', docPath: null,
+      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, sectionOpen: {}, excludedOpen: false, diffMode: 'all', docPath: null,
       composer: null, tour: null, returnTo: null, sectionPanel: null, fileQuery: '', wsOnly: []
     })
     refreshWsOnly()
@@ -262,6 +276,7 @@ export const useStore = create<Store>((set, get) => {
     drift: null,
     dismissed: [],
     fileOpen: {},
+    fileLoaded: {},
     sectionOpen: {},
     excludedOpen: false,
     diffMode: 'all',
@@ -283,10 +298,11 @@ export const useStore = create<Store>((set, get) => {
     status: null,
     navOpen: false,
 
-    toast(text, kind = 'error', action) {
+    toast(text, kind = 'error', action, opts) {
       const id = newId('t')
-      set({ toasts: [...get().toasts.slice(-4), { id, text, kind, ...(action ? { action } : {}) }] })
-      if (kind === 'info') window.setTimeout(() => get().dismissToast(id), action ? 15_000 : 6000)
+      const rest = get().toasts.filter((t) => !opts?.key || t.key !== opts.key)
+      set({ toasts: [...rest.slice(-4), { id, text, kind, ...(action ? { action } : {}), ...(opts?.key ? { key: opts.key } : {}) }] })
+      if (kind === 'info' && !opts?.keep) window.setTimeout(() => get().dismissToast(id), action ? 15_000 : 6000)
     },
     dismissToast(id) {
       set({ toasts: get().toasts.filter((t) => t.id !== id) })
@@ -361,7 +377,7 @@ export const useStore = create<Store>((set, get) => {
         if (route.focus) {
           try {
             const target = JSON.parse(route.focus)
-            window.setTimeout(() => focusAnchor(target), 250)
+            window.setTimeout(() => focusAnchor(target, { nav: true }), 250)     // opening a link: there is no earlier place to go back to
           } catch { get().toast('The focus parameter in the URL is not valid JSON.', 'error') }
         }
       } catch (e) {
@@ -632,6 +648,9 @@ export const useStore = create<Store>((set, get) => {
     setFileOpen(path, open) {
       set({ fileOpen: { ...get().fileOpen, [path]: open } })
     },
+    setFileLoaded(path) {
+      if (!get().fileLoaded[path]) set({ fileLoaded: { ...get().fileLoaded, [path]: true } })
+    },
     setSectionOpen(id, open) {
       set({ sectionOpen: { ...get().sectionOpen, [id]: open } })
     },
@@ -648,8 +667,9 @@ export const useStore = create<Store>((set, get) => {
         case 'focus': focusAnchor(action.target); break
         case 'tour':
           if (action.stops.length) {
-            set({ tour: { stops: action.stops, idx: 0, loop: action.loop } })
+            // the first stop before the tour is on: it remembers where the reviewer was
             focusAnchor(action.stops[0].target)
+            set({ tour: { stops: action.stops, idx: 0, loop: action.loop } })
           }
           break
         case 'status': get().set({ status: action.text }); break
@@ -683,8 +703,14 @@ export const useStore = create<Store>((set, get) => {
       if (get().sessionId !== sessionId) return
       // an answer never moves the page by itself: it shows where the question was asked,
       // and the code it cites is one click away
-      if (answerTo) get().toast('Claude Code answered.', 'info', { label: action.kind === 'tour' ? 'Start the tour' : 'Show the code it cites', run: () => get().applyAction(action) })
-      else get().applyAction(action)
+      if (answerTo) { get().toast('Claude Code answered.', 'info', { label: action.kind === 'tour' ? 'Start the tour' : 'Show the code it cites', run: () => get().applyAction(action) }); return }
+      // Nor does the session take the page away while the reviewer is writing (a tab switch
+      // would discard the text): the jump waits behind a toast until they ask for it.
+      const what = action.kind === 'focus' ? targetLabel(action.target) : action.kind === 'tour' ? `a tour of ${action.stops.length} ${action.stops.length === 1 ? 'stop' : 'stops'}` : action.kind === 'navigate' ? 'another page' : null
+      if (what && typing()) { get().toast(`Claude Code wants to show you ${what}`, 'info', { label: 'Go', run: () => get().applyAction(action) }, { key: SHOW_KEY, keep: true }); return }
+      // a newer jump, played at once, replaces one that was still on offer
+      if (what) set({ toasts: get().toasts.filter((t) => t.key !== SHOW_KEY) })
+      get().applyAction(action)
     },
 
     onPresence({ sessionId, presence }: { sessionId: number; presence: Presence }) {
