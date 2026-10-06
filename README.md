@@ -11,7 +11,7 @@ Skills for [Claude Code](https://claude.com/claude-code). Each top-level folder 
 Link a skill into your skills folder, then start a new Claude Code session:
 
 ```bash
-git clone <this repo> ~/claude-skills
+git clone https://github.com/basitanwer/claude-skills ~/claude-skills
 ln -s ~/claude-skills/guided-review ~/.claude/skills/guided-review
 ~/.claude/skills/guided-review/scripts/gr doctor
 ```
