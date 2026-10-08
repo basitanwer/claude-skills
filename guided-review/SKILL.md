@@ -1,5 +1,6 @@
 ---
 name: guided-review
+argument-hint: "[<commit>|<A..B>|<branch>|--working-tree|--resume] [--effort read|check|bugs] [--base <ref>] [--freeze] [--direct] [--new]"
 description: Open a local visual code-review webapp for any git commit, commit range, branch, or uncommitted working-tree changes, then explain the change as a guided walkthrough grouped by purpose, post comments beside the code, answer questions in context, draw the whole change as diagrams (architecture, data flow, function calls), track new changes since the last review, and apply reviewer feedback on request. Use when the user asks to review, walk through, or explain a commit, range, branch, or their working tree visually or "in the review UI"; invokes /guided-review (HEAD, a SHA, A..B, a branch, --working-tree, --resume, --effort read|check|bugs); wants to resume a saved review; asks what changed since they last reviewed or approved; or wants queued review comments addressed.
 ---
 
