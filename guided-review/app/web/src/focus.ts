@@ -26,6 +26,14 @@ export function showInPane(el: HTMLElement, at: 'top' | 'middle' = 'middle'): vo
   sc.scrollBy({ top: at === 'top' || h > sc.clientHeight - 16 ? topIn(el, sc) - 8 : topIn(el, sc) + h / 2 - sc.clientHeight / 2 })
 }
 
+/** Bring an element into view in its pane if any of it is out of view; one that is in view stays where it is. */
+export function showIfOut(el: Element): void {
+  const sc = scrollerOf(el)
+  if (!sc || !drawn(el)) return
+  const r = el.getBoundingClientRect(); const s = sc.getBoundingClientRect()
+  if (r.top < s.top || r.bottom > s.bottom) showInPane(el as HTMLElement)
+}
+
 function selectorsFor(t: FocusTarget): string[] {
   switch (t.kind) {
     case 'summary': return ['[data-gr="summary"]']
@@ -151,9 +159,16 @@ export function focusAnchor(t: FocusTarget, opts: JumpOpts = {}): void {
 export function showPick(pick: CodePick | null, opts: { silent?: boolean } = {}): boolean {
   const st = useStore.getState()
   if (!pick) { st.pickCode(null, opts); return false }
-  // while the Code pane shows one commit only, the page has that commit's files, not the
-  // comparison's: leave the commit view first, then ask again
-  if (st.view.commit) { void st.setView({ commit: undefined }).then(() => { if (!useStore.getState().view.commit) showPick(pick, opts) }); return true }
+  // While the Code pane shows one commit only, the page has that commit's files, not the
+  // comparison's. An address that names both is followed as it is: the commit is shown,
+  // and the pick is kept for when all changes are. A pick the reviewer makes leaves the
+  // commit view: the step is made first, so that Back returns to the commit as it was
+  // shown, then the comparison is loaded and the pick found in it.
+  if (st.view.commit) {
+    st.pickCode(pick, opts)
+    if (!opts.silent) void st.setView({ commit: undefined }).then(() => { if (!useStore.getState().view.commit) showPick(pick, { silent: true }) })
+    return true
+  }
   const to = narrowingOf(pick, st.loaded)
   if (!to) { if (opts.silent) st.pickCode(null, opts); return false }
   st.pickCode(pick, opts)
@@ -200,6 +215,7 @@ function jump(t: FocusTarget, origin: Spot | null, opts: JumpOpts = {}): void {
   } else {
     parked = null                     // the Code pane is about to be somewhere else than it was folded away on
     st.revealCode()
+    if (st.treeOver) st.set({ treeOver: false })       // (a tree that lies over the code would cover what is being shown)
     const file = loaded.files.find((f) => f.path === t.file || f.oldPath === t.file)
     if (st.diffMode !== 'all') st.set({ diffMode: 'all' })
     if (!opts.picked) {
@@ -352,6 +368,20 @@ const putAt = (sc: HTMLElement, spots: unknown): void => { lastPut.set(sc, { spo
 function asPut<T>(sc: HTMLElement): T | null {
   const was = lastPut.get(sc)
   return was && Math.abs(was.y - sc.scrollTop) < 1.5 && was.h === sc.scrollHeight && was.w === sc.clientWidth ? (was.spots as T) : null
+}
+/** Where all the files were last being read, noted when they give way to the pick's code or
+ *  to the list of changed files: the list has no line to hold on to, so "Show all files"
+ *  from it, or closing the Guide pane while it shows, returns here. */
+let allPlace: Held[] | null = null
+export function noteAllPlace(): void {
+  const st = useStore.getState()
+  if (st.guide != null && !st.showAll && !st.view.commit) return     // (narrowed: what is on show is not all the files)
+  const spots = readingSpot()
+  if (spots.length) allPlace = spots
+}
+export function returnToAllPlace(): void {
+  const mine = allPlace
+  if (mine) holding(() => putBack(mine), true).settle()
 }
 /** Put the Code pane back on what it showed: the line if it is still there, else the file it was in. */
 function putBack(spots: Held[]): void {

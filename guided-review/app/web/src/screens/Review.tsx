@@ -3,7 +3,7 @@ import type {
   AnchorInput, Artifact, Comment, FactRow, FileDiff, FocusTarget, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, TREE_BESIDE_GUIDE, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, focusQuestion, followFiles, goToSection, holdCodePlace, holdPlaces, showPick, showSection, showSectionHeader, startTour, unparkCodePlace } from '../focus'
+import { focusAnchor, focusQuestion, followFiles, goToSection, holdCodePlace, holdPlaces, showIfOut, showPick, showSection, showSectionHeader, startTour, unparkCodePlace } from '../focus'
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, narrowingOf, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
@@ -715,6 +715,8 @@ function useTreePlace(): { room: boolean; column: boolean; over: boolean; forSec
   return { room, column, over: treeOver && !column, forSection, canPin: guide && medium && !big }
 }
 
+/** the last "open the tree at this folder" that the tree panel carried out */
+let shownAt = 0
 /** The tree panel: the changed files as a tree (or a list, or grouped by walkthrough
  *  section), with the filter. It marks the file under the reviewer's eyes and the files of
  *  the pick. A click on a file shows it among all the files. `over`: it has no column of
@@ -742,8 +744,11 @@ function TreePanel({ loaded, over }: { loaded: LoadedReview; over: boolean }) {
   // the first file under it does.
   const at = treeAt?.seq
   useEffect(() => {
-    const dir = useStore.getState().treeAt?.dir
-    if (!dir) return
+    const asked = useStore.getState().treeAt
+    // (the panel is drawn anew each time it is shown: a folder it was opened at before is not shown off again)
+    if (!asked || asked.seq === shownAt) return
+    shownAt = asked.seq
+    const dir = asked.dir
     const chain: string[] = []
     for (let node = F.tree; ;) {
       const next = node.dirs.find((d) => d.path === dir || d.path.startsWith(dir + '/') || dir.startsWith(d.path + '/'))
@@ -855,10 +860,14 @@ function PathBar({ sections, onDir }: { sections: SectionMap; onDir: (dir: strin
 /** What the Code pane is showing beside a Guide, in words, with the way to the rest: the
  *  pick's code only ("Show all files"), the list of changed files while nothing is picked,
  *  or all the files (and the way back to the pick, or to the list). */
-function NarrowChip({ show, to, count }: { show: 'all' | 'pick' | 'list'; to: Narrowing | null; count: number }) {
+function NarrowChip({ show, to, count, hidden, onClear }: {
+  show: 'all' | 'pick' | 'list'; to: Narrowing | null; count: number
+  /** a filter leaves the pick's own file out of "all the files": it is lifted on the way there */
+  hidden: boolean; onClear: () => void
+}) {
   const { showAllFiles } = useStore.getState()
   // (the files that were hidden come in above the line being read: it is held where it is)
-  const all = (): void => { const hold = holdCodePlace(); showAllFiles(true); hold.settle() }
+  const all = (): void => { const hold = holdCodePlace(); if (hidden) onClear(); showAllFiles(true); hold.settle() }
   return (
     <span className="narrowing" data-gr="narrowing" data-gr-narrowing={show}>
       {show === 'pick' && to && <><span className="muted">Showing</span><strong className="clip">{to.label}</strong><button className="link" data-gr="show-all" title="Leave the pick: all the changed files, at this one. The pick stays outlined in the Guide." onClick={all}>Show all files</button></>}
@@ -905,6 +914,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   const { wt, eff, commitView, bySection, sectionOf, sections, sectionNo, kept, excluded, visible } = F
   const mode = useStore((s) => s.diffMode)
   const filters = useStore((s) => s.filters)
+  const query = useStore((s) => s.fileQuery)
   const panelOpen = useStore((s) => s.panelOpen)
   const treeOver = useStore((s) => s.treeOver)
   const guideBeside = useStore((s) => s.guide != null)
@@ -978,11 +988,10 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   const only = useMemo(() => new Set(show === 'pick' ? to?.files ?? [] : []), [show, to])
   const inAll = useMemo(() => new Set(visible.map((f) => f.path)), [visible])       // eslint-disable-line react-hooks/exhaustive-deps
   const on = (f: FileDiff): boolean => (show === 'all' ? inAll.has(f.path) : show === 'pick' && only.has(f.path))
-  // The boxes that can be in the pane: what the filters leave, and the pick's files
-  // whatever the filters say. They keep their places in one list, so that a file that goes
-  // out of sight and comes back is the same box.
-  const pool = to ? [...visible, ...kept.filter((f) => to.files.includes(f.path) && !inAll.has(f.path))] : visible
-  const groups = F.group(pool, pool === visible ? F.tree : undefined)
+  // Every file of the change has its place in one list, whatever the filters and the
+  // narrowing leave out just now: a file that goes out of sight and comes back is the same
+  // box, in the same place.
+  const groups = useMemo(() => F.group(kept), [loaded.files, F.wsPaths, bySection, treeView, wt])       // eslint-disable-line react-hooks/exhaustive-deps
   // a file's box is drawn the first time the file is on show, and kept from then on
   const drawn = useRef(new Set<string>())
   for (const g of groups) for (const f of g.files) if (on(f)) drawn.current.add(f.path)
@@ -999,6 +1008,8 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   useEffect(() => (list.current ? followFiles(list.current) : undefined), [order, bySection, filters.showExcluded])
   // (the list of files has no file under the reviewer's eyes)
   useEffect(() => { if (show === 'list') useStore.setState({ currentFile: null }) }, [show])
+  /** the filters that leave files out, off (the "changes" view stays as it is) */
+  const clearFilters = (): void => { const hold = holdCodePlace(); set({ fileQuery: '' }); if (filters.hideViewed || filters.onlyCommented) useStore.getState().setFilters({ hideViewed: false, onlyCommented: false }); hold.settle() }
   const modeLabel = shownCommit ? `${short(shownCommit.sha)} ${shownCommit.subject}` : commitView ? short(commitView) : eff === 'all' ? 'All changes' : eff === 'since' ? (since?.kind === 'approved' ? 'Since approved' : 'Since reviewed') : 'Since viewed'
   const pickMode = (m: DiffMode, close: () => void): void => { set({ diffMode: m }); if (commitView) void setView({ commit: undefined }); close() }
   const dirty = loaded.dirty && loaded.files.some((f) => f.uncommitted)
@@ -1055,7 +1066,13 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
       </div>
       <div className="code-where" data-gr="code-where">
         <PathBar sections={sections} onDir={(dir) => { if (place.forSection) showSection(null); useStore.getState().revealDir(dir) }} />
-        {guideBeside && !commitView && <NarrowChip show={show} to={to} count={visible.length} />}
+        {show === 'all' && !commitView && visible.length < kept.length && (
+          <span className="narrowing" data-gr="filter-note">
+            <span className="muted">Filtered: {visible.length} of {plural(kept.length, 'file')}</span>
+            {(query || filters.hideViewed || filters.onlyCommented) && <button className="link" data-gr="filter-clear" title="Clear the tree's filter, and show viewed files and files without comments again" onClick={clearFilters}>Clear</button>}
+          </span>
+        )}
+        {guideBeside && !commitView && <NarrowChip show={show} to={to} count={visible.length} hidden={to ? to.files.some((f) => !inAll.has(f)) : false} onClear={clearFilters} />}
       </div>
 
       {commitView && (
@@ -1686,6 +1703,12 @@ const GUIDE_STEPS = [520, 760, 1000, 1200] as const
  *  scroll position, its open parts, its pick and whatever was being written in it. */
 function GuideBody({ id, shown, children }: { id: Guide; shown: boolean; children: ReactNode }) {
   const scroll = useKeptScroll<HTMLDivElement>(shown)
+  // First drawn with the pick in it (an address that names one was opened): the link that
+  // is the pick is brought into view. Never later: a Guide stays where the reviewer left it.
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { const el = scroll.ref.current?.querySelector('.picked'); if (el) showIfOut(el) })
+    return () => window.cancelAnimationFrame(frame)
+  }, [])       // eslint-disable-line react-hooks/exhaustive-deps
   // (what is drawn in here knows it is in a Guide: a jump to code from it is a pick)
   return <div className="guide-scroll" role="tabpanel" data-gr-scroll={id} data-gr-guide={id} hidden={!shown} ref={scroll.ref} onScroll={scroll.onScroll}><GuideCtx.Provider value={id}>{children}</GuideCtx.Provider></div>
 }
@@ -1695,15 +1718,16 @@ function GuideBody({ id, shown, children }: { id: Guide; shown: boolean; childre
  *  starts. While it is dragged the panes follow at once, and the code stays on the line it
  *  showed; what has to be laid out anew for the new width (a diagram, split or unified)
  *  waits until it is released. `pct`: the Guide pane's share of the room;
- *  `tree`: how much of the workspace is not theirs to share (the tree's column). */
-function PaneDivider({ frame, pct, tree, onChange }: { frame: RefObject<HTMLElement | null>; pct: number; tree: number; onChange: (pct: number | null) => void }) {
+ *  `tree`: how much of the workspace is not theirs to share (the tree panel at its usual
+ *  width); `treeNow`: what the tree panel takes as it is, which the code's least width is kept clear of. */
+function PaneDivider({ frame, pct, tree, treeNow, onChange }: { frame: RefObject<HTMLElement | null>; pct: number; tree: number; treeNow: number; onChange: (pct: number | null) => void }) {
   const drag = useRef<{ hold: ReturnType<typeof holdPlaces>; pct: number; tick: number } | null>(null)
   /** the share a divider at `x` gives the Guide pane, within what each pane needs */
   const shareAt = (x: number): number => {
     const r = frame.current?.getBoundingClientRect()
     if (!r?.width) return pct
     const room = r.width - tree
-    const px = Math.min(room - PANE_MIN.code - PANE_MIN.bar, Math.max(PANE_MIN.guide, x - r.left))
+    const px = Math.min(r.width - treeNow - PANE_MIN.code - PANE_MIN.bar, Math.max(PANE_MIN.guide, x - r.left))
     return room > 0 ? Math.round((px / room) * 1000) / 10 : pct
   }
   const down = (e: RPointerEvent<HTMLDivElement>): void => {
@@ -1770,11 +1794,15 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
   // The room Guide and code share is what the tree panel leaves, wherever the tree has a
   // column to be in, whether it is switched on just now or not: hiding the tree gives its
   // room to the code, and the Guide (a diagram laid out for its width) stays as it is.
-  const tree = both && place.room ? treeWidth + TREE_PAD : 0
+  // (Its share is taken of what the tree leaves at its usual width: resizing the tree
+  // trades room with the code, as hiding it does. Only the least the code is left with
+  // counts the tree as wide as it is.)
+  const tree = both && place.room ? treeWidthLimits.def + TREE_PAD : 0
+  const treeNow = both && place.column ? treeWidth + TREE_PAD : 0
   const pct = dragged ?? GUIDE_START[guide ?? 'conversation']
   const row = <GuideRow loaded={loaded} onePane={!twoFit} />
   return (
-    <main className={'workspace' + (both ? ' both' : '')} ref={frame} style={{ '--guide-w': pct, '--tree-room': `${tree}px` } as React.CSSProperties} data-gr="workspace">
+    <main className={'workspace' + (both ? ' both' : '')} ref={frame} style={{ '--guide-w': pct, '--tree-room': `${tree}px`, '--tree-now': `${treeNow}px` } as React.CSSProperties} data-gr="workspace">
       <section className={'guide-pane' + below(guideWidth, [520, 760, 1000, 1200])} ref={pane} hidden={!guideShown} aria-label="Guide" data-gr-pane="guide">
         {guideShown && row}
         {seen.map((g) => (
@@ -1784,7 +1812,7 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
         ))}
         <BackBar pane="guide" />
       </section>
-      {both && <PaneDivider frame={frame} pct={pct} tree={tree} onChange={setDragged} />}
+      {both && <PaneDivider frame={frame} pct={pct} tree={tree} treeNow={treeNow} onChange={setDragged} />}
       <section className="code-pane" hidden={!codeShown} aria-label="Code" data-gr-pane="code">
         {!guideShown && row}
         <FilesTab loaded={loaded} shown={codeShown} />

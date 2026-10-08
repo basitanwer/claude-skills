@@ -4,8 +4,8 @@ import type {
   RepoState, RequestKind, ReviewRequest, ReviewState, ReviewView, SessionListItem, TourStop, UiAction, ViewMark
 } from '@shared/types'
 import { api, connect } from './api'
-import { errText, isOpen, newId, parseHash, parsePick, pickKey, refInput, routeHash, targetLabel, type DiffMode, type Guide, type Pane, type CodePick, type Route } from './util'
-import { focusAnchor, holdCodePlace, parkCodePlace, showPick, startTour } from './focus'
+import { errText, isOpen, narrowingOf, newId, parseHash, parsePick, pickKey, refInput, routeHash, targetLabel, type DiffMode, type Guide, type Pane, type CodePick, type Route } from './util'
+import { focusAnchor, holdCodePlace, noteAllPlace, parkCodePlace, returnToAllPlace, showPick, startTour } from './focus'
 
 /** `key`: a newer toast with the same key takes the place of an older one. */
 export interface Toast { id: string; text: string; kind: 'error' | 'info'; action?: { label: string; run: () => void }; key?: string }
@@ -419,10 +419,11 @@ export const useStore = create<Store>((set, get) => {
         set({ route })
         const guide = route.guide ?? null
         if (guide !== get().guide) get().showGuide(guide, { silent: true })
+        if (Boolean(next.ignoreWhitespace) !== Boolean(cur.ignoreWhitespace) || (next.commit ?? '') !== (cur.commit ?? '')) { set({ view: next }); await get().reload() }
+        if (stale()) return
         // the pick: the Code pane goes back to it (and is narrowed to it again, if that was left)
         const pick = parsePick(route.pick)
         if (pickKey(pick) !== pickKey(get().pick) || (pick != null && get().showAll && guide != null)) showPick(pick, { silent: true })
-        if (Boolean(next.ignoreWhitespace) !== Boolean(cur.ignoreWhitespace) || (next.commit ?? '') !== (cur.commit ?? '')) { set({ view: next }); await get().reload() }
         if (route.focus) { try { const t = JSON.parse(route.focus); window.setTimeout(() => focusAnchor(t, { nav: true }), 60) } catch { /* ignore */ } }
         return
       }
@@ -729,8 +730,16 @@ export const useStore = create<Store>((set, get) => {
       // the Code pane changes width under what is being read in it, or is folded away: hold it on that line
       parkCodePlace()
       const hold = holdCodePlace()
+      // Opening or closing the Guide pane never changes what the Code pane shows. With the
+      // pane closed it shows all the files; opened by the reviewer it goes on showing them,
+      // where they were, until something is picked. (An address that opens on a Guide with
+      // nothing picked shows the list of changed files.) Closed while the list was showing,
+      // it returns to where the files were last read.
+      const edge = (cur.guide == null) !== (guide == null)
+      const fromList = guide == null && cur.guide != null && !cur.showAll && !cur.view.commit && !narrowingOf(cur.pick, cur.loaded)
       // (nothing is discarded: the Guide left behind is kept as it is, and so is a comment being written beside the code)
-      set({ guide, front: guide ? 'guide' : 'code', treeOver: false, ...(guide ? {} : { guideWide: false }) })
+      set({ guide, front: guide ? 'guide' : 'code', treeOver: false, ...(guide ? {} : { guideWide: false }), ...(edge && (guide == null || !opts?.silent) ? { showAll: true } : {}) })
+      if (fromList) returnToAllPlace()
       const route = get().route
       if (route.name === 'review' && (route.guide ?? null) !== guide) {
         const next = { ...route, guide: guide ?? undefined, focus: undefined }
@@ -741,11 +750,13 @@ export const useStore = create<Store>((set, get) => {
     },
     pickCode(pick, opts) {
       const key = pickKey(pick)
+      noteAllPlace()                  // (if all the files are on show: where they are, for the way back from the list)
       // a box is of one diagram: that diagram is the one on show in Visualize
       set({ pick, showAll: false, treeOver: false, ...(pick && 'box' in pick ? { visualView: pick.box[0] } : {}) })
       const route = get().route
       if (route.name === 'review' && (route.pick ?? '') !== key) {
-        const next = { ...route, pick: key || undefined, focus: undefined }
+        // (a pick the reviewer makes while one commit is on show leaves that view: the new step is without it)
+        const next = { ...route, pick: key || undefined, focus: undefined, ...(opts?.silent ? {} : { commit: undefined }) }
         set({ route: next })
         // followed from an address that named a pick which is not there any more: the address drops it
         if (opts?.silent) syncHash(next)
@@ -753,7 +764,13 @@ export const useStore = create<Store>((set, get) => {
       }
     },
     showAllFiles(all) {
-      if (get().showAll !== all) set({ showAll: all })
+      const cur = get()
+      if (cur.showAll === all) return
+      // from the list of files there is no line to stay on: all the files come back where they were last read
+      const fromList = all && cur.guide != null && !narrowingOf(cur.pick, cur.loaded)
+      if (!all) noteAllPlace()
+      set({ showAll: all })
+      if (fromList) returnToAllPlace()
     },
     openTree() {
       if (treeHasRoom(get())) set({ panelOpen: true, treeOver: false })

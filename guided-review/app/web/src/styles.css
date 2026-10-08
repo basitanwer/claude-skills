@@ -249,11 +249,12 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 /* the two panes and the divider between them. --guide-w: the Guide pane's share of the
    room (56% for a diagram, 40% for text, or where the divider was dragged to), held
    within what each pane needs: the Guide never under 320px, the code never under 420px.
-   --tree-room: what the tree panel takes of the workspace before the two share the rest. */
+   --tree-room: what the tree panel takes of the workspace, at its usual width, before the
+   two share the rest; --tree-now: what it takes as it is (dragged wider, or hidden). */
 .page.review > .workspace { position: relative; flex: 1 1 0; min-height: 0; display: flex; }
 .guide-pane, .code-pane { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .guide-pane { --pad: 16px; } .code-pane { --pad: 24px; } .workspace.both > .code-pane { --pad: 16px; }
-.workspace.both > .guide-pane { flex: none; width: clamp(320px, calc((100% - var(--tree-room, 0px)) * var(--guide-w, 40) / 100), calc(100% - var(--tree-room, 0px) - 426px)); }
+.workspace.both > .guide-pane { flex: none; width: clamp(320px, calc((100% - var(--tree-room, 0px)) * var(--guide-w, 40) / 100), calc(100% - var(--tree-now, 0px) - 426px)); }
 .pane-divider { flex: none; width: 6px; cursor: col-resize; touch-action: none; border-left: 1px solid var(--border); }
 .pane-divider:hover, .pane-divider:focus-visible, .workspace[data-dragging] > .pane-divider { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 30%, transparent); outline: 0; }
 .workspace[data-dragging] { cursor: col-resize; user-select: none; }

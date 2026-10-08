@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent } from 'react'
 import type { LoadedReview, VisualEdge, VisualKind, VisualNode, VisualStatus, VisualView } from '@shared/types'
 import { useStore } from '../store'
-import { showPick } from '../focus'
+import { showIfOut, showPick } from '../focus'
 import { layout } from '../graph'
-import { ago, baseName, isOpen, narrowingOf, PANES_SETTLED, plural, secStyle, short } from '../util'
+import { ago, baseName, cssq, isOpen, narrowingOf, PANES_SETTLED, plural, secStyle, short } from '../util'
 import { AwayHint, Icon, Md } from './common'
 
 // ── what a box says ───────────────────────────────────────────
@@ -194,6 +194,18 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
     for (const e of view.edges) { if (e.from === cur.id) ids.add(e.to); if (e.to === cur.id) ids.add(e.from) }
     return ids
   }, [cur, view])
+  // A diagram that is first drawn with a pick in it (an address that names one was opened,
+  // or Back returned to a pick in another diagram) shows the picked box, if it is out of
+  // view. Later picks never move it: the reviewer is looking at the box they click.
+  useEffect(() => {
+    if (!pinned) return
+    // (once the drawing is laid out for the pane's width)
+    const frame = window.requestAnimationFrame(() => {
+      const el = root.current?.querySelector<HTMLElement>(`[data-gr-node="${cssq(pinned)}"]`)
+      if (el) showIfOut(el)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [])       // eslint-disable-line react-hooks/exhaustive-deps
   // the card is placed on the screen, so it goes when the Guide scrolls under it (the
   // Code pane scrolling beside it, as it does after a pick, moves nothing the card points at)
   useEffect(() => {
