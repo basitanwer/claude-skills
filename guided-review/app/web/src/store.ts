@@ -4,8 +4,8 @@ import type {
   RepoState, RequestKind, ReviewRequest, ReviewState, ReviewView, SessionListItem, TourStop, UiAction, ViewMark
 } from '@shared/types'
 import { api, connect } from './api'
-import { errText, guideOf, isOpen, newId, parseHash, refInput, routeHash, targetLabel, type DiffMode, type Guide, type Pane, type Route } from './util'
-import { focusAnchor, holdCodePlace, parkCodePlace, startTour } from './focus'
+import { errText, isOpen, newId, parseHash, parsePick, pickKey, refInput, routeHash, targetLabel, type DiffMode, type Guide, type Pane, type CodePick, type Route } from './util'
+import { focusAnchor, holdCodePlace, parkCodePlace, showPick, startTour } from './focus'
 
 /** `key`: a newer toast with the same key takes the place of an older one. */
 export interface Toast { id: string; text: string; kind: 'error' | 'info'; action?: { label: string; run: () => void }; key?: string }
@@ -39,6 +39,13 @@ function storedTreeWidth(): number {
   try { const n = Number(localStorage.getItem('gr-tree-w')); return n >= TREE_W.min && n <= TREE_W.max ? n : TREE_W.def } catch { return TREE_W.def }
 }
 export interface Filters { hideViewed: boolean; onlyCommented: boolean; bySection: boolean; showExcluded: boolean }
+/** The window width from which the tree panel keeps its column while a Guide is open:
+ *  below it Guide, code and tree do not fit side by side, and the tree folds unless pinned. */
+export const TREE_BESIDE_GUIDE = 1500
+/** Whether the tree panel has room as a column of its own, on the far right: always where
+ *  the code has the window to itself; beside a Guide on a wide window, or when pinned. */
+export const treeHasRoom = (s: { guide: Guide | null; treePinned: boolean }): boolean =>
+  window.innerWidth >= 760 && (s.guide == null || window.innerWidth >= TREE_BESIDE_GUIDE || s.treePinned)
 
 /** View preferences that outlive the page (best effort: storage may be blocked). */
 function pref<T extends string>(key: string, allowed: readonly T[], fallback: T | null): T | null {
@@ -81,9 +88,16 @@ interface Store {
   wsOnly: FileDiff[]
   /** null = split on wide screens, unified on narrow ones */
   diffView: DiffView | null
+  /** the reviewer has the tree panel switched on (it still folds by itself where it has no room, unless pinned) */
   panelOpen: boolean
-  /** the file tree was asked for where it folds by itself (a small Code pane, or a Guide beside the code on a window with no room for three columns) */
-  treeAsked: boolean
+  /** the tree panel keeps its column beside a Guide even on a window with little room for three */
+  treePinned: boolean
+  /** the tree panel is open over the Code pane: asked for (the path bar, the toggle, `t`) where it has no column */
+  treeOver: boolean
+  /** folders of the tree the reviewer folded, by path */
+  closedDirs: string[]
+  /** a folder the tree was asked to open at (from the path bar): it unfolds down to it and shows it */
+  treeAt: { dir: string; seq: number } | null
   fileQuery: string
   filters: Filters
   treeView: 'tree' | 'list'
@@ -101,8 +115,14 @@ interface Store {
   docPath: string | null
   /** the diagram open in the Visualize Guide, by view id (null: the first one) */
   visualView: string | null
-  /** the pick in the diagrams: the box (of which diagram) whose code the Code pane was last taken to. It stays outlined until another is picked */
-  visualNode: { view: string; node: string } | null
+  /** The pick: the item chosen in a Guide (a box of a diagram, a comment's line, a plan
+   *  row's file). Beside a Guide the Code pane is narrowed to its code until another pick or
+   *  "Show all files"; it stays outlined in its Guide. The address carries it. */
+  pick: CodePick | null
+  /** Beside a Guide: the Code pane shows all the files, not only the pick's (or, with no
+   *  pick, the list of changed files). Left by "Show all files", a click in the tree, or a
+   *  jump to code outside the pick. */
+  showAll: boolean
   composer: string | null
   tour: Tour | null
   /** Where a pane was before a jump took it far from there: offered back by the "Back to …"
@@ -153,8 +173,19 @@ interface Store {
   retryRequest(id: string): Promise<void>
   dismissRequest(id: string): void
 
-  /** Show a Guide in the Guide pane (opening the pane), or close the pane with null. */
-  showGuide(guide: Guide | null): void
+  /** Show a Guide in the Guide pane (opening the pane), or close the pane with null. A
+   *  change of Guide is a step of the trail: the browser's Back returns to the one before.
+   *  `silent`: the address already says so (it is being followed, not made). */
+  showGuide(guide: Guide | null, opts?: { silent?: boolean }): void
+  /** Make something the pick (null: none). A step of the trail, unless it is the pick already. `silent`: see showGuide. */
+  pickCode(pick: CodePick | null, opts?: { silent?: boolean }): void
+  /** Leave the narrowing for all the files, or return to it. */
+  showAllFiles(all: boolean): void
+  /** Bring the tree panel on show: as its column where it has room, else over the Code pane. */
+  openTree(): void
+  /** Open the tree at a folder: unfolded down to it, with the folder in view. */
+  revealDir(dir: string): void
+  setTreePinned(pinned: boolean): void
   /** Make sure the Code pane is on screen: a jump to code is about to land in it. The Guide stays as it is. */
   revealCode(): void
   /** Change the view (hide whitespace / one commit) and reload under it. */
@@ -168,7 +199,7 @@ interface Store {
   setFileLoaded(path: string): void
   setMdSource(path: string, source: boolean): void
   setSectionOpen(id: string, open: boolean): void
-  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'visualNode' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'treeAsked' | 'fileQuery' | 'guideWide' | 'front'>>): void
+  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'treeOver' | 'closedDirs' | 'fileQuery' | 'guideWide' | 'front'>>): void
   applyAction(action: UiAction): void
 
   onStreamOpen(): void
@@ -206,6 +237,13 @@ function primeNotifications(): void {
 /** Replace the hash without re-running the route (the review is already on screen). */
 function syncHash(route: Route): void {
   try { history.replaceState(null, '', routeHash(route)) } catch { /* ignore */ }
+}
+/** Add a step to the trail: the browser's history gets the new address, without the route
+ *  being run again (pushState sends no hashchange). Back and Forward then arrive as
+ *  hashchange, and applyRoute brings both panes back as the address says. */
+function pushHash(route: Route): void {
+  const hash = routeHash(route)
+  try { if (window.location.hash !== hash) history.pushState(null, '', hash) } catch { /* ignore */ }
 }
 
 export const useStore = create<Store>((set, get) => {
@@ -297,7 +335,7 @@ export const useStore = create<Store>((set, get) => {
     set({
       loaded, sessionId, preview, loading: false,
       viewedAt: loaded.state.viewedAt, reviewedSections: loaded.state.reviewedSections,
-      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, mdSource: {}, sectionOpen: {}, excludedOpen: false, factsOpen: false, diffMode: 'all', docPath: null, visualView: null, visualNode: null,
+      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, mdSource: {}, sectionOpen: {}, excludedOpen: false, factsOpen: false, diffMode: 'all', docPath: null, visualView: null, pick: null, showAll: false, closedDirs: [], treeAt: null, treeOver: false,
       composer: null, tour: null, returnTo: null, sectionPanel: null, fileQuery: '', wsOnly: []
     })
     refreshWsOnly()
@@ -325,7 +363,8 @@ export const useStore = create<Store>((set, get) => {
     diffMode: 'all',
     docPath: null,
     visualView: null,
-    visualNode: null,
+    pick: null,
+    showAll: false,
     composer: null,
     guide: null,
     guideWide: false,
@@ -336,7 +375,10 @@ export const useStore = create<Store>((set, get) => {
     wsOnly: [],
     diffView: pref('gr-diff-view', ['split', 'unified'] as const, null),
     panelOpen: typeof window === 'undefined' || window.innerWidth >= 760,   // the tree starts folded on a phone-width screen
-    treeAsked: false,
+    treePinned: pref('gr-tree-pin', ['1'] as const, null) === '1',
+    treeOver: false,
+    closedDirs: [],
+    treeAt: null,
     fileQuery: '',
     filters: { hideViewed: false, onlyCommented: false, bySection: pref('gr-by-section', ['1'] as const, null) === '1', showExcluded: false },
     treeView: pref('gr-files-view', ['tree', 'list'] as const, 'tree') ?? 'tree',
@@ -375,14 +417,17 @@ export const useStore = create<Store>((set, get) => {
         const next = viewOfRoute(route)
         const cur = get().view
         set({ route })
-        const guide = guideOf(route.tab)
-        if (guide !== get().guide) get().showGuide(guide)
+        const guide = route.guide ?? null
+        if (guide !== get().guide) get().showGuide(guide, { silent: true })
+        // the pick: the Code pane goes back to it (and is narrowed to it again, if that was left)
+        const pick = parsePick(route.pick)
+        if (pickKey(pick) !== pickKey(get().pick) || (pick != null && get().showAll && guide != null)) showPick(pick, { silent: true })
         if (Boolean(next.ignoreWhitespace) !== Boolean(cur.ignoreWhitespace) || (next.commit ?? '') !== (cur.commit ?? '')) { set({ view: next }); await get().reload() }
         if (route.focus) { try { const t = JSON.parse(route.focus); window.setTimeout(() => focusAnchor(t, { nav: true }), 60) } catch { /* ignore */ } }
         return
       }
       // a review opens with the Guide pane closed unless the address names a Guide
-      const guide = route.name === 'review' ? guideOf(route.tab) : null
+      const guide = route.name === 'review' ? route.guide ?? null : null
       set({ route, navOpen: false, guide, guideWide: false, front: guide ? 'guide' : 'code', view: viewOfRoute(route), reveal: null })
       if (route.name === 'dashboard') {
         connect(null)
@@ -403,6 +448,7 @@ export const useStore = create<Store>((set, get) => {
           if (stale()) return
           showLoaded(loaded, route.session, null)
           if (get().view.ignoreWhitespace && !route.w) syncHash(routeWithView(route, get().view))
+          if (route.pick) showPick(parsePick(route.pick), { silent: true })
         } else if (route.repo) {
           const repo = route.repo
           const st = await api.openRepo(repo)           // validates the path and records it under Recent
@@ -415,7 +461,8 @@ export const useStore = create<Store>((set, get) => {
             const loaded = await openSession(match.sessionId)
             if (stale()) return
             showLoaded(loaded, match.sessionId, null)
-            syncHash(routeWithView({ name: 'review', session: match.sessionId, focus: route.focus, tab: route.tab }, get().view))
+            syncHash(routeWithView({ name: 'review', session: match.sessionId, focus: route.focus, guide: route.guide, pick: route.pick }, get().view))
+            if (route.pick) showPick(parsePick(route.pick), { silent: true })
           } else {
             // a preview: the diff with nothing saved — it is saved on the first write
             connect(null)
@@ -479,7 +526,7 @@ export const useStore = create<Store>((set, get) => {
           )
           const real = await openSession(sessionId)
           set({
-            sessionId, loaded: real, preview: null, route: routeWithView({ name: 'review', session: sessionId, tab: get().guide ?? undefined }, get().view),
+            sessionId, loaded: real, preview: null, route: routeWithView({ name: 'review', session: sessionId, guide: get().guide ?? undefined, pick: pickKey(get().pick) || undefined }, get().view),
             viewedAt: real.state.viewedAt, reviewedSections: real.state.reviewedSections
           })
           syncHash(get().route)
@@ -676,21 +723,49 @@ export const useStore = create<Store>((set, get) => {
       set({ dismissed: [...get().dismissed, requestId] })
     },
 
-    showGuide(guide) {
+    showGuide(guide, opts) {
       const cur = get()
       if (cur.guide === guide && cur.front === (guide ? 'guide' : 'code')) return
       // the Code pane changes width under what is being read in it, or is folded away: hold it on that line
       parkCodePlace()
       const hold = holdCodePlace()
       // (nothing is discarded: the Guide left behind is kept as it is, and so is a comment being written beside the code)
-      set({ guide, front: guide ? 'guide' : 'code', ...(guide ? {} : { guideWide: false }) })
+      set({ guide, front: guide ? 'guide' : 'code', treeOver: false, ...(guide ? {} : { guideWide: false }) })
       const route = get().route
-      if (route.name === 'review' && guideOf(route.tab) !== guide) {
-        const next = { ...route, tab: guide ?? undefined, focus: undefined }
+      if (route.name === 'review' && (route.guide ?? null) !== guide) {
+        const next = { ...route, guide: guide ?? undefined, focus: undefined }
         set({ route: next })
-        syncHash(next)
+        if (!opts?.silent) pushHash(next)
       }
       hold.settle()
+    },
+    pickCode(pick, opts) {
+      const key = pickKey(pick)
+      // a box is of one diagram: that diagram is the one on show in Visualize
+      set({ pick, showAll: false, treeOver: false, ...(pick && 'box' in pick ? { visualView: pick.box[0] } : {}) })
+      const route = get().route
+      if (route.name === 'review' && (route.pick ?? '') !== key) {
+        const next = { ...route, pick: key || undefined, focus: undefined }
+        set({ route: next })
+        // followed from an address that named a pick which is not there any more: the address drops it
+        if (opts?.silent) syncHash(next)
+        else pushHash(next)
+      }
+    },
+    showAllFiles(all) {
+      if (get().showAll !== all) set({ showAll: all })
+    },
+    openTree() {
+      if (treeHasRoom(get())) set({ panelOpen: true, treeOver: false })
+      else set({ treeOver: true })
+    },
+    revealDir(dir) {
+      get().openTree()
+      set({ treeAt: { dir, seq: (get().treeAt?.seq ?? 0) + 1 } })
+    },
+    setTreePinned(pinned) {
+      set({ treePinned: pinned, ...(pinned ? { panelOpen: true, treeOver: false } : {}) })
+      savePref('gr-tree-pin', pinned ? '1' : null)
     },
     revealCode() {
       const { front, guideWide } = get()

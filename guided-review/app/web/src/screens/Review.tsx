@@ -1,15 +1,15 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent, type PointerEvent as RPointerEvent, type ReactNode, type RefObject } from 'react'
+import { createContext, Fragment, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent, type PointerEvent as RPointerEvent, type ReactNode, type RefObject } from 'react'
 import type {
   AnchorInput, Artifact, Comment, FactRow, FileDiff, FocusTarget, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
-import { useStore, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, focusQuestion, followFiles, goToSection, holdCodePlace, holdPlaces, showInPane, showSection, startTour, unparkCodePlace } from '../focus'
+import { useStore, TREE_BESIDE_GUIDE, treeWidthLimits, type Filters } from '../store'
+import { focusAnchor, focusQuestion, followFiles, goToSection, holdCodePlace, holdPlaces, showPick, showSection, showSectionHeader, startTour, unparkCodePlace } from '../focus'
 import {
-  ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
+  ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, narrowingOf, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
-  PANES_SETTLED, sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Guide
+  PANES_SETTLED, sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Guide, type Narrowing
 } from '../util'
-import { AwayHint, BackBar, CopyButton, DiffStat, FileIcon, Icon, Md, Menu, MenuItem, PresenceDot, ThemeToggle, currentTheme, setTheme } from '../components/common'
+import { AwayHint, BackBar, CopyButton, DiffStat, FileIcon, GuideCtx, Icon, Md, Menu, MenuItem, PresenceDot, ThemeToggle, currentTheme, setTheme, usePickLink } from '../components/common'
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
 import { FileBox, hoveredLine } from '../components/diff'
 import { VisualTab } from '../components/visual'
@@ -403,33 +403,28 @@ function CommentsMenu({ loaded }: { loaded: LoadedReview }) {
  *  tree's place: its column is then as wide (about 730px) as the narrowest one that is
  *  split by default with the tree showing. */
 const SPLIT_BESIDE_SECTION = 1200
-/** The window width from which the tree keeps its column while a Guide is beside the code:
- *  below it Guide, tree and code do not fit side by side, and the tree folds. */
-const TREE_BESIDE_GUIDE = 1500
-/** the gap between the tree's column and the files (px) */
-const TREE_GAP = 24
-/** The widths of the Code pane at which what it holds changes: a file's header on one line (520), the tree as a column (760),
- *  room for a split diff (900), split by default and the section as a column (1100), split
- *  beside a section (1200), tree, diff and section side by side (1600). They are the
- *  window widths the same things changed at while the code had the window to itself. */
-const CODE_STEPS = [520, 760, 900, 1100, SPLIT_BESIDE_SECTION, 1600] as const
-/** Beside a Guide a diff is split by the room its own column has, since the tree may or
- *  may not be in the pane with it: never split under 700px, split unless the reviewer chose
- *  otherwise from 900px. */
+/** What the tree panel takes of the workspace beside its own width: its padding (px). */
+const TREE_PAD = 26
+/** The widths of the Code pane at which what it holds changes: a file's header on one line
+ *  (520), the narrow layout of a diff (760), the section as a column (1100). */
+const CODE_STEPS = [520, 760, 1100, SPLIT_BESIDE_SECTION] as const
+/** Beside a Guide a diff is split by the room its own column has: never split under 700px,
+ *  split unless the reviewer chose otherwise from 900px. */
 const FILES_STEPS = [700, 900] as const
-/** Drag (or arrow keys) to resize the file panel; double-click resets it. */
+/** Drag (or arrow keys) to resize the tree panel; double-click resets it. The panel is on
+ *  the right and the handle on its left edge: dragging left makes it wider. */
 function ResizeHandle({ width, onChange }: { width: number; onChange: (px: number | null) => void }) {
   const drag = useRef<{ x: number; w: number } | null>(null)
-  const down = (e: RPointerEvent<HTMLDivElement>): void => { drag.current = { x: e.clientX, w: width }; e.currentTarget.setPointerCapture(e.pointerId) }
-  const move = (e: RPointerEvent<HTMLDivElement>): void => { if (drag.current) onChange(drag.current.w + e.clientX - drag.current.x) }
+  const down = (e: RPointerEvent<HTMLDivElement>): void => { drag.current = { x: e.clientX, w: width }; try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* a pointer the browser does not know */ } }
+  const move = (e: RPointerEvent<HTMLDivElement>): void => { if (drag.current) onChange(drag.current.w - (e.clientX - drag.current.x)) }
   const up = (): void => { drag.current = null }
   const key = (e: RKeyboardEvent<HTMLDivElement>): void => {
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); onChange(width + (e.key === 'ArrowLeft' ? -20 : 20)) }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); onChange(width + (e.key === 'ArrowLeft' ? 20 : -20)) }
     else if (e.key === 'Home') onChange(null)
   }
   return (
     <div
-      className="resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize the file panel" tabIndex={0} data-gr="tree-resize"
+      className="resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize the tree panel" tabIndex={0} data-gr="tree-resize"
       aria-valuenow={width} aria-valuemin={treeWidthLimits.min} aria-valuemax={treeWidthLimits.max}
       title="Drag to resize · double-click to reset" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onDoubleClick={() => onChange(null)} onKeyDown={key}
     />
@@ -481,11 +476,16 @@ function useHere<T extends HTMLElement>(is: (file: string) => boolean): { ref: R
   }, [here])
   return { ref, here }
 }
+/** The files of the pick, for the tree to mark. */
+const PickedCtx = createContext<Set<string>>(new Set())
 function TreeFile({ file, depth, comments, showDir, nested }: { file: FileDiff; depth: number; comments: number; showDir?: boolean; nested?: boolean }) {
   const sec = useContext(SectionsCtx).get(file.path)
+  const picked = useContext(PickedCtx).has(file.path)
   const { ref, here } = useHere<HTMLButtonElement>((f) => f === file.path)
+  // a click in the tree leaves the narrowing: all the files, at this one (and a tree that was opened over the code gives way to it)
+  const go = (): void => { useStore.getState().set({ treeOver: false }); focusAnchor({ kind: 'file', file: file.path }, { nav: true, top: true, all: true }) }
   return (
-    <button ref={ref} className={'tree-row leaf' + (sec ? ' in-sec' : '') + (here ? ' here' : '')} aria-current={here ? 'true' : undefined} style={{ paddingLeft: `${8 + depth * TREE_STEP}px`, ...(sec ? secStyle(sec.no) : {}) }} title={`${file.path} (${file.status})${sec ? ` · ${sec.section.name}` : ''}`} data-gr-tree-file={file.path} data-gr-status={file.status} onClick={() => focusAnchor({ kind: 'file', file: file.path }, { nav: true, top: true })}>
+    <button ref={ref} className={'tree-row leaf' + (sec ? ' in-sec' : '') + (here ? ' here' : '') + (picked ? ' picked' : '')} aria-current={here ? 'true' : undefined} style={{ paddingLeft: `${8 + depth * TREE_STEP}px`, ...(sec ? secStyle(sec.no) : {}) }} title={`${file.path} (${file.status})${sec ? ` · ${sec.section.name}` : ''}${picked ? ' · part of the pick' : ''}`} data-gr-tree-file={file.path} data-gr-status={file.status} data-gr-picked={picked ? 'true' : undefined} onClick={go}>
       {nested && <span className="tree-chev" />}
       <FileIcon path={file.path} />
       <span className={'tree-name' + (file.status === 'deleted' ? ' gone' : '')}>{baseName(file.path)}{showDir && file.path.includes('/') && <span className="muted small"> {file.path.slice(0, file.path.lastIndexOf('/'))}</span>}</span>
@@ -506,9 +506,11 @@ function TreeDir({ node, depth, closed, toggle, counts }: { node: DirNode; depth
   // folded, it stands for the files inside it. Only rows with every folder above them
   // open are drawn, so the folded one that holds the file is the nearest row on screen.
   const { ref, here } = useHere<HTMLButtonElement>((f) => !open && f.startsWith(node.path + '/'))
+  const picks = useContext(PickedCtx)
+  const picked = !open && [...picks].some((f) => f.startsWith(node.path + '/'))
   return (
     <>
-      <button ref={ref} className={'tree-row dir' + (here ? ' here' : '')} aria-current={here ? 'true' : undefined} style={{ paddingLeft: `${8 + depth * TREE_STEP}px` }} aria-expanded={open} title={node.path} data-gr-dir={node.path} onClick={() => toggle(node.path)}>
+      <button ref={ref} className={'tree-row dir' + (here ? ' here' : '') + (picked ? ' picked' : '')} aria-current={here ? 'true' : undefined} style={{ paddingLeft: `${8 + depth * TREE_STEP}px` }} aria-expanded={open} title={node.path} data-gr-dir={node.path} onClick={() => toggle(node.path)}>
         <Icon name={open ? 'chevDown' : 'chevRight'} size={12} className="tree-chev" /><Icon name="folder" className="folder" /><span className="tree-name">{node.name}</span>
       </button>
       {open && node.dirs.map((d) => <TreeDir key={d.path} node={d} depth={depth + 1} closed={closed} toggle={toggle} counts={counts} />)}
@@ -641,48 +643,19 @@ function Diagram({ section }: { section: Section }) {
   )
 }
 
-/** What the Code pane holds: for this step, the whole of what the "Files changed" tab was.
- *  Its toolbar stays put on top; under it the file tree, the files and (on a wide pane) an
- *  open section are columns that each scroll by themselves. The column of files is the
- *  Code pane's scroller: every jump to code moves it, and nothing else. `shown`: the pane
- *  is on screen (it is kept, hidden, while the Guide has the whole width). */
-function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
+/** The files of the change as the Code pane and the tree panel both need them: what is
+ *  left by the filters and the "changes" view, the tree of them, each file's section. */
+function useFiles(loaded: LoadedReview) {
   const mode = useStore((s) => s.diffMode)
   const filters = useStore((s) => s.filters)
   const query = useStore((s) => s.fileQuery)
-  const panelOpen = useStore((s) => s.panelOpen)
-  const treeAsked = useStore((s) => s.treeAsked)
-  const guideBeside = useStore((s) => s.guide != null)
-  const bigWindow = useWide(TREE_BESIDE_GUIDE)
-  const diffView = useStore((s) => s.diffView)
   const treeView = useStore((s) => s.treeView)
-  const view = useStore((s) => s.view)
-  const treeWidth = useStore((s) => s.treeWidth)
-  const { set, setFilters, setDiffView, setTreeView, setView, setTreeWidth } = useStore.getState()
+  const wsOnly = useStore((s) => s.wsOnly)
   const commitView = loaded.view?.commit
-  const shownCommit = commitView ? loaded.commits.find((c) => c.sha === commitView) : undefined
-  // what fits is decided by the pane's width, not the window's: beside a Guide the pane has a part of it
-  const root = useRef<HTMLDivElement>(null)
-  const width = usePaneWidth(root, CODE_STEPS)
-  const wide = width >= 1100
-  const medium = width >= 760
-  const roomy = width >= 900
-  const widest = width >= 1600
-  const fits = width >= SPLIT_BESIDE_SECTION
-  const scroll = useKeptScroll<HTMLDivElement>(shown)
-  // back on show, perhaps at another width than it was folded away with: on the line it showed, not at the same offset
-  useLayoutEffect(() => { if (shown) unparkCodePlace(scroll.y.current) }, [shown])       // eslint-disable-line react-hooks/exhaustive-deps
-  // how wide the column of files itself is (the pane less the tree and an open section)
-  const column = usePaneWidth(scroll.ref, FILES_STEPS)
-  const [closed, setClosed] = useState<Set<string>>(() => new Set())
-  const [, bump] = useState(0)
   const wt = loaded.state.walkthrough
-  const since = loaded.since
   const showSince = sinceActive(loaded)
   const anyViewed = Object.keys(loaded.state.viewedAt).length > 0
   const eff: DiffMode = commitView || (mode === 'since' && !showSince) || (mode === 'viewed' && !anyViewed) ? 'all' : mode
-  useEffect(() => { if (eff !== mode) set({ diffMode: eff }) }, [eff, mode, set])
-
   const counts = useMemo(() => {
     const m = new Map<string, number>()
     if (commitView) return m      // comments belong to the whole comparison
@@ -701,55 +674,6 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
     return m
   }, [wt])
   const sectionNo = (s: Section | null | undefined): number => (s ? (wt?.sections ?? []).indexOf(s) : -1)
-  const secPanelId = useStore((s) => s.sectionPanel)
-  const reviewed = useStore((s) => s.reviewedSections)
-  const secPanel = Boolean(secPanelId && wt?.sections.some((s) => s.id === secPanelId))
-  // In a pane from 1100px the open section is a column, not a drawer over the code. Up to
-  // 1600px there is no room for three columns: it takes the tree's place until it is
-  // closed, and where the diff column left beside it is too narrow to read two-up, the diff
-  // is unified. Between 760 and 1100px it is still a drawer, and the tree gives way just
-  // the same, or the two together would leave a sliver of the code the section is about.
-  // Beside a Guide a pane under 1100px has no room for that drawer either (it would leave a
-  // strip of the code the section is about): the section sits on top of the files instead.
-  const secOnTop = secPanel && guideBeside && !wide
-  const forTree = secPanel && ((medium && !widest) || secOnTop)
-  // Where the tree has room it shows whenever it is switched on: in a pane of 760px or
-  // more, and, while a Guide is beside the code, on a window wide enough for Guide, tree
-  // and code (the Workspace then leaves the tree its room). Elsewhere it folds by itself
-  // until it is asked for; in a pane under 760px it then sits above the files.
-  const treeRoom = medium && (!guideBeside || bigWindow)
-  const treeShown = panelOpen && (treeRoom || treeAsked) && !forTree
-  // (asked for where it folds, it does not come back by itself the next time it folds)
-  useEffect(() => { if (treeRoom && treeAsked) set({ treeAsked: false }) }, [treeRoom, treeAsked, set])
-  // (the files change width when the tree comes or goes: they are held on the line they showed)
-  const toggleTree = (): void => {
-    const hold = holdPlaces()
-    if (forTree) { showSection(null); set({ panelOpen: true }) }
-    else if (treeRoom) set({ panelOpen: !panelOpen })
-    else set({ panelOpen: true, treeAsked: !treeShown })
-    hold.settle()
-  }
-  // `t`: the tree, with the caret in its filter. The Code pane comes back first if it was folded away.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      const el = e.target as HTMLElement | null
-      if (e.key !== 't' || e.metaKey || e.ctrlKey || e.altKey || (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return
-      e.preventDefault()
-      useStore.getState().revealCode()
-      const hold = holdPlaces()
-      // an open section sits in the tree's place where there is no room for both: closing it brings the tree back
-      if (forTree) showSection(null)
-      set({ panelOpen: true, treeAsked: true })
-      hold.settle()
-      window.setTimeout(() => document.getElementById('gr-file-filter')?.focus({ preventScroll: true }), 30)
-    }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [forTree, set])
-  const canSplit = guideBeside ? column >= 700 : roomy && !(forTree && !fits)
-  const split = canSplit && (diffView ?? ((guideBeside ? column >= 900 : wide) ? 'split' : 'unified')) === 'split'
-
-  const wsOnly = useStore((s) => s.wsOnly)
   const wsPaths = useMemo(() => new Set(wsOnly.map((f) => f.path)), [wsOnly])
   const allFiles = useMemo(() => [...loaded.files, ...wsOnly.filter((f) => !loaded.files.some((x) => x.path === f.path))], [loaded.files, wsOnly])
   const kept = allFiles.filter((f) => !f.excluded)
@@ -760,39 +684,335 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
     && (eff === 'all' || f.untracked || (eff === 'since' ? f.sinceHunks !== undefined : f.sinceViewedHunks !== undefined)))
   const tree = useMemo(() => buildTree(visible), [visible]) // eslint-disable-line react-hooks/exhaustive-deps
   const bySection = filters.bySection && Boolean(wt)
-  const groups: { section: Section | null; files: FileDiff[] }[] = bySection
+  /** files in the groups and the order they are shown in: by section, or as the tree or the list has them */
+  const group = (files: FileDiff[], of: DirNode = buildTree(files)): { section: Section | null; files: FileDiff[] }[] => (bySection
     ? [
-        ...(wt?.sections ?? []).map((s) => ({ section: s, files: s.files.map((p) => visible.find((f) => f.path === p)).filter((f): f is FileDiff => Boolean(f)) })),
-        { section: null, files: visible.filter((f) => !sectionOf.has(f.path)) }
+        ...(wt?.sections ?? []).map((s) => ({ section: s, files: s.files.map((p) => files.find((f) => f.path === p)).filter((f): f is FileDiff => Boolean(f)) })),
+        { section: null, files: files.filter((f) => !sectionOf.has(f.path)) }
       ].filter((g) => g.files.length > 0)
-    : [{ section: null, files: treeView === 'tree' ? treeOrder(tree) : visible }]
+    : [{ section: null, files: treeView === 'tree' ? treeOrder(of) : files }])
+  return { wt, eff, commitView, showSince, anyViewed, counts, sectionOf, sections, sectionNo, wsPaths, kept, excluded, visible, tree, bySection, treeView, group, groups: group(visible, tree) }
+}
+
+/** Where the tree panel is. It is the bird's-eye view of the change, on the far right:
+ *  a column of its own wherever it has room (always while the code has the window to
+ *  itself; beside a Guide on a wide window, or when the reviewer pinned it), and otherwise
+ *  folded, to be opened over the Code pane when it is asked for. `forSection`: with the
+ *  Guide pane closed, an open walkthrough section sits in its place on a window that has
+ *  no room for code, section and tree (as it did while the tree was beside the code). */
+function useTreePlace(): { room: boolean; column: boolean; over: boolean; forSection: boolean; canPin: boolean } {
+  const guide = useStore((s) => s.guide != null)
+  const panelOpen = useStore((s) => s.panelOpen)
+  const pinned = useStore((s) => s.treePinned)
+  const treeOver = useStore((s) => s.treeOver)
+  const section = useStore((s) => Boolean(s.sectionPanel && s.loaded?.state.walkthrough?.sections.some((x) => x.id === s.sectionPanel)))
+  const medium = useWide(760)
+  const big = useWide(TREE_BESIDE_GUIDE)
+  const widest = useWide(1600)
+  const forSection = section && !guide && medium && !widest
+  const room = medium && (!guide || big || pinned)
+  const column = panelOpen && room && !forSection
+  return { room, column, over: treeOver && !column, forSection, canPin: guide && medium && !big }
+}
+
+/** The tree panel: the changed files as a tree (or a list, or grouped by walkthrough
+ *  section), with the filter. It marks the file under the reviewer's eyes and the files of
+ *  the pick. A click on a file shows it among all the files. `over`: it has no column of
+ *  its own and lies over the Code pane until a file is clicked in it, a pick is made, Esc,
+ *  or a click elsewhere. */
+function TreePanel({ loaded, over }: { loaded: LoadedReview; over: boolean }) {
+  const F = useFiles(loaded)
+  const filters = useStore((s) => s.filters)
+  const query = useStore((s) => s.fileQuery)
+  const treeWidth = useStore((s) => s.treeWidth)
+  const closedDirs = useStore((s) => s.closedDirs)
+  const treeAt = useStore((s) => s.treeAt)
+  const pinned = useStore((s) => s.treePinned)
+  const reviewed = useStore((s) => s.reviewedSections)
+  const pick = useStore((s) => s.pick)
+  const place = useTreePlace()
+  const { set, setFilters, setTreeWidth, setTreePinned } = useStore.getState()
+  const picked = useMemo(() => new Set(narrowingOf(pick, loaded)?.files ?? []), [pick, loaded])
+  const closed = useMemo(() => new Set(closedDirs), [closedDirs])
+  const toggleDir = (p: string): void => set({ closedDirs: closed.has(p) ? closedDirs.filter((x) => x !== p) : [...closedDirs, p] })
+  const box = useRef<HTMLElement>(null)
+  // Opened at a folder (from the path bar): unfold down to it, bring its row into view and
+  // flash it. A chain of folders with one child each is one row: the row that holds the
+  // folder stands for it. Where there are no folder rows (a list, or grouped by section),
+  // the first file under it does.
+  const at = treeAt?.seq
+  useEffect(() => {
+    const dir = useStore.getState().treeAt?.dir
+    if (!dir) return
+    const chain: string[] = []
+    for (let node = F.tree; ;) {
+      const next = node.dirs.find((d) => d.path === dir || d.path.startsWith(dir + '/') || dir.startsWith(d.path + '/'))
+      if (!next) break
+      chain.push(next.path)
+      if (!dir.startsWith(next.path + '/')) break
+      node = next
+    }
+    const folded = useStore.getState().closedDirs
+    if (chain.some((x) => folded.includes(x))) set({ closedDirs: folded.filter((x) => !chain.includes(x)) })
+    const t = window.setTimeout(() => {
+      const list = box.current?.querySelector<HTMLElement>('.tree')
+      const row = (chain.length ? list?.querySelector<HTMLElement>(`[data-gr-dir="${cssq(chain[chain.length - 1])}"]`) : null) ?? list?.querySelector<HTMLElement>(`[data-gr-tree-file^="${cssq(dir)}/"]`)
+      if (!list || !row) return
+      list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top - 8
+      row.classList.remove('gr-flash')
+      void row.offsetWidth
+      row.classList.add('gr-flash')
+      window.setTimeout(() => row.classList.remove('gr-flash'), 1000)
+    }, 60)
+    return () => window.clearTimeout(t)
+  }, [at])       // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!over) return
+    const shut = (): void => set({ treeOver: false })
+    const key = (e: KeyboardEvent): void => { if (e.key === 'Escape') shut() }
+    // (the toggle and the path bar open and close it themselves)
+    const off = (e: MouseEvent): void => { if (e.target instanceof Element && !box.current?.contains(e.target) && !e.target.closest('[data-gr="tree-toggle"], [data-gr="path-bar"], .menu-pop')) shut() }
+    document.addEventListener('keydown', key)
+    document.addEventListener('mousedown', off)
+    return () => { document.removeEventListener('keydown', key); document.removeEventListener('mousedown', off) }
+  }, [over, set])
+  return (
+    <PickedCtx.Provider value={picked}>
+    <SectionsCtx.Provider value={F.bySection ? NO_SECTIONS : F.sections}>
+      <aside className={'tree-panel' + (over ? ' over' : '')} ref={box} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties} aria-label="Files" data-gr="files-view" data-gr-files-view={F.bySection ? 'sections' : F.treeView} data-gr-tree={over ? 'over' : 'column'}>
+        {!over && <ResizeHandle width={treeWidth} onChange={setTreeWidth} />}
+        <div className="tree-filter">
+          <span className="filter-input"><Icon name="search" size={14} /><input id="gr-file-filter" name="gr-field" value={query} placeholder="Filter files…" aria-label="Filter files" onChange={(e) => set({ fileQuery: e.target.value })} /></span>
+          <Menu label={<Icon name="filter" />} className="btn sm icon" align="right" hook="file-filters" title="Filter options">
+            {(close) => (
+              <>
+                {(['hideViewed', 'onlyCommented', 'bySection', 'showExcluded'] as (keyof Filters)[]).map((k) => (
+                  <MenuItem key={k} checked={filters[k]} disabled={(k === 'bySection' && !F.wt) || (k === 'showExcluded' && F.excluded.length === 0)} onClick={() => { setFilters({ [k]: !filters[k] }); close() }}>
+                    {k === 'hideViewed' ? 'Hide viewed files' : k === 'onlyCommented' ? 'Only files with comments' : k === 'bySection' ? 'Group by walkthrough section' : `Show untracked files left out${F.excluded.length ? ` (${F.excluded.length})` : ''}`}
+                  </MenuItem>
+                ))}
+              </>
+            )}
+          </Menu>
+          {(place.canPin || over) && (
+            <button className={'btn sm icon' + (pinned && !over ? ' selected' : '')} aria-pressed={pinned && !over} data-gr="tree-pin" title={pinned && !over ? 'Unpin: the tree folds away while a Guide is open on a window this size' : 'Pin: keep the tree as a column beside the code'} aria-label={pinned && !over ? 'Unpin the tree panel' : 'Pin the tree panel'} disabled={over && !place.canPin} onClick={() => setTreePinned(!(pinned && !over))}>
+              <Icon name="pin" />
+            </button>
+          )}
+          {over && <button className="icon-btn" title="Close (Esc)" aria-label="Close the tree" data-gr="tree-close" onClick={() => set({ treeOver: false })}><Icon name="x" /></button>}
+        </div>
+        <div className="tree">
+          {F.visible.length === 0 && <div className="pop-note">No files match.</div>}
+          {F.bySection
+            ? F.groups.map((g) => (
+                <div key={g.section?.id ?? '-'} style={g.section ? secStyle(F.sectionNo(g.section)) : undefined}>
+                  <button className="tree-row dir sec" title={g.section?.desc} data-gr-tree-section={g.section?.id} data-gr-reviewed={g.section && reviewed.includes(g.section.id) ? 'true' : 'false'} onClick={() => { if (g.section) showSectionHeader(g.section.id) }}>
+                    {g.section && <span className="sec-dot" />}<span className="tree-name">{g.section?.name ?? 'Not in the walkthrough'}</span>
+                    {g.section && reviewed.includes(g.section.id) && <span className="sec-tick" role="img" aria-label="Reviewed" title="You marked this section reviewed"><Icon name="check" size={12} /></span>}
+                    <span className="muted small">{g.files.length}</span>
+                  </button>
+                  {g.files.map((f) => <TreeFile key={f.path} file={f} depth={1} comments={F.counts.get(f.path) ?? 0} showDir />)}
+                </div>
+              ))
+            : F.treeView === 'tree'
+              ? <>{F.tree.dirs.map((d) => <TreeDir key={d.path} node={d} depth={0} closed={closed} toggle={toggleDir} counts={F.counts} />)}{F.tree.files.map((f) => <TreeFile key={f.path} file={f} depth={0} comments={F.counts.get(f.path) ?? 0} nested />)}</>
+              : F.visible.map((f) => <TreeFile key={f.path} file={f} depth={0} comments={F.counts.get(f.path) ?? 0} showDir />)}
+        </div>
+      </aside>
+    </SectionsCtx.Provider>
+    </PickedCtx.Provider>
+  )
+}
+
+/** The path bar: where the file under the reviewer's eyes lives, folder by folder, in its
+ *  walkthrough section's colour. It follows the Code pane as it scrolls, so "where am I"
+ *  can be read while the tree is folded away; a click on a folder opens the tree at it. */
+function PathBar({ sections, onDir }: { sections: SectionMap; onDir: (dir: string) => void }) {
+  const file = useStore((s) => s.currentFile)
+  if (!file) return <nav className="path-bar" aria-label="Where this file is" data-gr="path-bar" />
+  const parts = file.split('/')
+  const name = parts.pop() ?? file
+  const dirs = parts.map((d, i) => ({ name: d, path: parts.slice(0, i + 1).join('/') }))
+  // a long path keeps its ends: its first folder and its last two
+  const shown: ({ name: string; path: string; title?: string })[] = dirs.length > 4
+    ? [dirs[0], { name: '…', path: dirs[dirs.length - 3].path, title: dirs.slice(1, -2).map((d) => d.name).join(' / ') }, ...dirs.slice(-2)]
+    : dirs
+  const sec = sections.get(file)
+  return (
+    <nav className={'path-bar' + (sec ? ' in-sec' : '')} style={sec ? secStyle(sec.no) : undefined} aria-label="Where this file is" data-gr="path-bar" data-gr-path={file} title={sec ? `${file} · ${sec.section.name}` : file}>
+      {sec && <span className="sec-dot" />}
+      {shown.map((d) => (
+        <Fragment key={d.name + d.path}>
+          <button className="path-dir" data-gr-path-dir={d.path} title={`${d.title ? `${d.title} — ` : ''}Open the tree at ${d.path}/`} onClick={() => onDir(d.path)}>{d.name}</button>
+          <span className="path-sep" aria-hidden="true">/</span>
+        </Fragment>
+      ))}
+      <span className="path-file" data-gr-path-file={file}><FileIcon path={file} size={14} />{name}</span>
+    </nav>
+  )
+}
+
+/** What the Code pane is showing beside a Guide, in words, with the way to the rest: the
+ *  pick's code only ("Show all files"), the list of changed files while nothing is picked,
+ *  or all the files (and the way back to the pick, or to the list). */
+function NarrowChip({ show, to, count }: { show: 'all' | 'pick' | 'list'; to: Narrowing | null; count: number }) {
+  const { showAllFiles } = useStore.getState()
+  // (the files that were hidden come in above the line being read: it is held where it is)
+  const all = (): void => { const hold = holdCodePlace(); showAllFiles(true); hold.settle() }
+  return (
+    <span className="narrowing" data-gr="narrowing" data-gr-narrowing={show}>
+      {show === 'pick' && to && <><span className="muted">Showing</span><strong className="clip">{to.label}</strong><button className="link" data-gr="show-all" title="Leave the pick: all the changed files, at this one. The pick stays outlined in the Guide." onClick={all}>Show all files</button></>}
+      {show === 'list' && <><span className="muted">{plural(count, 'changed file')}: pick one, or something in the Guide</span><button className="link" data-gr="show-all" onClick={all}>Show all files</button></>}
+      {show === 'all' && <><strong>All files</strong>{to
+        ? <button className="link clip" data-gr="show-pick" title="Back to the pick's code only" onClick={() => showPick(useStore.getState().pick)}>Only {to.label}</button>
+        : <button className="link" data-gr="show-list" title="Back to the list of changed files" onClick={() => showAllFiles(false)}>List the files</button>}</>}
+    </span>
+  )
+}
+
+/** The changed files as a list: what the Code pane shows beside a Guide while nothing is
+ *  picked. A click on one shows that file (a pick, so Back returns to the list). */
+function FileList({ files, counts }: { files: FileDiff[]; counts: Map<string, number> }) {
+  return (
+    <div className="list-box file-list" data-gr="file-list">
+      {files.length === 0 && <div className="pop-note">No files match.</div>}
+      {files.map((f) => (
+        <button key={f.path} className="list-row file-row" data-gr-list-file={f.path} data-gr-viewed={f.viewed === 'viewed' ? 'true' : f.viewed === 'changed' ? 'changed' : 'false'} title={`Show ${f.path}`} onClick={() => showPick({ file: f.path })}>
+          <FileIcon path={f.path} />
+          <span className="grow file-row-name"><span className={'strong' + (f.status === 'deleted' ? ' gone' : '')}>{baseName(f.path)}</span>{f.path.includes('/') && <span className="muted small mono"> {f.path.slice(0, f.path.lastIndexOf('/'))}</span>}</span>
+          {STATUS_MARK[f.status] && <span className={'tree-status st-' + f.status}>{STATUS_MARK[f.status]}</span>}
+          {(counts.get(f.path) ?? 0) > 0 && <span className="tree-dot" title={plural(counts.get(f.path) ?? 0, 'comment')}>{counts.get(f.path)}</span>}
+          <DiffStat add={f.add} del={f.del} />
+          <span className="file-row-viewed" title={f.viewed === 'viewed' ? 'Viewed' : f.viewed === 'changed' ? 'Changed since last view' : 'Not viewed yet'}>{f.viewed === 'viewed' ? <Icon name="check" size={14} className="tree-viewed" /> : f.viewed === 'changed' ? <span className="tree-changed" /> : null}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** What the Code pane holds: the diff. On top its toolbar, then the path bar with what is
+ *  being shown; under them the files, and (on a wide pane) an open walkthrough section
+ *  beside them. The column of files is the Code pane's scroller: every jump to code moves
+ *  it, and nothing else.
+ *  Beside a Guide the pane is narrowed: to the pick's code, or, while nothing is picked, to
+ *  the list of changed files; "Show all files", a click in the tree or a jump elsewhere
+ *  leaves the narrowing. With the Guide pane closed it shows all the files. A file's diff
+ *  is drawn the first time it is on show and then kept, hidden while the narrowing leaves
+ *  it out: a pick that returns to it finds it as it was, and nothing is highlighted twice.
+ *  `shown`: the pane is on screen (it is kept, hidden, while the Guide has the whole width). */
+function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
+  const F = useFiles(loaded)
+  const { wt, eff, commitView, bySection, sectionOf, sections, sectionNo, kept, excluded, visible } = F
+  const mode = useStore((s) => s.diffMode)
+  const filters = useStore((s) => s.filters)
+  const panelOpen = useStore((s) => s.panelOpen)
+  const treeOver = useStore((s) => s.treeOver)
+  const guideBeside = useStore((s) => s.guide != null)
+  const pick = useStore((s) => s.pick)
+  const showAll = useStore((s) => s.showAll)
+  const diffView = useStore((s) => s.diffView)
+  const treeView = useStore((s) => s.treeView)
+  const view = useStore((s) => s.view)
+  const { set, setDiffView, setTreeView, setView } = useStore.getState()
+  const shownCommit = commitView ? loaded.commits.find((c) => c.sha === commitView) : undefined
+  const place = useTreePlace()
+  // With the Guide pane closed the code and the tree have the window, and what fits is
+  // decided by the window, as it was. Beside a Guide it is decided by the pane's own width.
+  const win = { medium: useWide(760), roomy: useWide(900), wide: useWide(1100), fits: useWide(SPLIT_BESIDE_SECTION) }
+  const root = useRef<HTMLDivElement>(null)
+  const width = usePaneWidth(root, CODE_STEPS)
+  const scroll = useKeptScroll<HTMLDivElement>(shown)
+  // back on show, perhaps at another width than it was folded away with: on the line it showed, not at the same offset
+  useLayoutEffect(() => { if (shown) unparkCodePlace(scroll.y.current) }, [shown])       // eslint-disable-line react-hooks/exhaustive-deps
+  // how wide the column of files itself is (the pane less an open section)
+  const column = usePaneWidth(scroll.ref, FILES_STEPS)
+  const [, bump] = useState(0)
+  const since = loaded.since
+  useEffect(() => { if (eff !== mode) set({ diffMode: eff }) }, [eff, mode, set])
+
+  const secPanelId = useStore((s) => s.sectionPanel)
+  const reviewed = useStore((s) => s.reviewedSections)
+  const secPanel = Boolean(secPanelId && wt?.sections.some((s) => s.id === secPanelId))
+  // An open section is a column beside the files where there is room for it: a window
+  // from 1100px with the Guide pane closed (up to 1600px it then takes the tree's place),
+  // a Code pane from 1100px beside a Guide. Below that it is a drawer over the code with
+  // the Guide pane closed; beside a Guide, where a drawer would leave a strip of the code
+  // the section is about, it sits on top of the files.
+  const secCol = guideBeside ? width >= 1100 : win.wide
+  const secOnTop = secPanel && guideBeside && !secCol
+  const toggleTree = (): void => {
+    const hold = holdPlaces()
+    if (place.forSection) { showSection(null); set({ panelOpen: true }) }
+    else if (place.room) set({ panelOpen: !panelOpen, treeOver: false })
+    else set({ treeOver: !treeOver })
+    hold.settle()
+  }
+  /** the tree, on show: its column where it has room, else over the code (an open section in its place gives way) */
+  const openTree = (): void => {
+    const hold = holdPlaces()
+    if (place.forSection) showSection(null)
+    useStore.getState().openTree()
+    hold.settle()
+  }
+  // `t`: the tree, with the caret in its filter. The Code pane comes back first if it was folded away.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const el = e.target as HTMLElement | null
+      if (e.key !== 't' || e.metaKey || e.ctrlKey || e.altKey || (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return
+      e.preventDefault()
+      useStore.getState().revealCode()
+      openTree()
+      window.setTimeout(() => document.getElementById('gr-file-filter')?.focus({ preventScroll: true }), 60)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  })
+  const treeShown = place.column || place.over
+  const canSplit = guideBeside ? column >= 700 : win.roomy && !(place.forSection && !win.fits)
+  const split = canSplit && (diffView ?? ((guideBeside ? column >= 900 : win.wide) ? 'split' : 'unified')) === 'split'
+
+  // What the pane shows: all the files; the pick's only; or the list of changed files.
+  // (A commit view is another diff: it is shown whole.)
+  const to = useMemo(() => (guideBeside ? narrowingOf(pick, loaded) : null), [guideBeside, pick, loaded])
+  const show: 'all' | 'pick' | 'list' = !guideBeside || showAll || commitView ? 'all' : to ? 'pick' : 'list'
+  const only = useMemo(() => new Set(show === 'pick' ? to?.files ?? [] : []), [show, to])
+  const inAll = useMemo(() => new Set(visible.map((f) => f.path)), [visible])       // eslint-disable-line react-hooks/exhaustive-deps
+  const on = (f: FileDiff): boolean => (show === 'all' ? inAll.has(f.path) : show === 'pick' && only.has(f.path))
+  // The boxes that can be in the pane: what the filters leave, and the pick's files
+  // whatever the filters say. They keep their places in one list, so that a file that goes
+  // out of sight and comes back is the same box.
+  const pool = to ? [...visible, ...kept.filter((f) => to.files.includes(f.path) && !inAll.has(f.path))] : visible
+  const groups = F.group(pool, pool === visible ? F.tree : undefined)
+  // a file's box is drawn the first time the file is on show, and kept from then on
+  const drawn = useRef(new Set<string>())
+  for (const g of groups) for (const f of g.files) if (on(f)) drawn.current.add(f.path)
   const viewed = kept.filter((f) => f.viewed === 'viewed').length
   // the list of reviewed ids can hold sections of an earlier walkthrough: count this one's
   const secCount = wt?.sections.length ?? 0
   const secDone = (wt?.sections ?? []).filter((s) => reviewed.includes(s.id)).length
   const secNext = wt?.sections.find((s) => !reviewed.includes(s.id)) ?? wt?.sections[0]
-  // the file under the top of the pane, for the tree and the section panel to mark:
-  // followed anew when other boxes are drawn, or the same ones in another order or under
-  // other groups, which no scroll or resize tells
+  // the file under the top of the pane, for the path bar, the tree and the section panel
+  // to mark: followed anew when other boxes are on show, or the same ones in another order
+  // or under other groups, which no scroll or resize tells
   const list = useRef<HTMLDivElement>(null)
-  const order = groups.flatMap((g) => g.files.map((f) => f.path)).join('\n')
+  const order = groups.flatMap((g) => g.files.filter(on).map((f) => f.path)).join('\n')
   useEffect(() => (list.current ? followFiles(list.current) : undefined), [order, bySection, filters.showExcluded])
-  const toggleDir = (p: string): void => setClosed((prev) => { const next = new Set(prev); if (next.has(p)) next.delete(p); else next.add(p); return next })
+  // (the list of files has no file under the reviewer's eyes)
+  useEffect(() => { if (show === 'list') useStore.setState({ currentFile: null }) }, [show])
   const modeLabel = shownCommit ? `${short(shownCommit.sha)} ${shownCommit.subject}` : commitView ? short(commitView) : eff === 'all' ? 'All changes' : eff === 'since' ? (since?.kind === 'approved' ? 'Since approved' : 'Since reviewed') : 'Since viewed'
-  const pick = (m: DiffMode, close: () => void): void => { set({ diffMode: m }); if (commitView) void setView({ commit: undefined }); close() }
+  const pickMode = (m: DiffMode, close: () => void): void => { set({ diffMode: m }); if (commitView) void setView({ commit: undefined }); close() }
   const dirty = loaded.dirty && loaded.files.some((f) => f.uncommitted)
   const stale = loaded.state.comments.filter((c) => c.status === 'outdated' && c.anchor.kind === 'diff')
 
   return (
     <div className={'files-tab' + below(width, [520, 760, 1200])} ref={root}>
       <div className="files-toolbar">
-        <button className="btn sm icon" title={treeShown ? 'Hide the file tree' : forTree ? 'Show the file tree (closes the section beside the code)' : 'Show the file tree'} aria-label="Toggle file tree" aria-pressed={treeShown} data-gr="tree-toggle" onClick={toggleTree}><Icon name="sidebar" /></button>
         <Menu label={<><Icon name="commit" /><span className="mode-label">{modeLabel}</span><Icon name="chevDown" size={12} /></>} className="btn sm mode-btn" hook="diff-mode" title="Which changes to show">
           {(close) => (
             <div className="commit-menu">
-              <MenuItem checked={!commitView && eff === 'all'} onClick={() => pick('all', close)}>Show all changes <span className="muted small">{plural(loaded.commits.length, 'commit')}</span></MenuItem>
-              {showSince && since && <MenuItem checked={!commitView && eff === 'since'} title={`Since ${short(since.sha)}`} onClick={() => pick('since', close)}>{since.kind === 'approved' ? 'Since approved' : 'Since reviewed'} <span className="mono muted small">{short(since.sha)}</span></MenuItem>}
-              {anyViewed && <MenuItem checked={!commitView && eff === 'viewed'} onClick={() => pick('viewed', close)}>Since viewed</MenuItem>}
+              <MenuItem checked={!commitView && eff === 'all'} onClick={() => pickMode('all', close)}>Show all changes <span className="muted small">{plural(loaded.commits.length, 'commit')}</span></MenuItem>
+              {F.showSince && since && <MenuItem checked={!commitView && eff === 'since'} title={`Since ${short(since.sha)}`} onClick={() => pickMode('since', close)}>{since.kind === 'approved' ? 'Since approved' : 'Since reviewed'} <span className="mono muted small">{short(since.sha)}</span></MenuItem>}
+              {F.anyViewed && <MenuItem checked={!commitView && eff === 'viewed'} onClick={() => pickMode('viewed', close)}>Since viewed</MenuItem>}
               {loaded.commits.length > 0 && <div className="menu-sep" />}
               {loaded.commits.map((c) => (
                 <button key={c.sha} className="menu-item commit-item" role="menuitem" data-gr-commit-pick={c.sha} onClick={() => { void setView({ commit: c.sha }); close() }}>
@@ -819,10 +1039,10 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
           {(close) => (
             <>
               <div className="pop-head">Diff view</div>
-              <MenuItem checked={split} disabled={!canSplit} title={canSplit ? undefined : guideBeside ? 'Not enough room beside the Guide — drag the divider, or close the Guide pane, to split the diff' : roomy ? 'Not enough room beside the section — close it to split the diff' : undefined} onClick={() => { const hold = holdCodePlace(); setDiffView('split'); hold.settle(); close() }}>Split</MenuItem>
+              <MenuItem checked={split} disabled={!canSplit} title={canSplit ? undefined : guideBeside ? 'Not enough room beside the Guide — drag the divider, or close the Guide pane, to split the diff' : win.roomy ? 'Not enough room beside the section — close it to split the diff' : undefined} onClick={() => { const hold = holdCodePlace(); setDiffView('split'); hold.settle(); close() }}>Split</MenuItem>
               <MenuItem checked={!split} onClick={() => { if (canSplit) { const hold = holdCodePlace(); setDiffView('unified'); hold.settle() } close() }}>Unified</MenuItem>
               <label className="menu-item" title="Leave out changes that only alter whitespace"><span className="menu-check"><input type="checkbox" name="gr-field" data-gr="hide-whitespace" checked={Boolean(view.ignoreWhitespace)} onChange={(e) => { void setView({ ignoreWhitespace: e.target.checked }); close() }} /></span>Hide whitespace</label>
-              <div className="pop-head">File panel</div>
+              <div className="pop-head">Tree panel</div>
               <MenuItem checked={treeView === 'tree'} onClick={() => { setTreeView('tree'); close() }}>Tree</MenuItem>
               <MenuItem checked={treeView === 'list'} onClick={() => { setTreeView('list'); close() }}>List</MenuItem>
               <div className="pop-head">Theme</div>
@@ -831,6 +1051,11 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
             </>
           )}
         </Menu>
+        <button className="btn sm icon tree-toggle" title={treeShown ? 'Hide the tree panel' : place.forSection ? 'Show the tree panel (closes the section beside the code)' : place.room ? 'Show the tree panel' : 'Show the tree panel, over the code'} aria-label="Toggle the tree panel" aria-pressed={treeShown} data-gr="tree-toggle" onClick={toggleTree}><Icon name="sidebar" /></button>
+      </div>
+      <div className="code-where" data-gr="code-where">
+        <PathBar sections={sections} onDir={(dir) => { if (place.forSection) showSection(null); useStore.getState().revealDir(dir) }} />
+        {guideBeside && !commitView && <NarrowChip show={show} to={to} count={visible.length} />}
       </div>
 
       {commitView && (
@@ -839,65 +1064,28 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
           <button className="btn sm" onClick={() => void setView({ commit: undefined })}>Show all changes</button>
         </div>
       )}
-      <div className={'files-layout' + (treeShown ? '' : ' no-panel') + (secPanel ? ' with-sec' : '') + (wide ? ' sec-col' : secOnTop ? ' sec-top' : '') + (widest ? ' sec-3' : '')} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties}>
-        {treeShown && (
-          <SectionsCtx.Provider value={bySection ? NO_SECTIONS : sections}>
-          <aside className="tree-panel" aria-label="Files" data-gr="files-view" data-gr-files-view={bySection ? 'sections' : treeView}>
-            <ResizeHandle width={treeWidth} onChange={setTreeWidth} />
-            <div className="tree-filter">
-              <span className="filter-input"><Icon name="search" size={14} /><input id="gr-file-filter" name="gr-field" value={query} placeholder="Filter files…" aria-label="Filter files" onChange={(e) => set({ fileQuery: e.target.value })} /></span>
-              <Menu label={<Icon name="filter" />} className="btn sm icon" align="right" hook="file-filters" title="Filter options">
-                {(close) => (
-                  <>
-                    {(['hideViewed', 'onlyCommented', 'bySection', 'showExcluded'] as (keyof Filters)[]).map((k) => (
-                      <MenuItem key={k} checked={filters[k]} disabled={(k === 'bySection' && !wt) || (k === 'showExcluded' && excluded.length === 0)} onClick={() => { setFilters({ [k]: !filters[k] }); close() }}>
-                        {k === 'hideViewed' ? 'Hide viewed files' : k === 'onlyCommented' ? 'Only files with comments' : k === 'bySection' ? 'Group by walkthrough section' : `Show untracked files left out${excluded.length ? ` (${excluded.length})` : ''}`}
-                      </MenuItem>
-                    ))}
-                  </>
-                )}
-              </Menu>
-            </div>
-            <div className="tree">
-              {visible.length === 0 && <div className="pop-note">No files match.</div>}
-              {bySection
-                ? groups.map((g) => (
-                    <div key={g.section?.id ?? '-'} style={g.section ? secStyle(sectionNo(g.section)) : undefined}>
-                      <button className="tree-row dir sec" title={g.section?.desc} data-gr-tree-section={g.section?.id} data-gr-reviewed={g.section && reviewed.includes(g.section.id) ? 'true' : 'false'} onClick={() => { const el = g.section && list.current?.querySelector<HTMLElement>(`[data-gr-section="${cssq(g.section.id)}"]`); if (el) showInPane(el, 'top') }}>
-                        {g.section && <span className="sec-dot" />}<span className="tree-name">{g.section?.name ?? 'Not in the walkthrough'}</span>
-                        {g.section && reviewed.includes(g.section.id) && <span className="sec-tick" role="img" aria-label="Reviewed" title="You marked this section reviewed"><Icon name="check" size={12} /></span>}
-                        <span className="muted small">{g.files.length}</span>
-                      </button>
-                      {g.files.map((f) => <TreeFile key={f.path} file={f} depth={1} comments={counts.get(f.path) ?? 0} showDir />)}
-                    </div>
-                  ))
-                : treeView === 'tree'
-                  ? <>{tree.dirs.map((d) => <TreeDir key={d.path} node={d} depth={0} closed={closed} toggle={toggleDir} counts={counts} />)}{tree.files.map((f) => <TreeFile key={f.path} file={f} depth={0} comments={counts.get(f.path) ?? 0} nested />)}</>
-                  : visible.map((f) => <TreeFile key={f.path} file={f} depth={0} comments={counts.get(f.path) ?? 0} showDir />)}
-            </div>
-          </aside>
-          </SectionsCtx.Provider>
-        )}
-        <div className="code-scroll" data-gr-scroll="code" ref={scroll.ref} onScroll={scroll.onScroll}>
-        <div className="files-list" ref={list}>
-          {kept.length === 0 && <div className="blankslate"><h3>No changes</h3><p className="muted">The two sides of this comparison are identical.</p></div>}
-          {kept.length > 0 && visible.length === 0 && <div className="blankslate"><h3>No files match</h3><p className="muted">Change the filter or the “{modeLabel}” view.</p></div>}
+      <div className={'files-layout' + (secPanel ? ' with-sec' : '') + (secCol ? ' sec-col' : secOnTop ? ' sec-top' : '')}>
+        <div className="code-scroll" data-gr-scroll="code" data-gr-show={show} ref={scroll.ref} onScroll={scroll.onScroll}>
+        {show === 'list' && <FileList files={F.groups.flatMap((g) => g.files)} counts={F.counts} />}
+        <div className="files-list" ref={list} hidden={show === 'list'}>
+          {show === 'all' && kept.length === 0 && <div className="blankslate"><h3>No changes</h3><p className="muted">The two sides of this comparison are identical.</p></div>}
+          {show === 'all' && kept.length > 0 && visible.length === 0 && <div className="blankslate"><h3>No files match</h3><p className="muted">Change the filter or the “{modeLabel}” view.</p></div>}
           {groups.map((g) => (
-            <div key={g.section?.id ?? '-'} className={'file-group' + (bySection && g.section ? ' sec' : '')} style={bySection && g.section ? secStyle(sectionNo(g.section)) : undefined}>
+            <div key={g.section?.id ?? '-'} className={'file-group' + (bySection && g.section ? ' sec' : '')} style={bySection && g.section ? secStyle(sectionNo(g.section)) : undefined} hidden={!g.files.some(on)}>
               {bySection && (g.section
                 ? <SectionHeader section={g.section} files={g.files} no={sectionNo(g.section)} />
                 : <div className="sec-head plain" id="gr-loose"><h3>Not in the walkthrough</h3><span className="muted small">{plural(g.files.length, 'file')}</span></div>)}
-              {g.files.map((f) => <FileBox key={f.path} file={f} split={split} whitespaceOnly={wsPaths.has(f.path)} section={sectionOf.get(f.path)} sectionNo={sections.get(f.path)?.no} grouped={bySection} note={sectionOf.get(f.path)?.plainNotes?.[f.path]} />)}
+              {g.files.map((f) => (drawn.current.has(f.path) ? <FileBox key={f.path} file={f} split={split} hidden={!on(f)} whitespaceOnly={F.wsPaths.has(f.path)} section={sectionOf.get(f.path)} sectionNo={sections.get(f.path)?.no} grouped={bySection} note={sectionOf.get(f.path)?.plainNotes?.[f.path]} /> : null))}
             </div>
           ))}
-          {filters.showExcluded && excluded.length > 0 && (
+          {show === 'all' && filters.showExcluded && excluded.length > 0 && (
             <div className="file-group" id="gr-excluded">
               <div className="sec-head plain"><h3>Untracked, left out of the review</h3><span className="muted small">{plural(excluded.length, 'file')}</span></div>
               {excluded.map((f) => <FileBox key={f.path} file={f} split={split} />)}
             </div>
           )}
         </div>
-        {stale.length > 0 && (
+        {show === 'all' && stale.length > 0 && (
           <div className="unplaced page-level" data-gr="outdated">
             <div className="unplaced-head">Outdated comments — the lines they were written on are gone</div>
             {stale.map((c) => <Thread key={c.id} c={c} showAnchor />)}
@@ -908,6 +1096,12 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
       </div>
     </div>
   )
+}
+
+/** A link to code, as a chip. In a Guide it is a pick: the Code pane is narrowed to it, and the chip is marked while it is the pick. */
+function CodeChip({ target, children, title, hook, disabled }: { target: FocusTarget | null; children: ReactNode; title?: string; hook?: string; disabled?: boolean }) {
+  const link = usePickLink(target)
+  return <button className={'ref-chip mono link-chip' + (link.picked ? ' picked' : '')} data-gr={hook} title={title} disabled={disabled || !target} aria-pressed={link.from ? link.picked : undefined} onClick={() => target && focusAnchor(target, { from: link.from })}>{children}</button>
 }
 
 // ── Conversation ──────────────────────────────────────────────
@@ -923,7 +1117,7 @@ function TourCard({ stops, loop }: { stops: TourStop[]; loop?: boolean }) {
   )
 }
 function ActionChip({ action }: { action: UiAction }) {
-  if (action.kind === 'focus') return <button className="ref-chip mono link-chip" data-gr="chat-focus" title="Show this in the Code pane" onClick={() => focusAnchor(action.target)}>{targetLabel(action.target)}</button>
+  if (action.kind === 'focus') return <CodeChip target={action.target} hook="chat-focus" title="Show this in the Code pane">{targetLabel(action.target)}</CodeChip>
   if (action.kind === 'tour') return <TourCard stops={action.stops} loop={action.loop} />
   return null
 }
@@ -1076,13 +1270,13 @@ function FactItem({ row, loaded, listAt }: { row: FactRow; loaded: LoadedReview;
       <Md text={row.statement} className="fact-statement" />
       <div className="fact-meta small">
         <span className="muted">stands in</span>
-        {stands ? <button className="ref-chip mono link-chip" data-gr="fact-where" title="Show it in the Code pane" onClick={() => focusAnchor(stands)}>{w.label}</button>
+        {stands ? <CodeChip target={stands} hook="fact-where" title="Show it in the Code pane">{w.label}</CodeChip>
           : w.artifact && w.file ? <button className="ref-chip mono link-chip" data-gr="fact-where" title="Open the document in Spec & plan" onClick={() => { set({ docPath: w.file ?? null }); showGuide('spec') }}>{w.label}</button>
             : <span className={w.file || w.commit ? 'mono' : ''} data-gr="fact-where">{w.label}{w.file && <span className="muted"> (not part of this change)</span>}</span>}
         {row.contradicts && (
           <>
             <span className="muted">contradicted by</span>
-            {at ? <button className="ref-chip mono link-chip" data-gr="fact-line" title="Show the line in the Code pane" onClick={() => focusAnchor(at)}>{row.contradicts.file}:{line}{row.contradicts.side === 'old' ? ' (old)' : ''}</button>
+            {at ? <CodeChip target={at} hook="fact-line" title="Show the line in the Code pane">{row.contradicts.file}:{line}{row.contradicts.side === 'old' ? ' (old)' : ''}</CodeChip>
               : <span className="mono" data-gr="fact-line">{row.contradicts.file}:{line}<span className="muted">{row.contradicts.inDiff ? ' (that line is no longer in the code)' : ' (not part of this change)'}</span></span>}
           </>
         )}
@@ -1181,7 +1375,7 @@ function Description({ loaded }: { loaded: LoadedReview }) {
                   {s.what && <Md text={s.what} />}
                   <Diagram section={s} />
                   <div className="row gap wrap">
-                    {s.files.map((p) => <button key={p} className="ref-chip mono link-chip" onClick={() => focusAnchor({ kind: 'file', file: p })}>{p}</button>)}
+                    {s.files.map((p) => <CodeChip key={p} target={{ kind: 'file', file: p }}>{p}</CodeChip>)}
                   </div>
                   <div className="row gap">
                     <label className={'viewed-box' + (done ? ' on' : '')}><input type="checkbox" name="gr-field" checked={done} onChange={() => void toggleSectionReviewed(s.id)} data-gr="section-reviewed" /> Reviewed</label>
@@ -1216,7 +1410,7 @@ function MessageEntry({ m, request, answered }: { m: Message; request?: ReviewRe
     return (
       <>
         <Box author="user" label={m.threadId ? 'asked a follow-up' : 'asked'} at={m.at} hook={{ 'data-gr-message': m.id }}>
-          {m.anchor && <button className="ref-chip mono link-chip" disabled={!t} onClick={() => t && focusAnchor(t)}>{anchorLabel(m.anchor)}</button>}
+          {m.anchor && <CodeChip target={t}>{anchorLabel(m.anchor)}</CodeChip>}
           {first && <div className="muted small ask-follows" data-gr="follows">Follows <button className="link" title="Show the question that opened this thread" onClick={() => focusQuestion(first.requestId!)}>“{first.text.length > FOLLOWS_QUOTE ? first.text.slice(0, FOLLOWS_QUOTE).trimEnd() + '…' : first.text}”</button></div>}
           <div className="pre-wrap">{m.text}</div>
           {request && !answered && isOpen(request) && <Progress r={request} />}
@@ -1492,7 +1686,8 @@ const GUIDE_STEPS = [520, 760, 1000, 1200] as const
  *  scroll position, its open parts, its pick and whatever was being written in it. */
 function GuideBody({ id, shown, children }: { id: Guide; shown: boolean; children: ReactNode }) {
   const scroll = useKeptScroll<HTMLDivElement>(shown)
-  return <div className="guide-scroll" role="tabpanel" data-gr-scroll={id} data-gr-guide={id} hidden={!shown} ref={scroll.ref} onScroll={scroll.onScroll}>{children}</div>
+  // (what is drawn in here knows it is in a Guide: a jump to code from it is a pick)
+  return <div className="guide-scroll" role="tabpanel" data-gr-scroll={id} data-gr-guide={id} hidden={!shown} ref={scroll.ref} onScroll={scroll.onScroll}><GuideCtx.Provider value={id}>{children}</GuideCtx.Provider></div>
 }
 
 /** The divider between the Guide pane and the Code pane: drag it (or use the arrow keys)
@@ -1548,10 +1743,11 @@ function PaneDivider({ frame, pct, tree, onChange }: { frame: RefObject<HTMLElem
   )
 }
 
-/** The workspace: the Guide pane on the left and the Code pane beside it, each scrolling by
- *  itself, with a divider between them. The Guide pane can be closed (the code alone, as
- *  "Files changed" was) or given the whole width; a window too narrow for both shows one
- *  pane at a time. A jump to code moves the Code pane and nothing else. */
+/** The workspace: the Guide pane on the left, the Code pane beside it and the tree panel
+ *  on the far right, each scrolling by itself, with a divider between Guide and code. The
+ *  Guide pane can be closed (code and tree, as "Files changed" was) or given the whole
+ *  width; a window too narrow for two panes shows one at a time. A jump to code moves the
+ *  Code pane and nothing else. */
 function Workspace({ loaded }: { loaded: LoadedReview }) {
   const guide = useStore((s) => s.guide)
   const guideWide = useStore((s) => s.guideWide)
@@ -1566,15 +1762,15 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
   if (guide && !seen.includes(guide)) setSeen([...seen, guide])
   // where the reviewer dragged the divider to, as the Guide pane's share of the room; until then each Guide starts at its own width
   const [dragged, setDragged] = useState<number | null>(null)
-  // The room the two panes share is what the tree leaves: for this step the tree is still a
-  // column inside the Code pane, and it keeps its width whatever the Guide is given.
-  const treeOn = useStore((s) => s.panelOpen)
+  const place = useTreePlace()
   const treeWidth = useStore((s) => s.treeWidth)
-  const bigWindow = useWide(TREE_BESIDE_GUIDE)
   const guideShown = guide != null && (twoFit || front === 'guide')
   const codeShown = guide == null || (twoFit ? !guideWide : front === 'code')
   const both = guideShown && codeShown
-  const tree = both && treeOn && bigWindow ? treeWidth + TREE_GAP : 0
+  // The room Guide and code share is what the tree panel leaves, wherever the tree has a
+  // column to be in, whether it is switched on just now or not: hiding the tree gives its
+  // room to the code, and the Guide (a diagram laid out for its width) stays as it is.
+  const tree = both && place.room ? treeWidth + TREE_PAD : 0
   const pct = dragged ?? GUIDE_START[guide ?? 'conversation']
   const row = <GuideRow loaded={loaded} onePane={!twoFit} />
   return (
@@ -1594,6 +1790,7 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
         <FilesTab loaded={loaded} shown={codeShown} />
         <BackBar pane="code" />
       </section>
+      {codeShown && (place.column || place.over) && <TreePanel loaded={loaded} over={!place.column} />}
     </main>
   )
 }

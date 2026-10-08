@@ -9,7 +9,62 @@ const TABS: Tab[] = ['conversation', 'commits', 'spec', 'visual', 'files']
 /** One of the things the reviewer reasons from, shown in the Guide pane beside the code.
  *  The address names it as `tab=`; `tab=files`, or none, is the Guide pane closed. */
 export type Guide = Exclude<Tab, 'files'>
-export const guideOf = (tab: Tab | undefined): Guide | null => (tab && tab !== 'files' ? tab : null)
+const GUIDES: Guide[] = ['conversation', 'commits', 'spec', 'visual']
+/** A pick: the item chosen in a Guide, which the Code pane is narrowed to. It is small
+ *  enough for the address to carry, and says where its code is, not what the code was: a
+ *  box of a diagram (by diagram and box, so a redrawn diagram is asked again), a folder,
+ *  or a file with, perhaps, lines of it. */
+export type CodePick =
+  | { box: [view: string, node: string] }
+  | { dir: string }
+  | { file: string; side?: 'old' | 'new'; line?: number; end?: number }
+/** A pick as text, the same text for the same pick ('' for none): what the address carries. */
+export function pickKey(p: CodePick | null): string {
+  if (!p) return ''
+  if ('box' in p) return JSON.stringify({ box: [p.box[0], p.box[1]] })
+  if ('dir' in p) return JSON.stringify({ dir: p.dir })
+  return JSON.stringify({ file: p.file, ...(p.side === 'old' ? { side: 'old' } : {}), ...(p.line != null ? { line: p.line } : {}), ...(p.line != null && p.end != null && p.end > p.line ? { end: p.end } : {}) })
+}
+/** The pick an address carries, or null when it carries none or one that makes no sense. */
+export function parsePick(json: string | undefined): CodePick | null {
+  if (!json) return null
+  try {
+    const p = JSON.parse(json) as Record<string, unknown>
+    if (Array.isArray(p.box) && typeof p.box[0] === 'string' && typeof p.box[1] === 'string') return { box: [p.box[0], p.box[1]] }
+    if (typeof p.dir === 'string' && p.dir) return { dir: p.dir }
+    if (typeof p.file === 'string' && p.file) {
+      const n = (v: unknown): number | undefined => (typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined)
+      return { file: p.file, ...(p.side === 'old' ? { side: 'old' as const } : {}), line: n(p.line), end: n(p.end) }
+    }
+  } catch { /* not JSON */ }
+  return null
+}
+/** What a pick narrows the Code pane to: the files on show, the place in them to go to, and words for it. */
+export interface Narrowing { files: string[]; file?: string; side?: 'old' | 'new'; line?: number; end?: number; label: string }
+/** A pick's code in the comparison as the page has it, or null: there is no pick, it has
+ *  no code (a box that is not code, or that this change does not touch), or what it named
+ *  is gone (a diagram drawn anew, a file that left the comparison). */
+export function narrowingOf(pick: CodePick | null, loaded: LoadedReview | null): Narrowing | null {
+  if (!pick || !loaded) return null
+  const files = loaded.files.filter((f) => !f.excluded)
+  const under = (dir: string): Narrowing | null => {
+    const d = dir.endsWith('/') ? dir : `${dir}/`
+    const inside = files.filter((f) => f.path.startsWith(d)).map((f) => f.path)
+    return inside.length ? { files: inside, label: `${d} (${plural(inside.length, 'file')})` } : null
+  }
+  const lines = (path: string, side: 'old' | 'new' | undefined, line: number | undefined, end: number | undefined): Narrowing | null => {
+    const f = files.find((x) => x.path === path || x.oldPath === path)
+    if (!f) return null
+    if (line == null || f.binary || (f.status === 'deleted' && side !== 'old')) return { files: [f.path], file: f.path, label: baseName(f.path) }
+    const last = end != null && end > line ? end : undefined
+    return { files: [f.path], file: f.path, side: side ?? 'new', line, end: last, label: `${baseName(f.path)}, ${last ? `lines ${line}–${last}` : `line ${line}`}${side === 'old' ? ' (old)' : ''}` }
+  }
+  if ('dir' in pick) return under(pick.dir)
+  if ('file' in pick) return lines(pick.file, pick.side, pick.line, pick.end)
+  const node = loaded.state.visual?.views.find((v) => v.id === pick.box[0])?.nodes.find((n) => n.id === pick.box[1])
+  if (!node?.file || !node.inDiff) return null
+  return node.file.endsWith('/') ? under(node.file) : lines(node.file, 'new', node.line ?? undefined, node.end ?? undefined)
+}
 /** The event the page sends itself (on `window`) when a drag of the divider between the
  *  panes is released: what waits for a pane's width to settle is laid out for it then. */
 export const PANES_SETTLED = 'gr-panes-settled'
@@ -18,7 +73,11 @@ export type Pane = 'code' | Guide
 export type Route =
   | { name: 'dashboard' }
   | { name: 'hub'; path: string }
-  | { name: 'review'; session?: number; repo?: string; base?: string; compare?: string; fresh?: boolean; direct?: boolean; focus?: string; tab?: Tab
+  | { name: 'review'; session?: number; repo?: string; base?: string; compare?: string; fresh?: boolean; direct?: boolean; focus?: string
+      /** the Guide on show in the Guide pane (none: the pane is closed) */
+      guide?: Guide
+      /** the pick, as JSON (see CodePick) */
+      pick?: string
       /** hide whitespace-only changes */
       w?: boolean
       /** show only this commit of the range */
@@ -33,14 +92,19 @@ export function parseHash(hash: string): Route {
   if (p === '/review') {
     const session = Number(sp.get('session'))
     const focus = sp.get('focus') ?? undefined
+    // `guide=` names the Guide; an address from before the workspace names it as `tab=`
+    // (`tab=files`: the Guide pane closed). The walkthrough is in the Conversation for now.
+    const named = sp.get('guide') === 'walkthrough' ? 'conversation' : sp.get('guide')
     const tab = TABS.find((t) => t === sp.get('tab'))
+    const guide = GUIDES.find((g) => g === named) ?? GUIDES.find((g) => g === tab)
+    const pick = pickKey(parsePick(sp.get('pick') ?? undefined)) || undefined
     const w = sp.get('w') === '1' ? true : undefined
     const commit = sp.get('commit') || undefined
-    if (sp.get('session') && Number.isFinite(session)) return { name: 'review', session, focus, tab, w, commit }
+    if (sp.get('session') && Number.isFinite(session)) return { name: 'review', session, focus, guide, pick, w, commit }
     if (sp.get('repo')) {
       return {
         name: 'review', repo: sp.get('repo')!, base: sp.get('base') ?? undefined, compare: sp.get('compare') ?? undefined,
-        fresh: sp.get('fresh') === '1', direct: sp.get('direct') === '1', focus, tab, w, commit
+        fresh: sp.get('fresh') === '1', direct: sp.get('direct') === '1', focus, guide, pick, w, commit
       }
     }
   }
@@ -59,7 +123,8 @@ export function routeHash(r: Route): string {
       if (r.fresh) sp.set('fresh', '1')
       if (r.direct) sp.set('direct', '1')
     }
-    if (r.tab && r.tab !== 'files') sp.set('tab', r.tab)
+    if (r.guide) sp.set('guide', r.guide)
+    if (r.pick) sp.set('pick', r.pick)
     if (r.w) sp.set('w', '1')
     if (r.commit) sp.set('commit', r.commit)
     if (r.focus) sp.set('focus', r.focus)

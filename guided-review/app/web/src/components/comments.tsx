@@ -3,7 +3,7 @@ import type { AnchorInput, Comment } from '@shared/types'
 import { useStore } from '../store'
 import { focusAnchor, focusChanged, focusQuestion } from '../focus'
 import { ago, anchorLabel, ASK, askExchanges, askStatus, baseName, focusable, fromEarlier, hasPendingReply, isOpen, plural, short } from '../util'
-import { Icon, Md, Menu, MenuItem } from './common'
+import { Icon, Md, Menu, MenuItem, usePickLink } from './common'
 
 /** Comments indexed by anchor key (see util.indexComments). */
 export const CommentsCtx = createContext<Map<string, Comment[]>>(new Map())
@@ -172,6 +172,8 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
   const { mode, text, setMode, setText } = useDraft<'view' | 'edit' | 'reply'>(`thread:${c.id}`, 'view')
   const [toggled, setToggled] = useState<boolean | null>(null)
   const target = focusable(c.anchor)
+  // in a Guide (the Conversation), the link to its line is a pick
+  const link = usePickLink(target)
   const st = STATUS[c.status]
   const mine = c.author === 'user'
   const pendingReply = hasPendingReply(c)
@@ -228,7 +230,7 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
           {earlier && <span className="label warn" data-gr="earlier-state" title={`Found at ${short(c.foundAt?.sha)}. The code has changed since, and this was not checked again: it may no longer apply.`}>found at <span className="mono">{short(c.foundAt?.sha)}</span>, an earlier state</span>}
           {showAnchor && (
             target && !c.lineGone && c.status !== 'outdated'
-              ? <button className="link mono small" onClick={() => focusAnchor(target)}>{anchorLabel(c.anchor)}</button>
+              ? <button className={'link mono small' + (link.picked ? ' picked' : '')} aria-pressed={link.from ? link.picked : undefined} onClick={() => focusAnchor(target, { from: link.from })}>{anchorLabel(c.anchor)}</button>
               : <span className="mono muted small">{anchorLabel(c.anchor)}</span>
           )}
           <span className="grow" />
@@ -261,7 +263,7 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
                 <span className="muted small">Changed</span>
                 {changed.map((r, i) => {
                   const lines = r.end > r.start ? `${r.start}–${r.end}` : `${r.start}`
-                  return <button key={i} className="ref-chip mono link-chip" data-gr="changed-chip" title={`${r.file}:${lines} — show ${r.end > r.start ? 'these lines' : 'this line'} in the Code pane`} onClick={() => void focusChanged(r)}>{baseName(r.file)}:{lines}</button>
+                  return <button key={i} className="ref-chip mono link-chip" data-gr="changed-chip" title={`${r.file}:${lines} — show ${r.end > r.start ? 'these lines' : 'this line'} in the Code pane`} onClick={() => void focusChanged(r, link.from)}>{baseName(r.file)}:{lines}</button>
                 })}
                 {places > changed.length && <span className="muted small" title="The commit changed more places than a resolution keeps">+{places - changed.length} more{c.resolution.commit ? ` in ${c.resolution.commit.slice(0, 7)}` : ''}</span>}
               </span>

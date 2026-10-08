@@ -423,8 +423,11 @@ const GENERATED = /(^|\/)(dist|node_modules|vendor)\/|\.min\.[a-z]+$|\.map$|(^|\
 const sizeText = (chars: number): string => (chars >= 1_000_000 ? `${(chars / 1_000_000).toFixed(1)} MB` : chars >= 1000 ? `${Math.round(chars / 1000)} KB` : `${chars} B`)
 
 /** A changed file, in the shape of a GitHub "Files changed" box. */
-export function FileBox({ file, split, section, sectionNo, grouped, note, whitespaceOnly }: {
+export function FileBox({ file, split, section, sectionNo, grouped, note, whitespaceOnly, hidden: outOfSight }: {
   file: FileDiff; split: boolean; section?: Section; note?: string
+  /** kept as it is, out of sight: the Code pane is narrowed to other files. It comes back
+   *  as it was (its diff is not drawn or highlighted again) when the narrowing reaches it. */
+  hidden?: boolean
   /** the section's position in the walkthrough: picks its colour */
   sectionNo?: number
   /** the file sits under its section's header, which already says what it belongs to */
@@ -533,7 +536,7 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   const body = <DiffBody key={`${signature}|${view?.ignoreWhitespace ? 'w' : ''}`} file={file} hunks={hunks} split={split} placed={placed} outside={outside} composer={commitView ? null : composer} canExpand={canExpand} readOnly={commitView} expandAll={expandAll} />
 
   return (
-    <div className={'file' + (open ? ' open' : '') + (section && !grouped ? ' in-sec' : '')} style={section ? secStyle(sectionNo) : undefined} data-gr-file={file.path} data-gr-file-section={section?.id} data-gr-viewed={viewed ? 'true' : changed ? 'changed' : 'false'}>
+    <div className={'file' + (open ? ' open' : '') + (section && !grouped ? ' in-sec' : '')} style={section ? secStyle(sectionNo) : undefined} hidden={outOfSight} data-gr-file={file.path} data-gr-file-section={section?.id} data-gr-viewed={viewed ? 'true' : changed ? 'changed' : 'false'}>
       <div className="file-head">
         <button className="icon-btn" aria-expanded={open} aria-label={open ? 'Collapse file' : 'Expand file'} onClick={() => setFileOpen(file.path, !open)}>
           <Icon name={open ? 'chevDown' : 'chevRight'} />

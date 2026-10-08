@@ -1,6 +1,6 @@
 import type { ChangedRange, FocusTarget, TourStop } from '@shared/types'
 import { typing, useStore } from './store'
-import { baseName, cssq, type Pane } from './util'
+import { baseName, cssq, narrowingOf, type CodePick, type Guide, type Pane } from './util'
 
 // ── the panes ─────────────────────────────────────────────────
 // The page itself never scrolls. The Code pane and each Guide scroll by themselves, and
@@ -109,20 +109,59 @@ function flash(el: HTMLElement): void {
 function paneOf(t: FocusTarget): Pane {
   return t.kind === 'file' || t.kind === 'diff' || (t.kind === 'section' && useStore.getState().guide == null) ? 'code' : 'conversation'
 }
+/** How a jump to code treats the narrowing of the Code pane. */
+interface JumpOpts {
+  /** the reviewer picked the destination themselves (a file in the tree, a box of a diagram): no "Back to …" pill */
+  nav?: boolean
+  /** the target is put at the top of the pane, to be read from its first line, instead of in its middle */
+  top?: boolean
+  /** The Guide the jump was made in, when it was made in one: a jump from a Guide to code
+   *  is a pick, and the Code pane is narrowed to it. (`end`: the pick is the lines up to there.) */
+  from?: Guide | null
+  end?: number
+  /** leave the narrowing whatever the target (a click in the tree): all the files, at this one */
+  all?: boolean
+  /** the target is the pick's own code: the narrowing is set already, and stays */
+  picked?: boolean
+}
 /** Take one pane to a target and flash it: a jump. Code is shown in the Code pane and the
  *  Guide beside it does not move; the summary and the sections are shown in the
  *  Conversation, which becomes the Guide on show. Whatever would hide the target gives
- *  way first: a Code pane folded away comes back, filters that hide the file are lifted,
- *  a collapsed file is opened, and a diff held back as large or generated is loaded.
- *  A jump the reviewer did not aim themselves (a link in the text, a comment in a menu,
- *  the session showing something) leaves a "Back to …" pill when it takes the pane far
- *  from where it was. `nav`: they picked the destination themselves (a file in the tree,
- *  a box of a diagram) — no pill. `top`: the target is put at the top of the pane, to be
- *  read from its first line, instead of in its middle. */
-export function focusAnchor(t: FocusTarget, opts: { nav?: boolean; top?: boolean } = {}): void {
+ *  way first: a Code pane folded away comes back, a narrowing the target is not part of is
+ *  left for all the files, filters that hide the file are lifted, a collapsed file is
+ *  opened, and a diff held back as large or generated is loaded.
+ *  A jump the reviewer did not aim themselves (a comment in a menu, the session showing
+ *  something) leaves a "Back to …" pill when it takes the pane far from where it was. */
+export function focusAnchor(t: FocusTarget, opts: JumpOpts = {}): void {
   const st = useStore.getState()
+  // from a Guide to code: a pick
+  if (opts.from && (t.kind === 'file' || t.kind === 'diff')) {
+    showPick(t.kind === 'file' ? { file: t.file } : { file: t.file, side: t.side, line: t.line, end: opts.end })
+    return
+  }
   // during a tour the way back leads to where the tour started, from whichever stop
-  jump(t, opts.nav ? null : st.tour?.origin ?? whereAmI(paneOf(t)), opts.top)
+  jump(t, opts.nav ? null : st.tour?.origin ?? whereAmI(paneOf(t)), opts)
+}
+/** Make something the pick and show its code: the Code pane is narrowed to it, taken to its
+ *  lines and flashes them, and the Guide it was picked in does not move. A step of the trail
+ *  (`silent`: the address is being followed, as on Back or when a review opens). A pick is
+ *  the reviewer's own aim, so it leaves no "Back to …" pill. Returns false when it has no
+ *  code to show (a box that is not code, something that is gone): nothing changes then,
+ *  except that an address naming such a pick is followed to no pick. */
+export function showPick(pick: CodePick | null, opts: { silent?: boolean } = {}): boolean {
+  const st = useStore.getState()
+  if (!pick) { st.pickCode(null, opts); return false }
+  // while the Code pane shows one commit only, the page has that commit's files, not the
+  // comparison's: leave the commit view first, then ask again
+  if (st.view.commit) { void st.setView({ commit: undefined }).then(() => { if (!useStore.getState().view.commit) showPick(pick, opts) }); return true }
+  const to = narrowingOf(pick, st.loaded)
+  if (!to) { if (opts.silent) st.pickCode(null, opts); return false }
+  st.pickCode(pick, opts)
+  const file = to.file ?? to.files[0]
+  if (to.line != null && to.side === 'new') focusLines(file, to.line, to.end ?? to.line, { nav: true, picked: true })
+  else if (to.line != null) focusAnchor({ kind: 'diff', file, side: 'old', line: to.line }, { nav: true, picked: true })
+  else focusAnchor({ kind: 'file', file }, { nav: true, top: true, picked: true })
+  return true
 }
 /** Start a tour at one of its stops, remembering where the reviewer was in the code. */
 export function startTour(stops: TourStop[], loop?: boolean, idx = 0): void {
@@ -131,9 +170,9 @@ export function startTour(stops: TourStop[], loop?: boolean, idx = 0): void {
   st.set({ tour: { stops, idx, loop, origin: st.tour?.origin ?? whereAmI('code') ?? undefined } })
   focusAnchor(stops[idx].target)
 }
-/** `origin`: where to offer the way back to, if the jump takes its pane far from there.
- *  `top`: see focusAnchor. */
-function jump(t: FocusTarget, origin: Spot | null, top = false): void {
+/** `origin`: where to offer the way back to, if the jump takes its pane far from there. */
+function jump(t: FocusTarget, origin: Spot | null, opts: JumpOpts = {}): void {
+  const top = Boolean(opts.top)
   const st = useStore.getState()
   const loaded = st.loaded
   if (!loaded) return
@@ -152,7 +191,7 @@ function jump(t: FocusTarget, origin: Spot | null, top = false): void {
   const from = origin?.pane === to ? origin : null
   st.set({ returnTo: null })
   // a commit view shows another diff: targets belong to the whole comparison
-  if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, origin, top)); return }
+  if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, origin, opts)); return }
   if (beside) {
     // nothing to show or open
   } else if (t.kind === 'summary' || t.kind === 'section') {
@@ -163,12 +202,18 @@ function jump(t: FocusTarget, origin: Spot | null, top = false): void {
     st.revealCode()
     const file = loaded.files.find((f) => f.path === t.file || f.oldPath === t.file)
     if (st.diffMode !== 'all') st.set({ diffMode: 'all' })
-    if (st.fileQuery) st.set({ fileQuery: '' })
-    const lift: Partial<typeof st.filters> = {}
-    if (st.filters.hideViewed && file?.viewed === 'viewed') lift.hideViewed = false
-    if (st.filters.onlyCommented) lift.onlyCommented = false
-    if (file?.excluded && !st.filters.showExcluded) lift.showExcluded = true
-    if (Object.keys(lift).length) st.setFilters(lift)
+    if (!opts.picked) {
+      // Beside a Guide the pane may be narrowed to the pick (or to the list of files): a
+      // target outside that is shown among all the files. A target that is part of it leaves it be.
+      if (st.guide != null && !st.showAll && (opts.all || !narrowingOf(st.pick, loaded)?.files.includes(file?.path ?? t.file))) st.showAllFiles(true)
+      // (the pick's own files are shown whatever the filters say: only a jump among all the files lifts them)
+      if (st.fileQuery) st.set({ fileQuery: '' })
+      const lift: Partial<typeof st.filters> = {}
+      if (st.filters.hideViewed && file?.viewed === 'viewed') lift.hideViewed = false
+      if (st.filters.onlyCommented) lift.onlyCommented = false
+      if (file?.excluded && !st.filters.showExcluded) lift.showExcluded = true
+      if (Object.keys(lift).length) st.setFilters(lift)
+    }
     st.setFileOpen(file?.path ?? t.file, true)
     if (t.kind === 'diff') {
       // a rendered Markdown file shows its new side only: a removed line is in the source diff
@@ -263,6 +308,8 @@ interface Held { sel: string; top: number; el: HTMLElement }
 function readingSpot(): Held[] {
   const sc = codeScroller()
   if (!sc || !drawn(sc)) return []
+  const same = asPut<Held[]>(sc)
+  if (same && same[0]?.el.isConnected) return same
   const r = sc.getBoundingClientRect()
   let box: Held | null = null
   for (let y = r.top + 44; y < r.bottom; y += 20) {
@@ -294,6 +341,18 @@ export function unparkCodePlace(y: number): void {
   place()
   holding(place, true).settle()
 }
+/** Where a pane was last put by a hold, and how it then was (scrolled how far, how tall,
+ *  how wide). While it is still exactly so, nobody has scrolled it and nothing in it was
+ *  laid out anew, and the next hold starts from the same line at the same height instead of
+ *  reading the pane again: a round trip through another width (to the Conversation and
+ *  back, the whole width and back) then ends where it began, not a wrapped line further
+ *  on, nor wherever a shorter layout in between could not scroll to. */
+const lastPut = new WeakMap<HTMLElement, { spots: unknown; y: number; h: number; w: number }>()
+const putAt = (sc: HTMLElement, spots: unknown): void => { lastPut.set(sc, { spots, y: sc.scrollTop, h: sc.scrollHeight, w: sc.clientWidth }) }
+function asPut<T>(sc: HTMLElement): T | null {
+  const was = lastPut.get(sc)
+  return was && Math.abs(was.y - sc.scrollTop) < 1.5 && was.h === sc.scrollHeight && was.w === sc.clientWidth ? (was.spots as T) : null
+}
 /** Put the Code pane back on what it showed: the line if it is still there, else the file it was in. */
 function putBack(spots: Held[]): void {
   const sc = codeScroller()
@@ -303,6 +362,7 @@ function putBack(spots: Held[]): void {
     if (el && drawn(el)) {
       const by = topIn(el, sc) - spot.top
       if (Math.abs(by) >= 1) sc.scrollBy({ top: by })
+      putAt(sc, spots)
       return
     }
   }
@@ -314,7 +374,10 @@ const GUIDE_PARTS = 'p, li, h1, h2, h3, h4, pre, textarea, [data-gr-node], .dr-w
  *  wraps anew, the boxes of a diagram move). Null when no Guide is on show or it is at its top. */
 function guideSpot(): { sc: HTMLElement; el: Element; top: number } | null {
   const sc = [...document.querySelectorAll<HTMLElement>('[data-gr-guide]')].find(drawn)
-  if (!sc || sc.scrollTop < 1) return null
+  if (!sc) return null
+  const same = asPut<{ sc: HTMLElement; el: Element; top: number }>(sc)
+  if (same?.el.isConnected) return same
+  if (sc.scrollTop < 1) return null
   const line = sc.getBoundingClientRect().top + 4
   for (const el of sc.querySelectorAll(GUIDE_PARTS)) {
     const r = el.getBoundingClientRect()
@@ -361,6 +424,7 @@ export function holdPlaces(): Hold {
     if (guide && guide.el.isConnected && drawn(guide.sc)) {
       const by = topIn(guide.el, guide.sc) - guide.top
       if (Math.abs(by) >= 1) guide.sc.scrollBy({ top: by })
+      putAt(guide.sc, guide)
     }
   }, spots.length > 0 || guide != null)
 }
@@ -378,6 +442,12 @@ export function showSection(id: string | null): void {
   hold.settle()
 }
 
+/** Show a section's header among the files (the files grouped by section): all the files, at that header. */
+export function showSectionHeader(id: string): void {
+  useStore.getState().showAllFiles(true)
+  whenMounted([`[data-gr-section="${cssq(id)}"]`], (el) => showInPane(el, 'top'), 'code')
+}
+
 /** one toast about a changed range at a time */
 const CHANGED_KEY = 'changed-range'
 /** Go to the lines a resolution says were changed for a comment, and flash all of them.
@@ -389,7 +459,7 @@ const CHANGED_KEY = 'changed-range'
  *  comparison, lines that are no longer there, a first line that reads differently now.
  *  A jump like any other the reviewer did not aim themselves: `focusAnchor` leaves the
  *  way back. */
-export async function focusChanged(r: ChangedRange): Promise<void> {
+export async function focusChanged(r: ChangedRange, from?: Guide | null): Promise<void> {
   const lines = r.end > r.start ? `lines ${r.start}–${r.end}` : `line ${r.start}`
   const was = useStore.getState()
   // Folding in newer code redraws every diff, and with it any comment or reply being
@@ -403,7 +473,7 @@ export async function focusChanged(r: ChangedRange): Promise<void> {
   if (!file) { say(`${r.file} is no longer part of this comparison, so ${lines} cannot be shown.`); return }
   // the fix is lines of the source: a Markdown file is shown as its source diff
   st.setMdSource(file.path, true)
-  focusAnchor({ kind: 'diff', file: file.path, side: 'new', line: r.start })
+  focusAnchor({ kind: 'diff', file: file.path, side: 'new', line: r.start }, { from, end: r.end })
   const first = `[data-gr-line="${cssq(`${file.path}:new:${r.start}`)}"]`
   let tries = 0
   const tick = (): void => {
@@ -423,9 +493,9 @@ export async function focusChanged(r: ChangedRange): Promise<void> {
 function linesOf(file: string, start: number, end: number): HTMLElement[] {
   return [...(codeScroller()?.querySelectorAll<HTMLElement>(`[data-gr-file="${cssq(file)}"] [data-new]`) ?? [])].filter((el) => { const n = Number(el.dataset.new); return n >= start && n <= end })
 }
-/** Show lines of a changed file in the Code pane and flash all of them: the code a box of
- *  a diagram stands for. `nav`: see focusAnchor (a box is a pick: the reviewer's own aim). */
-export function focusLines(file: string, start: number, end: number, opts: { nav?: boolean } = {}): void {
+/** Show lines of a changed file in the Code pane and flash all of them: the code a pick
+ *  stands for (a box of a diagram, a range a comment was answered with). */
+function focusLines(file: string, start: number, end: number, opts: JumpOpts = {}): void {
   // exact lines are asked for: a Markdown file is shown as its source
   if (end > start) useStore.getState().setMdSource(file, true)
   focusAnchor({ kind: 'diff', file, side: 'new', line: start }, opts)
@@ -521,7 +591,8 @@ function fileAtTop(boxes: HTMLElement[], sc: HTMLElement): HTMLElement | null {
 export function followFiles(list: HTMLElement): () => void {
   const sc = scrollerOf(list)
   if (!sc) return () => { /* not in a pane: nothing to follow */ }
-  const collect = (): HTMLElement[] => [...list.querySelectorAll<HTMLElement>('[data-gr-file]')]
+  // (a file outside the narrowing is kept, hidden: it has no place, and is not one the reviewer can be at)
+  const collect = (): HTMLElement[] => [...list.querySelectorAll<HTMLElement>('[data-gr-file]:not([hidden])')]
   let boxes = collect()
   let frame = 0
   const read = (): void => {

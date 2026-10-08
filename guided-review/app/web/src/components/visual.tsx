@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent } from 'react'
 import type { LoadedReview, VisualEdge, VisualKind, VisualNode, VisualStatus, VisualView } from '@shared/types'
 import { useStore } from '../store'
-import { focusAnchor, focusLines } from '../focus'
+import { showPick } from '../focus'
 import { layout } from '../graph'
-import { ago, baseName, isOpen, PANES_SETTLED, plural, secStyle, short } from '../util'
+import { ago, baseName, isOpen, narrowingOf, PANES_SETTLED, plural, secStyle, short } from '../util'
 import { AwayHint, Icon, Md } from './common'
 
 // ── what a box says ───────────────────────────────────────────
@@ -19,26 +19,12 @@ const KIND: Record<VisualKind, string> = { architecture: 'Architecture', flow: '
 const placeOf = (n: VisualNode, full = true): string =>
   !n.file ? '' : `${full || n.file.endsWith('/') ? n.file : baseName(n.file)}${n.line != null ? `:${n.line}${n.end != null ? `–${n.end}` : ''}` : ''}`
 
-/** What picking a box does: the Code pane shows its code and flashes its lines, when that
- *  code is part of the diff as the page has it now (the diagrams may be older than the
- *  code). The diagram stays where it is. A pick is the reviewer's own aim, so it leaves
- *  no "Back to …" pill. */
-function goTo(n: VisualNode, loaded: LoadedReview): (() => void) | null {
-  if (!n.file || !n.inDiff) return null
-  // While the Code pane shows one commit only, the page has that commit's files, not the
-  // comparison's: the pick leaves the commit view first, then goes to the code as it then is.
-  if (loaded.view?.commit) {
-    return () => void useStore.getState().setView({ commit: undefined }).then(() => {
-      const now = useStore.getState().loaded
-      if (now && !now.view?.commit) goTo(n, now)?.()
-    })
-  }
-  const dir = n.file.endsWith('/')
-  const f = dir ? loaded.files.find((x) => !x.excluded && x.path.startsWith(n.file!)) : loaded.files.find((x) => x.path === n.file)
-  if (!f) return null
-  if (dir || n.line == null || f.status === 'deleted' || f.binary) return () => focusAnchor({ kind: 'file', file: f.path }, { nav: true, top: true })
-  const { line } = n
-  return () => focusLines(f.path, line, n.end ?? line, { nav: true })
+/** Whether a box can be picked: it names code that is part of the diff. (While the Code
+ *  pane shows one commit only the page has that commit's files, not the comparison's: the
+ *  pick then leaves the commit view and finds out.) */
+function pickable(n: VisualNode, view: VisualView, loaded: LoadedReview): boolean {
+  if (!n.file || !n.inDiff) return false
+  return Boolean(loaded.view?.commit) || narrowingOf({ box: [view.id, n.id] }, loaded) != null
 }
 
 // ── text in an SVG has to be measured to be boxed ─────────────
@@ -110,20 +96,26 @@ function codeOf(n: VisualNode, loaded: LoadedReview): { lines: { sign: string; n
 /** What the reviewer sees when they point at a box: everything the box could not hold. Its
  *  full name and line, what it does (the session's note), what it is connected to, and its
  *  code as the diff has it. Nothing in it is clicked: a click on the box itself is the pick. */
-function NodeCard({ node, view, loaded, at, link }: { node: VisualNode; view: VisualView; loaded: LoadedReview; at: DOMRect; link: boolean }) {
+function NodeCard({ node, view, loaded, at, link, pane, beside }: {
+  node: VisualNode; view: VisualView; loaded: LoadedReview; at: DOMRect; link: boolean
+  /** the Guide pane on the screen: the card stays inside it, so it never lies over the code */
+  pane: { left: number; right: number }
+  /** the Code pane is on show beside the diagram: the box's code is one click away there, and the card leaves it out */
+  beside: boolean
+}) {
   const name = (id: string): string => view.nodes.find((n) => n.id === id)?.label ?? id
   const into = view.edges.filter((e) => e.to === node.id)
   const outOf = view.edges.filter((e) => e.from === node.id)
-  const code = useMemo(() => codeOf(node, loaded), [node, loaded])
-  const vw = window.innerWidth; const vh = window.innerHeight
-  const W = Math.min(440, vw - 16)
-  // Beside the box when there is room, so that the boxes above and below it, which are
-  // usually the ones it connects to, stay in view; else under it, else above it.
-  const side = vw - at.right >= W + 20 ? at.right + 12 : at.left >= W + 20 ? at.left - W - 12 : null
+  const code = useMemo(() => (beside && link ? { lines: [], more: 0 } : codeOf(node, loaded)), [node, loaded, beside, link])
+  const vh = window.innerHeight
+  const W = Math.min(440, pane.right - pane.left - 16)
+  // Beside the box when the pane has room there, so that the boxes above and below it,
+  // which are usually the ones it connects to, stay in view; else under it, else above it.
+  const side = pane.right - at.right >= W + 20 ? at.right + 12 : at.left - pane.left >= W + 20 ? at.left - W - 12 : null
   const upper = at.top < vh / 2
   const where = side != null
     ? { left: side, ...(upper ? { top: Math.max(8, at.top), maxHeight: vh - Math.max(8, at.top) - 8 } : { bottom: Math.max(8, vh - at.bottom), maxHeight: at.bottom - 8 }) }
-    : { left: Math.max(8, Math.min(at.left, vw - W - 8)), ...(upper ? { top: at.bottom + 8, maxHeight: vh - at.bottom - 16 } : { bottom: vh - at.top + 8, maxHeight: at.top - 16 }) }
+    : { left: Math.max(pane.left + 8, Math.min(at.left, pane.right - W - 8)), ...(upper ? { top: at.bottom + 8, maxHeight: vh - at.bottom - 16 } : { bottom: vh - at.top + 8, maxHeight: at.top - 16 }) }
   return (
     <div className="viz-card" id="gr-viz-card" role="tooltip" data-gr="visual-card" style={{ width: W, ...where }}>
       <div className="viz-card-head">
@@ -146,7 +138,7 @@ function NodeCard({ node, view, loaded, at, link }: { node: VisualNode; view: Vi
           {code.more > 0 && <span className="more">… {plural(code.more, 'more line')}</span>}
         </pre>
       )}
-      <div className="muted small">{link ? 'Click the box to show this code in the Code pane.' : node.file ? (node.inDiff ? 'This code is no longer in the comparison.' : 'This change does not touch it, so the page cannot open it.') : 'Not code of this repository.'}</div>
+      <div className="muted small">{link ? (beside ? 'Click the box: the Code pane shows this code, and only this.' : 'Click the box to show this code in the Code pane.') : node.file ? (node.inDiff ? 'This code is no longer in the comparison.' : 'This change does not touch it, so the page cannot open it.') : 'Not code of this repository.'}</div>
     </div>
   )
 }
@@ -155,14 +147,13 @@ function NodeCard({ node, view, loaded, at, link }: { node: VisualNode; view: Vi
 /** how long the Guide pane's width has to hold still before a diagram is laid out for it */
 const SETTLE = 140
 function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
-  // the box under the pointer or the keyboard, and where it is on the screen
-  const [hover, setHover] = useState<{ id: string; at: DOMRect } | null>(null)
+  // the box under the pointer or the keyboard, where it is on the screen, and what is round it there
+  const [hover, setHover] = useState<{ id: string; at: DOMRect; pane: { left: number; right: number }; beside: boolean } | null>(null)
   // the pick: the box whose code the Code pane was last taken to. Kept in the store, it
   // stays outlined while the reviewer reads that code, points at other boxes, or looks at
   // another Guide and comes back, until another box is picked. Only outlined: it does not
   // hold the diagram dimmed
-  const pinned = useStore((s) => (s.visualNode?.view === view.id ? s.visualNode.node : null))
-  const pin = (id: string): void => useStore.getState().set({ visualNode: { view: view.id, node: id } })
+  const pinned = useStore((s) => (s.pick && 'box' in s.pick && s.pick.box[0] === view.id ? s.pick.box[1] : null))
   const root = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLDivElement>(null)
   // how wide the drawing may be (the Guide pane's width): the layout breaks a wider layer into rows
@@ -195,7 +186,7 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
     const widths = new Map(view.edges.map((e) => [e, e.label ? textWidth(e.label, EDGE) + 8 : 0]))
     return { ...layout(items.map((d) => ({ id: d.node.id, w: d.w, h: d.h })), view.edges, view.edges.some((e) => e.label) ? 76 : 52, (e) => widths.get(e) ?? 0, room), widths }
   }, [items, view, room])
-  const links = useMemo(() => new Map(view.nodes.map((n) => [n.id, goTo(n, loaded)])), [view, loaded])
+  const links = useMemo(() => new Map(view.nodes.map((n) => [n.id, pickable(n, view, loaded)])), [view, loaded])
   const cur = view.nodes.find((n) => n.id === hover?.id) ?? null
   const near = useMemo(() => {
     if (!cur) return null
@@ -212,12 +203,16 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
     return () => window.removeEventListener('scroll', off, { capture: true })
   }, [hover])
   const touches = (e: VisualEdge): boolean => Boolean(cur) && (e.from === cur?.id || e.to === cur?.id)
-  // a pick: the card gives way, so that it does not lie over the code it has just brought up
+  // a pick: the Code pane is narrowed to the box's code and flashes its lines, the box is
+  // outlined, and the card gives way (a box without code leaves everything as it is)
   const act = (n: VisualNode): void => {
-    const run = links.get(n.id)
-    if (run) { pin(n.id); setHover(null); run() }
+    if (links.get(n.id)) { setHover(null); showPick({ box: [view.id, n.id] }) }
   }
-  const point = (n: VisualNode, el: Element): void => setHover({ id: n.id, at: el.getBoundingClientRect() })
+  const point = (n: VisualNode, el: Element): void => {
+    const pane = root.current?.closest('[data-gr-pane="guide"]')?.getBoundingClientRect()
+    const code = document.querySelector('[data-gr-pane="code"]')
+    setHover({ id: n.id, at: el.getBoundingClientRect(), pane: pane ? { left: pane.left, right: pane.right } : { left: 0, right: window.innerWidth }, beside: Boolean(code && code.getClientRects().length > 0) })
+  }
   const onKey = (e: RKeyboardEvent, n: VisualNode): void => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(n) } else if (e.key === 'Escape') setHover(null) }
   const said = (n: VisualNode): string => [n.label, STATUS[n.status].label.toLowerCase(), placeOf(n), n.sub, n.note].filter(Boolean).join(', ')
   return (
@@ -284,7 +279,7 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
           </g>
         </svg>
       </div>
-      {cur && hover && <NodeCard node={cur} view={view} loaded={loaded} at={hover.at} link={Boolean(links.get(cur.id))} />}
+      {cur && hover && <NodeCard node={cur} view={view} loaded={loaded} at={hover.at} link={Boolean(links.get(cur.id))} pane={hover.pane} beside={hover.beside} />}
     </div>
   )
 }
