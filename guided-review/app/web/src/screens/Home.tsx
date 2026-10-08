@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { SessionListItem } from '@shared/types'
 import { useStore } from '../store'
-import { ago, baseName, plural, routeHash, short, SIDE_KIND, symLabel } from '../util'
+import { ago, baseName, EFFORT, effortTitle, plural, routeHash, short, SIDE_KIND, symLabel } from '../util'
 import { Icon, Menu, MenuItem, RefPicker, ThemeToggle } from '../components/common'
 
 export function TopBar({ crumbs }: { crumbs: { label: string; href?: string }[] }) {
@@ -35,6 +35,7 @@ function SessionRow({ s, showRepo, onArchive }: { s: SessionListItem; showRepo?:
         {s.approved === 'stale' && <span className="label warn" data-gr="list-approved">Changes since approval</span>}
         {s.archived && <span className="label">Archived</span>}
         {!s.hasWalkthrough && <span className="label" title="Claude Code has not written a walkthrough for it">No walkthrough</span>}
+        {s.effort && <span className="label effort" data-gr="list-effort" title={effortTitle(s.effort)}>{s.effort}: {EFFORT[s.effort].sum}</span>}
         <div className="muted small">
           #{s.id}{showRepo && <> · <span className="mono">{baseName(s.repo)}</span></>} · <span className="mono">{symLabel(s.pair.base.symbol)} ← {symLabel(s.pair.compare.symbol)}</span>
           <span title={cmp.title}> · {cmp.label}</span>{s.direct && <span title="The two endpoints are compared directly"> · endpoints</span>} · updated {ago(s.updatedAt)}

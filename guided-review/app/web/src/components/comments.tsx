@@ -2,7 +2,7 @@ import { createContext, Fragment, useContext, useMemo, useState } from 'react'
 import type { AnchorInput, Comment } from '@shared/types'
 import { useStore } from '../store'
 import { focusAnchor, focusChanged, focusQuestion } from '../focus'
-import { ago, anchorLabel, ASK, askExchanges, askStatus, baseName, focusable, hasPendingReply, isOpen, plural } from '../util'
+import { ago, anchorLabel, ASK, askExchanges, askStatus, baseName, focusable, fromEarlier, hasPendingReply, isOpen, plural, short } from '../util'
 import { Icon, Md, Menu, MenuItem } from './common'
 
 /** Comments indexed by anchor key (see util.indexComments). */
@@ -154,6 +154,8 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
   // handed to Claude Code in a request that is not finished yet
   const sentAt = useStore((s) => (s.loaded?.state.requests ?? []).find((r) => isOpen(r) && r.commentIds?.includes(c.id))?.createdAt)
   const withClaude = sentAt !== undefined
+  // a finding is about the code as it was when Claude Code found it: once the code has changed, it says so
+  const earlier = useStore((s) => Boolean(c.finding) && fromEarlier(c.foundAt, s.loaded))
   const [mode, setMode] = useState<'view' | 'edit' | 'reply'>('view')
   const [text, setText] = useState('')
   const [toggled, setToggled] = useState<boolean | null>(null)
@@ -210,6 +212,8 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
           <span className={'label ' + st.cls} title={st.title}>
             {st.text}{c.status === 'resolved' && c.resolution ? ` · ${c.resolution.verdict}` : ''}
           </span>
+          {c.finding && <span className="label finding" data-gr="finding" title={c.finding === 'bug' ? 'A defect the bug hunt found by reading the code. Nothing was run to confirm it.' : 'A statement this change made false. The Fact check list in the walkthrough has all of them.'}>{c.finding === 'bug' ? 'Bug' : 'Fact check'}</span>}
+          {earlier && <span className="label warn" data-gr="earlier-state" title={`Found at ${short(c.foundAt?.sha)}. The code has changed since, and this was not checked again: it may no longer apply.`}>found at <span className="mono">{short(c.foundAt?.sha)}</span>, an earlier state</span>}
           {showAnchor && (
             target && !c.lineGone && c.status !== 'outdated'
               ? <button className="link mono small" onClick={() => focusAnchor(target)}>{anchorLabel(c.anchor)}</button>

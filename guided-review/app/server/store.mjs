@@ -14,7 +14,8 @@ import path from 'node:path'
 /** @typedef {import('../shared/types.ts').RefSide} RefSide */
 /** @typedef {import('../shared/types.ts').RefPair} RefPair */
 /** @typedef {import('../shared/types.ts').ReviewState} ReviewState */
-/** @typedef {{ id: number, repo: string, pair: RefPair, direct: boolean, createdAt: string, updatedAt: string, archived: boolean, seq: number, state: ReviewState }} Session */
+/** @typedef {import('../shared/types.ts').EffortLevel} EffortLevel */
+/** @typedef {{ id: number, repo: string, pair: RefPair, direct: boolean, effort?: EffortLevel, createdAt: string, updatedAt: string, archived: boolean, seq: number, state: ReviewState }} Session */
 
 export const now = () => new Date().toISOString()
 
@@ -30,7 +31,7 @@ export const pairIdentity = (pair, direct) => `${identity(pair.base)}→${identi
 export function emptyState() {
   return {
     iterations: [], comments: [], messages: [], requests: [], viewedAt: {}, reviewedSections: [], resolvedAsks: [],
-    fileExcluded: {}, approvals: [], artifactApprovals: {}, artifacts: []
+    fileExcluded: {}, approvals: [], artifactApprovals: {}, artifacts: [], effortDone: {}
   }
 }
 
@@ -87,11 +88,11 @@ export class Store {
     if (opts.touch !== false) s.updatedAt = now()
     this.#write(path.join(this.dir, `${s.id}.json`), s)
   }
-  /** @param {string} repo @param {RefPair} pair @param {boolean} direct @returns {Session} */
-  create(repo, pair, direct) {
+  /** @param {string} repo @param {RefPair} pair @param {boolean} direct @param {EffortLevel} [effort] @returns {Session} */
+  create(repo, pair, direct, effort) {
     const t = now()
     /** @type {Session} */
-    const s = { id: this.index.nextId++, repo, pair, direct, createdAt: t, updatedAt: t, archived: false, seq: 0, state: emptyState() }
+    const s = { id: this.index.nextId++, repo, pair, direct, ...(effort ? { effort } : {}), createdAt: t, updatedAt: t, archived: false, seq: 0, state: emptyState() }
     this.sessions.set(s.id, s)
     this.#saveIndex()
     this.save(s, { touch: false })

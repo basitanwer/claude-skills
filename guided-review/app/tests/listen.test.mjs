@@ -37,7 +37,9 @@ test('one line per request, from either review, with the exact commands that com
     anchor: { label: 'src/a.ts:2', line: '  return 2' }, do: `answer with: gr answer ${q.id} --session ${A} --text "…" [--file P --line N]`
   })
   assert.deepEqual([we.kind, we.update, we.text, we.resumed], ['walkthrough', false, 'short please', false])
-  assert.equal(we.do, `write the walkthrough, then: gr annotate --file <json> --request ${w.id} --session ${B}`)
+  // a walkthrough is done at the review's effort level (effort.test.mjs): at check, the default, by a Sonnet subagent
+  assert.equal(we.effort, 'check')
+  assert.match(we.do, new RegExp(`write the walkthrough, with its fact check .*, then post it itself with: gr annotate --file <json> --request ${w.id} --session ${B} --owner tests `))
   assert.equal(requests().length, 2, 'each request is printed once')
   assert.deepEqual((await b.rpc('loadSession', A)).state.requests.map((r) => r.status), ['running'], 'printed means claimed')
   // completing one with the command from `do` works as printed

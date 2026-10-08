@@ -63,12 +63,27 @@ export type RefKind = 'branch' | 'commit' | 'empty' | 'worktree'
 export interface RefSide { kind: RefKind; symbol: string; anchorSha: string; path?: string }
 export interface RefPair { base: RefSide; compare: RefSide }
 
+/** How much work the Claude Code session puts into a review. Each level does everything
+ *  the one below does, and more: `read` posts the walkthrough; `check` adds a fact check of
+ *  what the walkthrough, the change and the repository's docs say; `bugs` adds a hunt for
+ *  defects. `read` and `check` run on Sonnet (a subagent), `bugs` on the session's model. */
+export type EffortLevel = 'read' | 'check' | 'bugs'
+/** A state of the code under review: the compare commit, and the fingerprint of the whole
+ *  surface then (the commit itself, or with uncommitted changes the commit and a hash). */
+export interface StateMark { sha: string; signature: string }
+/** One level's part of the review, as it was last done: at which state, when, and on which
+ *  model, as the session that did it named it (empty when it did not say). */
+export interface EffortMark extends StateMark { at: string; model: string }
+
 export interface SessionMeta {
   id: number
   repo: string
   pair: RefPair
   /** true: diff the two endpoints directly; false: diff merge-base(base, compare) → compare */
   direct: boolean
+  /** the level later review passes run at. Absent on a review made before levels existed,
+   *  which is handled as `check` once it is resumed */
+  effort?: EffortLevel
   createdAt: string
   updatedAt: string
   archived: boolean
@@ -103,7 +118,58 @@ export interface Walkthrough {
   questions: WalkthroughQuestion[]
   planMap?: PlanMap
 }
-export interface Iteration { n: number; at: string; endSha: string; title: string; summary: string }
+export interface Iteration {
+  n: number; at: string; endSha: string; title: string; summary: string
+  /** the model that wrote it, as the session named it */
+  model?: string
+}
+
+// ── fact check: statements that do not hold against the code ──
+/** Where a statement stands: a line of a file git has on the compare side (a changed file,
+ *  an attached spec or plan, or any other doc of the repository), a commit's message, or
+ *  somewhere only `label` can say. Path, line and line text are checked against git. */
+export interface FactWhere {
+  label: string
+  file?: string
+  line?: number
+  /** the text of that line, copied from git */
+  lineContent?: string
+  /** the file is part of the diff, so the page can go to the line */
+  inDiff?: boolean
+  /** the file is an attached spec or plan */
+  artifact?: boolean
+  /** a commit of the comparison: the statement is in its message */
+  commit?: string
+}
+/** One statement that does not hold. `changed`: this change made it false, so the code
+ *  before the change agreed with it. `already`: it was false before the change too. */
+export interface FactRow {
+  id: string
+  statement: string
+  /** what the code does instead */
+  why: string
+  group: 'changed' | 'already'
+  where: FactWhere
+  /** the line of code that contradicts it, copied from git. `inDiff`: a line of a changed
+   *  file, which the page can go to */
+  contradicts?: { file: string; line: number; side: 'new' | 'old'; lineContent: string; inDiff: boolean }
+  /** the note beside that line, which the server writes for a `changed` row */
+  commentId?: string
+  /** the state of the code it was found at */
+  foundAt: StateMark
+}
+/** The fact check of a review: the complete record of what was found not to hold. Kept
+ *  apart from the walkthrough, so a later walkthrough written at a lower level leaves it. */
+export interface FactCheck {
+  rows: FactRow[]
+  /** how many statements were checked, when the session said */
+  checked?: number
+  /** when it was last run, at which state, on which model */
+  at: string
+  endSha: string
+  signature: string
+  model: string
+}
 
 // ── visual: the whole change drawn as diagrams ───────────────
 /** What a diagram shows: the parts involved and how they depend on each other, how data
@@ -190,6 +256,11 @@ export interface Comment {
    *  `resolved`: outcome recorded.
    *  `outdated`: the line it was written on no longer exists. */
   status: 'note' | 'queued' | 'sent' | 'answered' | 'resolved' | 'outdated'
+  /** a finding of a review pass: `fact` (the note of a fact check row, written by the
+   *  server) or `bug` (a defect the bug hunt confirmed) */
+  finding?: 'fact' | 'bug'
+  /** the state of the code when it was written; a finding from an earlier state says so */
+  foundAt?: StateMark
   /** for note/resolved comments on a line that no longer exists */
   lineGone?: boolean
   resolution?: {
@@ -290,6 +361,11 @@ export interface ReviewState {
   walkthrough?: Walkthrough
   /** the diagrams of the whole change, kept apart from the walkthrough (a new walkthrough leaves them) */
   visual?: Visual
+  /** what the fact check found, kept apart from the walkthrough in the same way */
+  factCheck?: FactCheck
+  /** per effort level, the state its part of the review was last done at: `read` the
+   *  walkthrough, `check` the fact check, `bugs` the bug hunt */
+  effortDone: Partial<Record<EffortLevel, EffortMark>>
   iterations: Iteration[]
   comments: Comment[]
   messages: Message[]
@@ -395,12 +471,14 @@ export interface Api {
   refOptions(repo: string, relativeTo?: string): Promise<RefOptions>
   listSessions(repo: string, includeArchived?: boolean): Promise<SessionListItem[]>
   /** Resolve both refs; resume the review with that identity, or create it (`fresh` forces a new one). */
-  startSession(repo: string, base: string, compare: string, opts?: { fresh?: boolean; direct?: boolean }): Promise<{ sessionId: number; resumed: boolean }>
+  startSession(repo: string, base: string, compare: string, opts?: { fresh?: boolean; direct?: boolean; effort?: EffortLevel }): Promise<{ sessionId: number; resumed: boolean }>
   findSession(repo: string, base: string, compare: string, opts?: { direct?: boolean }): Promise<{ sessionId: number } | null>
   /** Build a review without saving anything. */
   previewReview(repo: string, base: string, compare: string, opts?: { direct?: boolean; view?: ReviewView }): Promise<LoadedReview>
   loadSession(sessionId: number, view?: ReviewView): Promise<LoadedReview>
   archiveSession(sessionId: number, archived: boolean): Promise<void>
+  /** Raise or lower the effort level. Later review passes run at it; nothing posted is removed. */
+  setEffort(sessionId: number, level: EffortLevel): Promise<{ effort: EffortLevel; was: EffortLevel | null }>
   /** Point the compare side at another ref (when the old one is gone). */
   retargetSession(sessionId: number, compare: string): Promise<void>
   driftSince(sessionId: number, sinceSha: string): Promise<DriftSummary>
@@ -412,7 +490,7 @@ export interface Api {
   /** Mark a file viewed (or not); the server snapshots the commit and content hash. */
   setViewed(sessionId: number, path: string, viewed: boolean): Promise<ReviewState>
   /** The server validates the anchor against the live diff and copies the line text from git. */
-  commentAdd(sessionId: number, input: { anchor: AnchorInput; text: string; author: 'user' | 'agent'; status?: 'note' | 'queued' }): Promise<Comment>
+  commentAdd(sessionId: number, input: { anchor: AnchorInput; text: string; author: 'user' | 'agent'; status?: 'note' | 'queued'; finding?: 'bug' }): Promise<Comment>
   commentUpdate(sessionId: number, id: string, patch: CommentPatch): Promise<Comment>
   commentDelete(sessionId: number, id: string): Promise<void>
   approve(sessionId: number): Promise<ReviewState>
@@ -439,7 +517,7 @@ export interface Api {
    *  Requests a session that is gone left claimed are handed over (`resumed`); with
    *  `includeRunning`, so are the ones this same session already holds (`yours`).
    *  What another live session holds is never returned. */
-  requestTakeAll(repo: string, includeRunning?: boolean, owner?: string): Promise<{ sessionId: number; request: ReviewRequest; comments: Comment[]; resumed: boolean; yours: boolean }[]>
+  requestTakeAll(repo: string, includeRunning?: boolean, owner?: string): Promise<{ sessionId: number; request: ReviewRequest; comments: Comment[]; resumed: boolean; yours: boolean; effort: EffortLevel }[]>
   /** Several bridge calls as one atomic update: all succeed and the page refreshes once,
    *  or none is applied and the error names the failing operation. */
   batch(sessionId: number, ops: BatchOp[]): Promise<{ results: unknown[] }>
@@ -447,8 +525,15 @@ export interface Api {
   requestUpdate(sessionId: number, requestId: string, patch: { progress?: string; status?: 'done' | 'failed'; error?: string }): Promise<ReviewRequest>
   /** Post an agent message; with `requestId` it answers that question and completes it. */
   messagePost(sessionId: number, input: { text: string; requestId?: string; actions?: UiAction[] }): Promise<Message>
-  /** Store a walkthrough; it is reconciled against the live diff. */
-  annotate(sessionId: number, walkthrough: unknown, requestId?: string): Promise<{ sections: number; warnings: string[] }>
+  /** Store a walkthrough; it is reconciled against the live diff. A `factCheck` in it is
+   *  stored as `factCheck` below is. `model`: the model that wrote it. */
+  annotate(sessionId: number, walkthrough: unknown, requestId?: string | null, opts?: { model?: string }): Promise<{ sections: number; warnings: string[]; factCheck?: { rows: number; notes: number } }>
+  /** Store the fact check on its own: its rows are checked against git, and every row this
+   *  change made false gets a note beside the line that contradicts it. */
+  factCheck(sessionId: number, factCheck: unknown, opts?: { model?: string }): Promise<{ rows: number; notes: number; warnings: string[] }>
+  /** Record that a level's part of the review was done at the current state. Only `bugs`:
+   *  `read` is recorded by storing a walkthrough, `check` by storing a fact check. */
+  effortDone(sessionId: number, level: EffortLevel, opts?: { model?: string }): Promise<EffortMark>
   /** Store the diagrams of the whole change; files and lines are checked against git and
    *  each node's status is worked out from the diff. */
   visualize(sessionId: number, visual: unknown, requestId?: string): Promise<{ views: number; nodes: number; warnings: string[] }>
@@ -458,7 +543,7 @@ export interface Api {
 
 /** One step of `batch`: any of these bridge channels with its arguments after the session id. */
 export interface BatchOp {
-  channel: 'commentAdd' | 'commentUpdate' | 'commentDelete' | 'messagePost' | 'requestUpdate' | 'annotate' | 'visualize' | 'uiAction' | 'setViewed' | 'setArtifacts'
+  channel: 'commentAdd' | 'commentUpdate' | 'commentDelete' | 'messagePost' | 'requestUpdate' | 'annotate' | 'factCheck' | 'effortDone' | 'visualize' | 'uiAction' | 'setViewed' | 'setArtifacts'
   args: unknown[]
 }
 

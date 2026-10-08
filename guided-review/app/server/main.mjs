@@ -13,13 +13,13 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { Store, emptyState, now } from './store.mjs'
-import { approvalKey, approvedState, artifactRole, assemble, changedByCommit, drift, makeAnchor, makeChanged, makeFocus, readAt, reconcile, reconcileVisual, resolveInput, sideReader, signatureOf } from './review.mjs'
+import { approvalKey, approvedState, artifactRole, assemble, changedByCommit, drift, effortLevel, factKey, factNote, makeAnchor, makeChanged, makeFocus, readAt, reconcile, reconcileFactCheck, reconcileVisual, resolveInput, sideReader, signatureOf } from './review.mjs'
 import { assertSafeRef, branches, commitOf, currentBranch, defaultBase, log, primaryRepo, statusEntries, tags, tryGit, worktrees } from './git.mjs'
 
 /** @typedef {import('./store.mjs').Session} Session */
 /** @typedef {import('../shared/types.ts').ReviewRequest} ReviewRequest */
 
-const VERSION = '0.2.0'
+const VERSION = '0.3.0'
 const APP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const STATIC_ROOT = process.env.GUIDED_REVIEW_STATIC || path.join(APP, 'web', 'dist')
 const HOST = process.env.GUIDED_REVIEW_HOST || '127.0.0.1'
@@ -220,7 +220,7 @@ function locked(id, fn) {
 const load = (/** @type {Session} */ s) => assemble(store, s, { persist: true, presence: presenceOf(s.id) })
 /** @param {Session} s */
 const listItem = async (s) => ({
-  id: s.id, repo: s.repo, pair: s.pair, direct: s.direct, createdAt: s.createdAt, updatedAt: s.updatedAt, archived: s.archived,
+  id: s.id, repo: s.repo, pair: s.pair, direct: s.direct, ...(s.effort ? { effort: s.effort } : {}), createdAt: s.createdAt, updatedAt: s.updatedAt, archived: s.archived,
   title: s.state.walkthrough?.title, hasWalkthrough: Boolean(s.state.walkthrough),
   unresolved: s.state.comments.filter((c) => c.status === 'queued' || c.status === 'sent').length,
   pendingRequests: s.state.requests.filter((r) => r.status === 'pending' || r.status === 'running').length,
@@ -324,7 +324,8 @@ const api = {
     const repo = await repoOf(dir)
     const pair = await resolvePair(repo, baseIn, compareIn)
     const existing = opts.fresh ? null : store.find(repo, pair, Boolean(opts.direct))
-    const s = existing ?? store.create(repo, pair, Boolean(opts.direct))
+    // a new review runs at the level asked for, or at the default; a resumed one keeps its own (see setEffort)
+    const s = existing ?? store.create(repo, pair, Boolean(opts.direct), effortLevel(opts.effort) ?? DEFAULT_EFFORT)
     store.touchRepo(repo)
     return { sessionId: s.id, resumed: Boolean(existing) }
   },
@@ -343,6 +344,16 @@ const api = {
   },
   loadSession: (/** @type {number} */ id, /** @type {any} */ view) => locked(id, () => assemble(store, store.get(id), { persist: true, presence: presenceOf(id), view: view ?? undefined })),
   archiveSession: (/** @type {number} */ id, /** @type {boolean} */ archived) => locked(id, async () => { const s = store.get(id); s.archived = Boolean(archived); save(s, { touch: false }); changed(id) }),
+  setEffort: (/** @type {number} */ id, /** @type {unknown} */ level) => locked(id, async () => {
+    const s = store.get(id)
+    const effort = effortLevel(level)
+    if (!effort) throw new Error(`effort is read, check or bugs, got ${JSON.stringify(level)}`)
+    const was = s.effort ?? null
+    // only the level changes: what a higher level posted stays, and what a higher level
+    // owes is done by the session that raised it
+    if (was !== effort) { s.effort = effort; save(s); changed(id) }
+    return { effort, was }
+  }),
   retargetSession: (/** @type {number} */ id, /** @type {string} */ compareIn) => locked(id, async () => {
     const s = store.get(id)
     s.pair.compare = await resolveInput(s.repo, compareIn, 'compare')
@@ -391,6 +402,8 @@ const api = {
     /** @type {import('../shared/types.ts').Comment} */
     const c = {
       id: store.nextId(s, 'c'), anchor, author, text, status: input.status === 'note' || input.status === 'queued' ? input.status : author === 'agent' ? 'note' : 'queued',
+      // what Claude Code writes is written about the code as it is now: a finding that outlives that state says so
+      ...(author === 'agent' ? { ...(input.finding === 'bug' ? { finding: /** @type {const} */ ('bug') } : {}), foundAt: { sha: loaded.headSha, signature: loaded.signature } } : {}),
       replies: [], createdAt: now(), iteration: s.state.iterations.length
     }
     s.state.comments.push(c)
@@ -427,6 +440,8 @@ const api = {
   commentDelete: (/** @type {number} */ id, /** @type {string} */ cid) => locked(id, async () => {
     const s = store.get(id)
     s.state.comments = s.state.comments.filter((c) => c.id !== cid)
+    // the fact check row whose note this was stays in the list, without a note
+    for (const r of s.state.factCheck?.rows ?? []) if (r.commentId === cid) delete r.commentId
     save(s); changed(id)
   }),
   approve: (/** @type {number} */ id) => locked(id, async () => {
@@ -584,7 +599,7 @@ const api = {
         // sent again by the reviewer: it goes back to the session that had it, if that one is listening
         const fresh = (/** @type {Req} */ r) => r.status === 'pending' && !(r.wasWith && r.wasWith !== me && ownerConnected(r.wasWith))
         const mine = s.state.requests.filter((r) => fresh(r) || orphaned(r) || again(r))
-        const items = mine.map((r) => ({ sessionId: s.id, request: r, resumed: r.status === 'running', yours: r.status === 'running' && Boolean(me) && r.owner === me, comments: s.state.comments.filter((c) => r.commentIds?.includes(c.id)) }))
+        const items = mine.map((r) => ({ sessionId: s.id, effort: s.effort ?? DEFAULT_EFFORT, request: r, resumed: r.status === 'running', yours: r.status === 'running' && Boolean(me) && r.owner === me, comments: s.state.comments.filter((c) => r.commentIds?.includes(c.id)) }))
         let any = false
         for (const r of mine) {
           if (r.status === 'pending') { r.status = 'running'; r.startedAt = now(); delete r.wasWith; any = true }
@@ -657,18 +672,25 @@ const api = {
     if (actions[0]) push('ui:action', { sessionId: id, action: actions[0], ...(r ? { answerTo: r.id } : {}) })
     return m
   }),
-  annotate: (/** @type {number} */ id, /** @type {any} */ raw, /** @type {string} */ requestId) => locked(id, async () => {
+  annotate: (/** @type {number} */ id, /** @type {any} */ raw, /** @type {string | null} */ requestId, /** @type {any} */ opts) => locked(id, async () => {
     const s = store.get(id)
     const r = requestId ? liveRequest(s, String(requestId)) : null
     if (r?.kind === 'visualize') throw new Error(`request ${r.id} asks for a visual, not for a walkthrough: complete it with gr visualize`)
     const loaded = await load(s)
     if (loaded.refMissing) throw new Error('a side of this comparison no longer resolves')
     const { walkthrough, warnings } = reconcile(loaded.files, raw)
+    // a fact check that came with it is checked before anything is stored: a refused one leaves the review as it was
+    // (one that answers a request to update the walkthrough adds to what was found before, unless it says otherwise)
+    const facts = raw.factCheck == null ? null : await reconcileFactCheck(s.repo, loaded, raw.factCheck, sideReader(s.repo, loaded), { update: Boolean(r?.update) })
+    const model = modelName(opts?.model)
     const before = s.state.walkthrough
     s.state.walkthrough = walkthrough
-    s.state.iterations.push({ n: s.state.iterations.length + 1, at: now(), endSha: loaded.headSha, title: walkthrough.title, summary: walkthrough.summary })
+    s.state.iterations.push({ n: s.state.iterations.length + 1, at: now(), endSha: loaded.headSha, title: walkthrough.title, summary: walkthrough.summary, ...(model ? { model } : {}) })
     s.state.reviewedAtSha = loaded.headSha
     s.state.reviewedSignature = loaded.signature
+    s.state.effortDone.read = { sha: loaded.headSha, signature: loaded.signature, at: now(), model }
+    const stored = facts ? storeFacts(s, loaded, facts, model) : null
+    if (facts && stored) warnings.push(...[...facts.warnings, ...stored.warnings].map((w) => `fact check: ${w}`))
     // A Reviewed mark stays with a section that is still the same files. An id reused for
     // other files is a section the reviewer has not seen.
     const same = (/** @type {string} */ sid) => {
@@ -683,7 +705,26 @@ const api = {
     if (r) finish(s, r, 'done')
     save(s); changed(id); refreshPresence(id)
     notify(id, 'Walkthrough ready', `${walkthrough.sections.length} sections — ${walkthrough.title}`)
-    return { sections: walkthrough.sections.length, warnings }
+    return { sections: walkthrough.sections.length, warnings, ...(stored ? { factCheck: { rows: stored.rows, notes: stored.notes } } : {}) }
+  }),
+  factCheck: (/** @type {number} */ id, /** @type {any} */ raw, /** @type {any} */ opts) => locked(id, async () => {
+    const s = store.get(id)
+    const loaded = await load(s)
+    if (loaded.refMissing) throw new Error('a side of this comparison no longer resolves')
+    const facts = await reconcileFactCheck(s.repo, loaded, raw, sideReader(s.repo, loaded))
+    const stored = storeFacts(s, loaded, facts, modelName(opts?.model))
+    save(s); changed(id)
+    return { rows: stored.rows, notes: stored.notes, warnings: [...facts.warnings, ...stored.warnings] }
+  }),
+  effortDone: (/** @type {number} */ id, /** @type {unknown} */ level, /** @type {any} */ opts) => locked(id, async () => {
+    const s = store.get(id)
+    if (level !== 'bugs') throw new Error(effortLevel(level) ? `${level} is recorded by what it stores: read by a walkthrough (gr annotate), check by a fact check (gr factcheck, or "factCheck" in the walkthrough). Only bugs is recorded on its own.` : `effort is read, check or bugs, got ${JSON.stringify(level)}`)
+    const loaded = await load(s)
+    if (loaded.refMissing) throw new Error('a side of this comparison no longer resolves')
+    const mark = { sha: loaded.headSha, signature: loaded.signature, at: now(), model: modelName(opts?.model) }
+    s.state.effortDone.bugs = mark
+    save(s); changed(id)
+    return mark
   }),
   visualize: (/** @type {number} */ id, /** @type {any} */ raw, /** @type {string} */ requestId) => locked(id, async () => {
     const s = store.get(id)
@@ -705,6 +746,65 @@ const api = {
     push('ui:action', { sessionId: id, action: checked })
     return { tabs: tabsOf(id) }
   })
+}
+/** The level a review runs at when nobody chose one. */
+const DEFAULT_EFFORT = /** @type {const} */ ('check')
+/** A model's name as a session gave it: one line, short. @param {unknown} v */
+const modelName = (v) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, 60) : '')
+/** Store a checked fact check and keep the notes beside the code in step with it: the list
+ *  is the record, and every row this change made false has one note on the line that
+ *  contradicts it, written here from the row so the two cannot drift apart.
+ *  Without `update` the list is replaced; with it, the rows already stored stay (each
+ *  marked with the state it was found at) unless one is given again or retired. A row given
+ *  again keeps its id and its note. A note whose row is gone is removed, unless the
+ *  reviewer or Claude Code replied to it: a thread somebody wrote in is never deleted.
+ *  @param {Session} s @param {import('../shared/types.ts').LoadedReview} loaded
+ *  @param {Awaited<ReturnType<typeof reconcileFactCheck>>} facts @param {string} model */
+function storeFacts(s, loaded, facts, model) {
+  const mark = { sha: loaded.headSha, signature: loaded.signature }
+  const old = s.state.factCheck?.rows ?? []
+  /** @type {string[]} */
+  const warnings = []
+  const byId = new Map(old.map((r) => [r.id, r]))
+  const byKey = new Map(old.map((r) => [factKey(r), r]))
+  // a row given again is the stored row: named by its id (it may be reworded), or the same statement in the same place
+  const again = facts.rows.map((r) => (r.id && byId.get(r.id)) || byKey.get(factKey(r)))
+  const regiven = new Set(again.map((r) => r?.id))
+  const unknown = facts.retire.filter((id) => !byId.has(id))
+  if (unknown.length) warnings.push(`"retire" names ${unknown.slice(0, 5).map((id) => JSON.stringify(id.slice(0, 20))).join(', ')}, which ${unknown.length === 1 ? 'is not a stored row' : 'are not stored rows'} (stored: ${old.map((r) => r.id).join(', ') || 'none'})`)
+  const kept = facts.update ? old.filter((r) => !facts.retire.includes(r.id) && !regiven.has(r.id)) : []
+  const dropped = old.filter((r) => !kept.includes(r) && !regiven.has(r.id))
+  if (dropped.length && !facts.update) warnings.push(`this fact check replaced the stored list: ${dropped.length} earlier row(s) are gone (${dropped.map((r) => r.id).slice(0, 10).join(', ')}). To add to the list instead, give "update": true`)
+  const exists = (/** @type {string | undefined} */ cid) => s.state.comments.find((c) => c.id === cid && c.finding === 'fact')
+  /** @type {import('../shared/types.ts').FactRow[]} */
+  const rows = kept.map((r) => { if (r.commentId && !exists(r.commentId)) { const { commentId: _gone, ...rest } = r; return rest } return r })
+  const linked = new Set(rows.map((r) => r.commentId))
+  for (const [i, { anchor, id: _asked, ...r }] of facts.rows.entries()) {
+    const prev = again[i]
+    const row = { id: prev?.id ?? store.nextId(s, 'f'), ...r, foundAt: mark }
+    if (r.group !== 'changed' || !anchor) { rows.push(row); continue }
+    // its own note, or one left behind on that line for the same statement (somebody replied
+    // to it, so it outlived its row): never a second note saying the same thing in one place
+    const note = exists(prev?.commentId) ?? s.state.comments.find((c) => c.finding === 'fact' && !linked.has(c.id) && c.anchor.kind === 'diff' && anchor.kind === 'diff'
+      && c.anchor.file === anchor.file && c.anchor.side === anchor.side && c.anchor.lineContent === anchor.lineContent && c.text.includes(`\n> ${r.statement}\n`))
+    if (note) {
+      // found again now, on the line named now
+      Object.assign(note, { text: factNote(r), anchor, foundAt: mark }); delete note.lineGone
+      linked.add(note.id); rows.push({ ...row, commentId: note.id })
+      continue
+    }
+    /** @type {import('../shared/types.ts').Comment} */
+    const c = { id: store.nextId(s, 'c'), anchor, author: 'agent', text: factNote(r), status: 'note', finding: 'fact', foundAt: mark, replies: [], createdAt: now(), iteration: s.state.iterations.length }
+    s.state.comments.push(c)
+    linked.add(c.id); rows.push({ ...row, commentId: c.id })
+  }
+  s.state.comments = s.state.comments.filter((c) => c.finding !== 'fact' || linked.has(c.id) || c.replies.length > 0 || c.status !== 'note')
+  // an update checks only some statements again: its count is added to what was counted before
+  const before = facts.update ? s.state.factCheck?.checked : undefined
+  const checked = facts.checked != null ? facts.checked + (before ?? 0) : before
+  s.state.factCheck = { rows, ...(checked != null ? { checked: Math.max(checked, rows.length) } : {}), at: now(), endSha: mark.sha, signature: mark.signature, model }
+  s.state.effortDone.check = { ...mark, at: now(), model }
+  return { rows: rows.length, notes: rows.filter((r) => r.commentId).length, warnings }
 }
 /** The outcome a session records for a comment, with where the fix is: the ranges it
  *  named, validated against git (one that is not there refuses the whole outcome), or
@@ -750,7 +850,7 @@ async function checkAction(s, loaded, a) {
   throw new Error('unknown UI action')
 }
 /** What a batch may contain. */
-const BATCHABLE = new Set(['commentAdd', 'commentUpdate', 'commentDelete', 'messagePost', 'requestUpdate', 'annotate', 'visualize', 'uiAction', 'setViewed', 'setArtifacts'])
+const BATCHABLE = new Set(['commentAdd', 'commentUpdate', 'commentDelete', 'messagePost', 'requestUpdate', 'annotate', 'factCheck', 'effortDone', 'visualize', 'uiAction', 'setViewed', 'setArtifacts'])
 /** Sent by `gr` with every call. */
 const BRIDGE_HEADER = 'x-guided-review-bridge'
 /** The calling Claude Code session's id, when `gr` knows it. */

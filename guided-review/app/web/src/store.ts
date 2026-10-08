@@ -86,6 +86,8 @@ interface Store {
   mdSource: Record<string, boolean>
   sectionOpen: Record<string, boolean>
   excludedOpen: boolean
+  /** the fact check's "was already false" group is unfolded */
+  factsOpen: boolean
   diffMode: DiffMode
   docPath: string | null
   /** the diagram open in the Visualize tab, by view id (null: the first one) */
@@ -154,7 +156,7 @@ interface Store {
   setFileLoaded(path: string): void
   setMdSource(path: string, source: boolean): void
   setSectionOpen(id: string, open: boolean): void
-  set(patch: Partial<Pick<Store, 'excludedOpen' | 'diffMode' | 'docPath' | 'visualView' | 'visualNode' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'fileQuery'>>): void
+  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'visualNode' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'fileQuery'>>): void
   applyAction(action: UiAction): void
 
   onStreamOpen(): void
@@ -283,7 +285,7 @@ export const useStore = create<Store>((set, get) => {
     set({
       loaded, sessionId, preview, loading: false,
       viewedAt: loaded.state.viewedAt, reviewedSections: loaded.state.reviewedSections,
-      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, mdSource: {}, sectionOpen: {}, excludedOpen: false, diffMode: 'all', docPath: null, visualView: null, visualNode: null,
+      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, mdSource: {}, sectionOpen: {}, excludedOpen: false, factsOpen: false, diffMode: 'all', docPath: null, visualView: null, visualNode: null,
       composer: null, tour: null, returnTo: null, sectionPanel: null, fileQuery: '', wsOnly: []
     })
     refreshWsOnly()
@@ -307,6 +309,7 @@ export const useStore = create<Store>((set, get) => {
     mdSource: {},
     sectionOpen: {},
     excludedOpen: false,
+    factsOpen: false,
     diffMode: 'all',
     docPath: null,
     visualView: null,

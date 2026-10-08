@@ -1,11 +1,11 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent, type PointerEvent as RPointerEvent, type ReactNode, type RefObject } from 'react'
 import type {
-  AnchorInput, Artifact, Comment, FileDiff, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
+  AnchorInput, Artifact, Comment, FactRow, FileDiff, FocusTarget, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, treeWidthLimits, type Filters } from '../store'
 import { focusAnchor, focusQuestion, followFiles, goToSection, showSection, startTour } from '../focus'
 import {
-  ago, anchorKey, anchorLabel, askThreads, baseName, driftText, elapsed, focusable, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
+  ago, anchorKey, anchorLabel, askThreads, baseName, driftText, EFFORT, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
   sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Tab
 } from '../util'
@@ -74,6 +74,7 @@ function PageHeader({ loaded }: { loaded: LoadedReview }) {
           {loaded.dirty && <span className="label warn" title="The working tree has uncommitted changes; they are part of this review">uncommitted changes</span>}
         </span>
       </div>
+      <EffortLine loaded={loaded} />
       <CommentSlot anchor={{ kind: 'title' }} k="title" />
       {loaded.refMissing && (
         <div className="flash-banner bad" data-gr="ref-missing">
@@ -840,6 +841,110 @@ function planSummary(p: PlanMap): string {
   return parts.join(' · ')
 }
 
+/** The review's effort level with what it covers, and each part of the review as it was
+ *  last done: on which model, and for which state of the code. It sits in the header of
+ *  every tab: a review whose walkthrough Sonnet wrote and nothing else looked at says so
+ *  wherever the reviewer is reading. Everything it has to say is in its text, not in a tooltip. */
+function EffortLine({ loaded }: { loaded: LoadedReview }) {
+  const level = loaded.session.effort
+  const done = loaded.state.effortDone ?? {}
+  const wt = Boolean(loaded.state.walkthrough)
+  const upTo = level ? EFFORT_LEVELS.indexOf(level) : -1
+  // the parts this level includes, and any that are there although the level does not include them
+  const parts = EFFORT_LEVELS.filter((l, i) => i <= upTo || done[l] || (l === 'read' && wt))
+  if (!level && !parts.length) return null
+  return (
+    <div className="effort-line small" data-gr="effort" data-gr-level={level}>
+      <span className="muted">Effort</span>
+      {level ? <><span className="label effort" title={effortTitle(level)}>{level}</span><span className="muted">{EFFORT[level].sum}</span></> : <span className="muted">no level recorded (a review from before effort levels)</span>}
+      {parts.map((l, i) => {
+        const m = l === 'read' && !wt ? undefined : done[l]
+        // (a walkthrough the code has moved past says so itself, in the banner above it)
+        const old = l !== 'read' && fromEarlier(m, loaded)
+        const extra = Boolean(level) && i > upTo
+        return (
+          <span key={l} className={'effort-part' + (m ? '' : ' todo') + (old || extra ? ' old' : '')} data-gr-part={l} title={m ? `Done ${ago(m.at)} at ${short(m.sha)}.` : undefined}>
+            <strong>{EFFORT[l].part}</strong> · {m ? (m.model || 'model not recorded') : l === 'read' && wt ? 'model not recorded' : 'not done yet'}
+            {old && <> · at <span className="mono">{short(m?.sha)}</span>, an earlier state</>}
+            {extra && <> · not updated at {level}</>}
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+/** One statement that does not hold: what it says, where it stands, and the line of code
+ *  that contradicts it, each a jump when the page can go there. */
+function FactItem({ row, loaded, listAt }: { row: FactRow; loaded: LoadedReview; listAt: string }) {
+  const { set, setTab } = useStore.getState()
+  const w = row.where
+  // the note beside the code follows its line as the code moves, and the row with it
+  const note = row.commentId ? loaded.state.comments.find((c) => c.id === row.commentId) : undefined
+  const at: FocusTarget | null = note ? (note.lineGone || note.status === 'outdated' ? null : focusable(note.anchor))
+    : row.contradicts?.inDiff ? { kind: 'diff', file: row.contradicts.file, side: row.contradicts.side, line: row.contradicts.line } : null
+  const line = at?.kind === 'diff' ? at.line : row.contradicts?.line
+  const stands: FocusTarget | null = w.inDiff && w.file ? (w.line ? { kind: 'diff', file: w.file, side: 'new', line: w.line } : { kind: 'file', file: w.file }) : null
+  // a row an update kept from an earlier run; when the whole list is from an earlier state, its head says so
+  const old = fromEarlier(row.foundAt, loaded) && row.foundAt.signature !== listAt
+  return (
+    <li className="fact-row" data-gr-fact={row.id} data-gr-group={row.group}>
+      <Md text={row.statement} className="fact-statement" />
+      <div className="fact-meta small">
+        <span className="muted">stands in</span>
+        {stands ? <button className="ref-chip mono link-chip" data-gr="fact-where" title="Show it in Files changed" onClick={() => focusAnchor(stands)}>{w.label}</button>
+          : w.artifact && w.file ? <button className="ref-chip mono link-chip" data-gr="fact-where" title="Open the document in Spec & plan" onClick={() => { set({ docPath: w.file ?? null }); setTab('spec') }}>{w.label}</button>
+            : <span className={w.file || w.commit ? 'mono' : ''} data-gr="fact-where">{w.label}{w.file && <span className="muted"> (not part of this change)</span>}</span>}
+        {row.contradicts && (
+          <>
+            <span className="muted">contradicted by</span>
+            {at ? <button className="ref-chip mono link-chip" data-gr="fact-line" title="Show the line in Files changed" onClick={() => focusAnchor(at)}>{row.contradicts.file}:{line}{row.contradicts.side === 'old' ? ' (old)' : ''}</button>
+              : <span className="mono" data-gr="fact-line">{row.contradicts.file}:{line}<span className="muted">{row.contradicts.inDiff ? ' (that line is no longer in the code)' : ' (not part of this change)'}</span></span>}
+          </>
+        )}
+        {old && <span className="label warn" data-gr="earlier-state">found at <span className="mono">{short(row.foundAt.sha)}</span>, an earlier state: not checked again since</span>}
+      </div>
+      {row.why && <Md text={row.why} className="fact-why" />}
+    </li>
+  )
+}
+/** The fact check: the complete record of the statements that do not hold. What this
+ *  change made false comes first and is always open; what was false before it can be long
+ *  on a repository with neglected docs, so it is folded. */
+function FactList({ loaded }: { loaded: LoadedReview }) {
+  const fc = loaded.state.factCheck
+  const all = useStore((s) => s.factsOpen)
+  if (!fc) return null
+  const changed = fc.rows.filter((r) => r.group === 'changed')
+  const already = fc.rows.filter((r) => r.group === 'already')
+  const old = fromEarlier({ sha: fc.endSha, signature: fc.signature }, loaded)
+  return (
+    <div className="fact-box" data-gr="fact-check" id="gr-facts">
+      <div className="fact-head">
+        <strong>Fact check</strong>
+        <span>{fc.rows.length ? `${plural(fc.rows.length, 'statement')} ${fc.rows.length === 1 ? 'does' : 'do'} not hold` : 'no statement was found that does not hold'}</span>
+        <span className="small">{fc.checked != null ? `${fc.checked} checked` : 'how many were checked was not recorded'} · by {fc.model || 'a model that was not recorded'}</span>
+        {old && <span className="label warn" data-gr="earlier-state">checked at <span className="mono">{short(fc.endSha)}</span>, an earlier state: the code has changed since</span>}
+      </div>
+      {changed.length > 0 && (
+        <>
+          <div className="fact-group">Made false by this change<span className="counter">{changed.length}</span></div>
+          <ul className="fact-list">{changed.map((r) => <FactItem key={r.id} row={r} loaded={loaded} listAt={fc.signature} />)}</ul>
+        </>
+      )}
+      {already.length > 0 && (
+        <>
+          <div className="fact-group">
+            Was already false<span className="counter">{already.length}</span>
+            <button className="link small" data-gr="fact-already" aria-expanded={all} aria-controls="gr-facts-already" aria-label={`${all ? 'Hide' : 'Show'} the ${plural(already.length, 'statement')} that ${already.length === 1 ? 'was' : 'were'} already false`} onClick={() => useStore.getState().set({ factsOpen: !all })}>{all ? 'Hide' : 'Show'}</button>
+          </div>
+          {all && <ul className="fact-list" id="gr-facts-already">{already.map((r) => <FactItem key={r.id} row={r} loaded={loaded} listAt={fc.signature} />)}</ul>}
+        </>
+      )}
+    </div>
+  )
+}
+
 function Description({ loaded }: { loaded: LoadedReview }) {
   const wt = loaded.state.walkthrough
   const sectionOpen = useStore((s) => s.sectionOpen)
@@ -858,12 +963,13 @@ function Description({ loaded }: { loaded: LoadedReview }) {
           <button className="btn sm primary" data-gr="generate" disabled={asking || Boolean(loaded.refMissing)} onClick={() => ask(false)}>Ask Claude Code for a walkthrough</button>
         </div>
         <AwayHint />
+        <FactList loaded={loaded} />
         <CommentSlot anchor={{ kind: 'summary' }} k="summary" />
       </Box>
     )
   }
   return (
-    <Box author="agent" label="wrote the walkthrough" at={it?.at} cls="description">
+    <Box author="agent" label={`wrote the walkthrough${loaded.state.effortDone?.read ? ` on ${loaded.state.effortDone.read.model || 'a model that was not recorded'}` : ''}`} at={it?.at} cls="description">
       {loaded.walkthroughStale && (
         <div className="flash-banner warn" data-gr="stale">
           <span className="grow">The code changed since this walkthrough.</span>
@@ -905,6 +1011,7 @@ function Description({ loaded }: { loaded: LoadedReview }) {
         })}
       </div>
       {wt.planMap && planSummary(wt.planMap) && <div className="plan-line"><Icon name="book" size={14} /> <button className="link" onClick={() => setTab('spec')}>Spec check</button>: {planSummary(wt.planMap)}</div>}
+      <FactList loaded={loaded} />
       <div className="desc-foot muted small">
         Walkthrough #{it?.n ?? 1} · written at <span className="mono">{short(loaded.state.reviewedAtSha)}</span>
         <span className="grow" />
@@ -970,7 +1077,7 @@ function ConversationTab({ loaded }: { loaded: LoadedReview }) {
     })),
     ...st.comments.filter(generalComment).map((c) => ({ at: c.createdAt, key: 'c' + c.id, node: <div className="tl-indent"><Thread c={c} showAnchor /></div> })),
     ...st.approvals.map((a, i) => ({ at: a.at, key: 'a' + i, node: <Event icon="check" at={a.at}>You approved <span className="mono">{short(a.sha)}</span>{a.hash !== a.sha ? ' with its uncommitted changes' : ''}</Event> })),
-    ...st.iterations.slice(1).map((it) => ({ at: it.at, key: 'i' + it.n, node: <Event icon="book" at={it.at}>Claude wrote walkthrough #{it.n} at <span className="mono">{short(it.endSha)}</span></Event> }))
+    ...st.iterations.slice(1).map((it) => ({ at: it.at, key: 'i' + it.n, node: <Event icon="book" at={it.at}>Claude wrote walkthrough #{it.n} at <span className="mono">{short(it.endSha)}</span>{it.model ? ` on ${it.model}` : ''}</Event> }))
   ].sort((a, b) => a.at.localeCompare(b.at))
   const kept = loaded.files.filter((f) => !f.excluded)
   const count = (s: Comment['status']): number => st.comments.filter((c) => c.status === s).length

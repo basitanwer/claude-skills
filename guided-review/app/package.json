@@ -1,6 +1,6 @@
 {
   "name": "guided-review-app",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Local guided code review webapp driven by a Claude Code session: a dependency-free Node server, a React web UI, and the gr bridge.",
   "type": "module",

@@ -43,7 +43,7 @@ const fail = (msg, code) => { throw new Fail(msg, code) }
 const BOOL = new Set(['working-tree', 'resume', 'new', 'no-open', 'json', 'stat', 'queued', 'summary', 'title', 'all', 'unset',
   'confirmed-by-user', 'freeze', 'direct', 'force', 'full', 'list', 'include-archived', 'loop', 'on-change', 'help'])
 const VALUE = new Set(['repo', 'session', 'port', 'base', 'file', 'line', 'side', 'expect', 'text', 'as', 'section', 'question',
-  'artifact', 'step', 'status', 'verdict', 'note', 'sha', 'changed', 'timeout', 'stop', 'request', 'role', 'owner'])
+  'artifact', 'step', 'status', 'verdict', 'note', 'sha', 'changed', 'timeout', 'stop', 'request', 'role', 'owner', 'effort', 'model', 'finding', 'done'])
 function parseArgs(argv) {
   const pos = []; const opt = {}
   for (let i = 0; i < argv.length; i++) {
@@ -215,6 +215,12 @@ function tailLog(n) {
 const real = (p) => { try { return fs.realpathSync(p) } catch { return path.resolve(p) } }
 const sameHome = (info) => real(info.home) === real(HOME)
 let PORT = null
+/** What the running server said about itself (`info`). One server serves every session
+ *  and outlives an update of this skill, so it can be older than this `gr`. */
+let SERVER = null
+/** Effort levels came with server 0.3.0. Against an older one `gr` behaves as it did before them. */
+const hasEffort = () => { const [a = 0, b = 0] = String(SERVER?.version ?? '').split('.').map(Number); return a > 0 || b >= 3 }
+const needEffort = () => { if (!hasEffort()) fail(`the running review server (version ${SERVER?.version ?? 'unknown'}) is older than this gr and does not know effort levels. It has to be restarted: gr stop --force (tell the reviewer first: one server serves every open review; nothing is lost, and the next gr command starts it again)`) }
 /** Only one process starts the server at a time: a persistent listener reconnecting
  *  and another `gr` call could otherwise both find the port free and start two
  *  servers on one data directory. Returns a release function, or null if another
@@ -241,7 +247,7 @@ async function startLock(first) {
 async function ensureServer(opt = {}) {
   if (PORT) return PORT
   const first = Number(opt.port || process.env.GUIDED_REVIEW_PORT || readState().port || 8791)
-  const use = (port, info) => { PORT = port; writeState({ port, pid: info.pid }); return PORT }
+  const use = (port, info) => { PORT = port; SERVER = info; writeState({ port, pid: info.pid }); return PORT }
   const running = await probe(first)
   if (running) {
     if (!sameHome(running)) fail(`a guided-review server on port ${first} uses a different data directory (${running.home}). Stop it or pick another --port.`)
@@ -348,6 +354,78 @@ function findFile(loaded, file) {
   return f
 }
 
+// ── effort levels ────────────────────────────────────────────
+/** Lowest first; each level does everything the ones before it do. The names do not say
+ *  that, so every place that names a level also says what it covers and where it runs. */
+const EFFORT = {
+  read: { covers: 'the walkthrough only', runs: 'Sonnet' },
+  check: { covers: 'the walkthrough and a fact check', runs: 'Sonnet' },
+  bugs: { covers: 'the walkthrough, a fact check and a bug hunt', runs: "the session's model" }
+}
+const EFFORT_LEVELS = Object.keys(EFFORT)
+const DEFAULT_EFFORT = 'check'
+const EFFORT_PART = { read: 'walkthrough', check: 'fact check', bugs: 'bug hunt' }
+/** `--effort`, checked. */
+function effortArg(v) {
+  if (v == null) return null
+  if (!Object.hasOwn(EFFORT, v)) fail(`--effort is one of ${EFFORT_LEVELS.join(', ')}: ${EFFORT_LEVELS.map((l) => `${l} = ${EFFORT[l].covers}, on ${EFFORT[l].runs}`).join('; ')}`)
+  return v
+}
+/** What `setEffort` did, in words (empty when the level did not change). */
+function effortChange(set) {
+  if (!set.was || set.was === set.effort) return ''
+  return EFFORT_LEVELS.indexOf(set.effort) > EFFORT_LEVELS.indexOf(set.was)
+    ? `effort raised from ${set.was} to ${set.effort}: only what ${set.effort} adds is done now; nothing already posted is redone`
+    : `effort lowered from ${set.was} to ${set.effort}: later updates run at ${set.effort}; nothing already posted is removed`
+}
+const effortLine = (level) => `${level}: ${EFFORT[level].covers}, on ${EFFORT[level].runs}`
+/** The parts a level includes, lowest first. */
+const effortParts = (level) => EFFORT_LEVELS.slice(0, EFFORT_LEVELS.indexOf(level) + 1)
+/** Where each part of the review stands for this level: never done, done for this exact
+ *  state of the code, or done for an earlier one. */
+function effortStatus(loaded) {
+  const level = loaded.session.effort ?? DEFAULT_EFFORT
+  const done = loaded.state.effortDone ?? {}
+  const st = loaded.state
+  // a walkthrough from before effort levels was written, by a model nobody recorded: it is not owed again
+  const legacy = st.walkthrough && !done.read && st.reviewedAtSha ? { sha: st.reviewedAtSha, signature: st.reviewedSignature ?? st.reviewedAtSha, at: st.iterations?.at(-1)?.at ?? '', model: '' } : undefined
+  return EFFORT_LEVELS.map((l) => {
+    const m = l !== 'read' ? done[l] : st.walkthrough ? done.read ?? legacy : undefined
+    return { level: l, part: EFFORT_PART[l], included: effortParts(level).includes(l), mark: m ?? null, current: Boolean(m) && m.signature === loaded.signature }
+  })
+}
+/** How a Sonnet subagent has to call `gr` for its calls to count as this session's. */
+const subagentFlags = (s) => `--session ${s}${OWNER ? ` --owner ${OWNER}` : ''} --model "<the model you run on>"`
+/** The lines `gr review` and `gr effort` print about the level. */
+function effortLines(loaded, sessionId) {
+  const level = loaded.session.effort ?? DEFAULT_EFFORT
+  const parts = effortStatus(loaded)
+  const lines = [`effort ${effortLine(level)}${loaded.session.effort ? '' : ' (the default: this review has no level recorded)'}`]
+  for (const p of parts) {
+    if (!p.mark) continue
+    lines.push(`  ${p.part}: done at ${short(p.mark.sha)}${p.current ? '' : ', an earlier state of the code'} · ${p.mark.model || 'model not recorded'}${p.included ? '' : ` (not part of ${level}: it stays as it is, and later updates at ${level} leave it alone)`}`)
+  }
+  const owed = parts.filter((p) => p.included && !p.mark).map((p) => p.part)
+  // done, but for an earlier state of the code: the update covers only what changed since
+  const stale = parts.filter((p) => p.included && p.mark && !p.current).map((p) => p.part)
+  if (owed.length) lines.push(`  to do at this level: ${owed.join(', ')}`)
+  if (stale.length) lines.push(`  to update for what changed since (gr drift has the delta): ${stale.join(', ')}`)
+  if ((owed.length || stale.length) && level !== 'bugs') lines.push(`  a Sonnet subagent does that and posts it itself (do not read the diff or the delta yourself); its gr calls need: ${subagentFlags(sessionId)}`)
+  if ((owed.length || stale.length) && level === 'bugs') lines.push('  this session does that itself, on its own model: the bug hunt only reads, it never runs code from the repository under review')
+  return lines
+}
+function printFacts(fc, signature) {
+  const groups = [['changed', 'made false by this change'], ['already', 'was already false']]
+  out(`\nfact check: ${fc.rows.length ? `${fc.rows.length} statement(s) do not hold` : 'no statement was found that does not hold'}${fc.checked != null ? ` (${fc.checked} checked)` : ''} · at ${short(fc.endSha)}${fc.signature === signature ? '' : ', an earlier state of the code'} · ${fc.model || 'model not recorded'}`)
+  for (const [g, title] of groups) {
+    const rows = fc.rows.filter((r) => r.group === g)
+    if (rows.length) out(`  ${title}:`)
+    for (const r of rows) {
+      out(`  [${r.id}] ${r.statement}\n      stands in: ${r.where.label}${r.contradicts ? `\n      contradicted by: ${r.contradicts.file}:${r.contradicts.line}${r.contradicts.side === 'old' ? ' (old)' : ''}${r.contradicts.inDiff ? '' : ' (not part of the diff)'} — ${JSON.stringify(r.contradicts.lineContent)}` : ''}${r.why ? `\n      ${r.why}` : ''}${r.commentId ? `\n      note beside the code: ${r.commentId}` : ''}${r.foundAt.signature === signature ? '' : `\n      found at ${short(r.foundAt.sha)}, an earlier state of the code`}`)
+    }
+  }
+}
+
 // ── anchors: named here, validated and completed by the server ──
 function anchorInput(opt) {
   if (opt.artifact) {
@@ -437,7 +515,7 @@ function fmtComment(c, fresh) {
   const res = c.resolution ? ` → ${c.resolution.verdict}: ${c.resolution.note}${c.resolution.commit ? ` (${short(c.resolution.commit)})` : ''}${c.resolution.changed?.length ? ` · changed: ${changedLabel(c.resolution)}` : ''}` : ''
   const stale = (c.status === 'outdated' || c.lineGone) && c.anchor.lineContent != null ? `\n    stale anchor — the line it was written on is gone: ${JSON.stringify(c.anchor.lineContent)}` : ''
   const replies = c.replies.map((r, i) => `\n    ↳ ${r.author}: ${r.text}${r.pending ? '  (pending)' : ''}${fresh?.has(i) ? '  ← NEW' : ''}`).join('')
-  return `[${c.id}] ${c.status} · ${c.author} · ${anchorLabel(c.anchor)}\n    ${c.text}${res}${stale}${replies}`
+  return `[${c.id}] ${c.status}${c.finding ? ` · ${c.finding === 'bug' ? 'bug' : 'fact check'}` : ''} · ${c.author} · ${anchorLabel(c.anchor)}${c.finding && c.foundAt ? ` · at ${short(c.foundAt.sha)}` : ''}\n    ${c.text}${res}${stale}${replies}`
 }
 /** What the reviewer has written but not sent yet: queued comments and threads with an unsent reply. */
 const pendingCount = (comments) => comments.filter((c) => c.status === 'queued' || c.replies.some((r) => r.pending)).length
@@ -473,11 +551,21 @@ function fmtRequest(r) {
 }
 // ── requests: what a claimed request means and how to complete it ──
 /** The steps that complete a request, with the exact commands (always with --session). */
-function guidance(r, s) {
+function guidance(r, s, effort) {
   const S = `--session ${s}`
   if (r.kind === 'question') return [`answer with: gr answer ${r.id} ${S} --text "…" [--file P --line N]`]
   if (r.kind === 'walkthrough') {
-    return [`write the walkthrough${r.update ? ` (an update: see gr drift ${S})` : ''}, then: gr annotate --file <json> --request ${r.id} ${S}`]
+    // (a server from before effort levels says nothing about one: the request is then handled as it was)
+    if (!effort) return [`write the walkthrough${r.update ? ` (an update: see gr drift ${S})` : ''}, then: gr annotate --file <json> --request ${r.id} ${S}`]
+    // the review pass runs at the review's level, whoever asked for it
+    const level = Object.hasOwn(EFFORT, effort) ? effort : DEFAULT_EFFORT
+    const what = `${r.update ? `update the walkthrough for what changed since it was written (see gr drift ${S})` : 'write the walkthrough'}${level === 'read' ? '' : `, with its fact check ("factCheck" in the same JSON${r.update ? ', "update": true: only statements about the changed code are checked again' : ''})`}`
+    if (level === 'bugs') {
+      return [`effort ${effortLine(level)}: do it yourself, reading only. ${what[0].toUpperCase()}${what.slice(1)}, then: gr annotate --file <json> --request ${r.id} ${S} --model "<your model>"`,
+        `then hunt for defects${r.update ? ' in what changed and its callers' : ''}, check each finding again, post the ones that hold with gr comment --finding bug, and record the hunt: gr effort --done bugs ${S} --model "<your model>"`]
+    }
+    return [`effort ${effortLine(level)}: hand this to a subagent started on Sonnet (if one cannot be started, do it yourself and say so). It is to ${what}, then post it itself with: gr annotate --file <json> --request ${r.id} ${subagentFlags(s)}`,
+      `do not read the diff or the walkthrough yourself; ${path.join(SKILL, 'references', 'effort-levels.md')} has the brief to give the subagent`]
   }
   if (r.kind === 'visualize') {
     return [`draw the whole change as diagrams (schema: ${path.join(SKILL, 'references', 'visual-schema.md')})${r.update ? ` (an update: the current ones are in gr state --json ${S}, under state.visual, drawn at the commit state.visual.endSha; the code has changed since, so read gr diff ${S} again)` : ''}, then: gr visualize --file <json> --request ${r.id} ${S}`]
@@ -531,12 +619,13 @@ function requestEvent(item, loaded) {
   // (null: the review could not be read just now, so the earlier exchange is missing; gr state has it)
   if (r.follows) { ev.follows = r.follows; ev.thread = loaded ? earlier(r, loaded) : null }
   if (r.kind === 'walkthrough' || r.kind === 'visualize') ev.update = Boolean(r.update)
+  if (r.kind === 'walkthrough' && item.effort) ev.effort = item.effort
   if (r.kind === 'apply') {
     ev.commit = Boolean(r.commit); ev.editable = r.editable !== false
     if (ev.editable && loaded?.apply.workdir) ev.workdir = loaded.apply.workdir
   }
   if (item.comments?.length) ev.comments = item.comments.map((c) => threadOf(c, r, loaded?.state.walkthrough?.questions))
-  ev.do = guidance(r, s).join(' · ')
+  ev.do = guidance(r, s, item.effort).join(' · ')
   return ev
 }
 /** The same request for a person reading `gr wait`. */
@@ -577,7 +666,7 @@ function printRequest(item, loaded) {
       out(`  [${c.id}] question ${c.anchor.questionId ?? '?'}: ${q?.text ?? '(question no longer in the walkthrough)'}\n      answer: ${c.text}`)
     }
   }
-  for (const line of guidance(r, s)) out(`  ${line}`)
+  for (const line of guidance(r, s, item.effort)) out(`  ${line}`)
   if (r.kind !== 'question') out(`  during long work, report with: gr progress ${r.id} --session ${s} "…" (it exits 130 if the reviewer cancelled)`)
 }
 /** A request-scoped call: a server-side "cancelled" becomes exit code 130. */
@@ -606,8 +695,10 @@ const builders = {
   comment(o) {
     if (!o.text) fail('usage: gr comment --file P --line N [--side new|old] [--expect "text on that line"] --text "…"')
     const author = o.as === 'user' ? 'user' : 'agent'
+    if (o.finding != null && o.finding !== 'bug') fail('--finding is "bug": a defect the bug hunt confirmed (a fact check finding is a row of gr factcheck, which writes its own note)')
+    if (o.finding && author === 'user') fail('--finding marks a finding of Claude Code, so it cannot go with --as user')
     return {
-      channel: 'commentAdd', args: [{ anchor: needAnchor(o), text: String(o.text), author, status: o.queued || author === 'user' ? 'queued' : 'note' }],
+      channel: 'commentAdd', args: [{ anchor: needAnchor(o), text: String(o.text), author, status: o.queued || author === 'user' ? 'queued' : 'note', ...(o.finding ? { finding: 'bug' } : {}) }],
       lines: (c) => [`comment ${c.id} on ${anchorLabel(c.anchor)}${c.anchor.lineContent != null ? ` — anchored to: ${JSON.stringify(c.anchor.lineContent)}` : ''}`]
     }
   },
@@ -696,8 +787,23 @@ const builders = {
   annotate(o) {
     if (!o.walkthrough || typeof o.walkthrough !== 'object') fail('usage: gr annotate --file walkthrough.json [--request ID]   (schema: references/walkthrough-schema.md; "-" reads stdin)')
     return {
-      channel: 'annotate', args: [o.walkthrough, ...(o.request ? [String(o.request)] : [])], ...(o.request ? { request: String(o.request) } : {}),
-      lines: (res) => [`walkthrough stored: ${res.sections} section(s)${o.request ? ` (request ${o.request} done)` : ''}`, ...res.warnings.map((w) => `corrected against git: ${w}`)]
+      channel: 'annotate', args: [o.walkthrough, o.request ? String(o.request) : null, { model: o.model == null ? '' : String(o.model) }], ...(o.request ? { request: String(o.request) } : {}),
+      lines: (res) => [`walkthrough stored: ${res.sections} section(s)${o.request ? ` (request ${o.request} done)` : ''}`,
+        ...(res.factCheck ? [factLine(res.factCheck)] : []), ...res.warnings.map((w) => `corrected against git: ${w}`), ...(o.model || !hasEffort() ? [] : [NO_MODEL])]
+    }
+  },
+  factcheck(o) {
+    if (o.factCheck == null || typeof o.factCheck !== 'object') fail(FACTCHECK_USAGE)
+    return {
+      channel: 'factCheck', args: [o.factCheck, { model: o.model == null ? '' : String(o.model) }],
+      lines: (res) => [factLine(res), ...res.warnings.map((w) => `corrected against git: ${w}`), ...(o.model || !hasEffort() ? [] : [NO_MODEL])]
+    }
+  },
+  'effort-done'(o) {
+    if (o.level !== 'bugs') fail('usage: gr effort --done bugs --model "<your model>"   (only the bug hunt is recorded on its own: a walkthrough records read, a fact check records check)')
+    return {
+      channel: 'effortDone', args: ['bugs', { model: o.model == null ? '' : String(o.model) }],
+      lines: (m) => [`bug hunt recorded as done at ${short(m.sha)} · ${m.model || 'model not recorded (pass --model)'}`]
     }
   },
   visualize(o) {
@@ -722,12 +828,20 @@ const builders = {
     }
   }
 }
+const FACTCHECK_USAGE = 'usage: gr factcheck --file factcheck.json [--model M]   ({ "rows": [{ "statement", "where": "path:line", "contradicts": "path:line", "why", "group": "changed" | "already" }], "checked": N }; schema: references/effort-levels.md; "-" reads stdin)'
+/** Said whenever a part of the pass is stored without its model: the page then cannot say who did it. */
+const NO_MODEL = 'no --model given: the page shows "model not recorded" for this. Store it again with --model "<the model that wrote it>"'
+const factLine = (res) => `fact check stored: ${res.rows} statement(s) that do not hold, ${res.notes} with a note beside the code`
+/** Whether a write stores something only a server with effort levels keeps. An older one
+ *  would accept the call and drop that part without a word, so it is refused here. */
+const storesEffort = (name, o) => name === 'factcheck' || name === 'effort-done' || (name === 'comment' && o.finding != null) || (name === 'annotate' && o.walkthrough?.factCheck != null)
 const once = (fn) => { let v; return () => (v ??= fn()) }
 /** Run one operation as its own command. */
 async function runOp(name, o, opt) {
   const sessionId = await currentSession(opt)
   const ctx = { repo: once(async () => (await rpc('loadSession', sessionId)).session.repo) }
   const op = await builders[name](o, ctx)
+  await ensureServer(opt); if (storesEffort(name, o)) needEffort()
   const res = await forRequest(op.request, () => rpc(op.channel, sessionId, ...op.args))
   return { sessionId, op, res }
 }
@@ -781,6 +895,7 @@ const commands = {
 
   async review(pos, opt) {
     const where = locate(opt); const repo = where.repo
+    const effort = effortArg(opt.effort)
     await ensureServer(opt)
     await rpc('openRepo', repo)
     let sessionId; let resumed = false; let notes = []
@@ -796,7 +911,7 @@ const commands = {
         if (opt.list) {
           if (opt.json) return printJson(sessions)
           if (!sessions.length) out(`no saved reviews for ${repo}`)
-          for (const s of sessions) out(`#${s.id}  ${pairLabel(s.pair, s.direct)}  ${s.title || '(no walkthrough yet)'} · ${s.unresolved} open comment(s) · ${s.pendingRequests} pending request(s) · ${s.updatedAt}`)
+          for (const s of sessions) out(`#${s.id}  ${pairLabel(s.pair, s.direct)}  ${s.title || '(no walkthrough yet)'} · ${s.effort ? `effort ${s.effort} (${EFFORT[s.effort]?.covers ?? '?'}) · ` : ''}${s.unresolved} open comment(s) · ${s.pendingRequests} pending request(s) · ${s.updatedAt}`)
           return
         }
         if (!sessions.length) fail(`no saved reviews for ${repo}. Start one: gr review <commit|A..B|branch|--working-tree>`)
@@ -813,10 +928,20 @@ const commands = {
         for (const n of notes) out(`note: ${n}`)
         return
       }
-      const started = await rpc('startSession', repo, r.base, r.compare, { fresh: Boolean(opt.new), direct: r.direct })
+      const started = await rpc('startSession', repo, r.base, r.compare, { fresh: Boolean(opt.new), direct: r.direct, ...(effort ? { effort } : {}) })
       sessionId = started.sessionId; resumed = started.resumed
     }
+    // a review that is resumed keeps its level unless one is named: then it is raised or
+    // lowered from here on. One made before levels existed gets the default now.
+    let effortNote = ''
+    if (!hasEffort()) effortNote = `the running review server (version ${SERVER?.version ?? 'unknown'}) is older than this gr and does not know effort levels${effort ? `, so --effort ${effort} was not applied` : ''}; they need a restart of it (gr stop --force, after telling the reviewer: one server serves every open review)`
+    else if (resumed && effort) effortNote = effortChange(await rpc('setEffort', sessionId, effort))
     const loaded = await rpc('loadSession', sessionId)
+    if (hasEffort() && !loaded.session.effort) {
+      await rpc('setEffort', sessionId, DEFAULT_EFFORT); loaded.session.effort = DEFAULT_EFFORT
+      effortNote = `this review had no effort level recorded: it runs at ${DEFAULT_EFFORT}, the default, from now on (--effort changes it)`
+    }
+    if (effortNote) notes.push(effortNote)
     setCurrent(repo, sessionId)
     const port = await ensureServer()
     const url = reviewUrl(port, sessionId)
@@ -831,6 +956,7 @@ const commands = {
       staleComments: st.comments.filter((c) => c.status === 'outdated' || c.lineGone).length,
       pendingRequests: st.requests.filter((r) => r.status === 'pending' || r.status === 'running').length,
       approved: loaded.approved, reviewedAtSha: st.reviewedAtSha ?? null, newSinceReview: hasDelta(loaded),
+      ...(hasEffort() ? { effort: loaded.session.effort ?? DEFAULT_EFFORT, effortParts: effortStatus(loaded) } : {}),
       artifacts: loaded.artifacts.map((a) => ({ role: a.role, path: a.path })), presence: loaded.presence, notes
     }
     if (opt.json) return printJson(info)
@@ -838,6 +964,7 @@ const commands = {
     out(`${d.files} file(s), +${d.add} −${d.del}, ${d.commits} commit(s)${d.dirty ? ', working tree has uncommitted changes' : ''}${d.flags.length ? ` · ${d.flags.join(', ')}` : ''}`)
     if (info.artifacts.length) out(`spec/plan: ${info.artifacts.map((a) => `${a.path} (${a.role})`).join(', ')}`)
     out(`walkthrough: ${st.walkthrough ? `"${st.walkthrough.title}" (${st.walkthrough.sections.length} sections)` : 'none yet'} · comments: ${info.comments} (${info.openComments} open, ${info.staleComments} stale) · ${info.approved ? 'approved' : 'not approved'}`)
+    if (hasEffort()) for (const l of effortLines(loaded, sessionId)) out(l)
     if (info.newSinceReview) out(`NEW SINCE LAST REVIEW: the code changed since the ${loaded.since.kind} state ${short(loaded.since.sha)} — see: gr drift`)
     if (loaded.refMissing) out(`WARNING: the ${loaded.refMissing.side} ref ${loaded.refMissing.symbol} no longer resolves`)
     if (info.pendingRequests) out(`${info.pendingRequests} request(s) from the reviewer are waiting — gr listen (or gr wait) delivers them`)
@@ -854,7 +981,7 @@ const commands = {
     const sessions = await rpc('listSessions', repo, Boolean(opt['include-archived']))
     if (opt.json) return printJson(sessions)
     if (!sessions.length) out(`no saved reviews for ${repo}`)
-    for (const s of sessions) out(`#${s.id}${s.archived ? ' [archived]' : ''}  ${pairLabel(s.pair, s.direct)}  ${s.title || '(no walkthrough)'} · ${s.unresolved} open comment(s) · ${s.updatedAt}`)
+    for (const s of sessions) out(`#${s.id}${s.archived ? ' [archived]' : ''}  ${pairLabel(s.pair, s.direct)}  ${s.title || '(no walkthrough)'} · ${s.effort ? `effort ${s.effort} (${EFFORT[s.effort]?.covers ?? '?'}) · ` : ''}${s.unresolved} open comment(s) · ${s.updatedAt}`)
   },
   async archive(pos, opt) { const id = Number(pos[0] ?? await currentSession(opt)); await rpc('archiveSession', id, true); out(`archived review #${id} (restore: gr unarchive ${id})`) },
   async unarchive(pos) { if (!pos[0]) fail('usage: gr unarchive <sessionId>'); await rpc('archiveSession', Number(pos[0]), false); out(`restored review #${pos[0]}`) },
@@ -872,12 +999,14 @@ const commands = {
       return printJson(opt.full ? loaded : {
         sessionId, session: loaded.session, state: loaded.state, commits: loaded.commits, headSha: loaded.headSha, diffBase: loaded.diffBase,
         artifacts: loaded.artifacts.map((a) => ({ role: a.role, path: a.path, title: a.title })), dirty: loaded.dirty, apply: loaded.apply,
-        approved: loaded.approved, since: loaded.since ?? null, signature: loaded.signature, visualStale: loaded.visualStale, presence: loaded.presence, stats: d
+        approved: loaded.approved, since: loaded.since ?? null, signature: loaded.signature, visualStale: loaded.visualStale, presence: loaded.presence, stats: d,
+        ...(hasEffort() ? { effort: loaded.session.effort ?? DEFAULT_EFFORT, effortParts: effortStatus(loaded) } : {})
       })
     }
     const st = loaded.state; const w = st.walkthrough
     out(`review #${sessionId}: ${pairLabel(loaded.session.pair, loaded.session.direct)} · ${d.files} file(s) +${d.add} −${d.del}${d.dirty ? ' · uncommitted changes' : ''}`)
     out(`approved: ${loaded.approved ? 'yes (this exact state)' : st.approvals.length ? `no — last approved at ${short(st.approvals.at(-1).sha)}, the code has changed since` : 'no'} · reviewed at: ${short(st.reviewedAtSha) || '—'} · head: ${short(loaded.headSha)}`)
+    if (hasEffort()) for (const l of effortLines(loaded, sessionId)) out(l)
     if (!w) out('walkthrough: none yet (gr annotate)')
     else {
       out(`\n# ${w.title}\n${w.summary}`)
@@ -890,6 +1019,7 @@ const commands = {
         for (const v of w.planMap.deviations) out(`  DEVIATION: ${v.text}`)
       }
     }
+    if (st.factCheck) printFacts(st.factCheck, loaded.signature)
     const v = st.visual
     out(`\nvisual: ${v ? `${v.views.map((x) => `${x.title} (${x.kind}, ${x.nodes.length} nodes)`).join(' · ')} · drawn at ${short(v.endSha)}${loaded.visualStale ? ' — the code CHANGED since' : ''}` : 'none yet (gr visualize)'}`)
     const viewed = loaded.files.filter((f) => f.viewed)
@@ -938,7 +1068,32 @@ const commands = {
     if (!src) fail('usage: gr annotate --file walkthrough.json [--request ID]   (schema: references/walkthrough-schema.md; "-" reads stdin)')
     let walkthrough
     try { walkthrough = JSON.parse(src === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(src), 'utf8')) } catch (e) { fail(`cannot read walkthrough JSON: ${e.message}`) }
-    await runAndPrint('annotate', { walkthrough, request: opt.request }, opt)
+    await runAndPrint('annotate', { walkthrough, request: opt.request, model: opt.model }, opt)
+  },
+  /** The fact check on its own: for a review raised to `check` after its walkthrough was
+   *  written, and for one whose walkthrough is not rewritten. */
+  async factcheck(pos, opt) {
+    const src = opt.file || pos[0]
+    if (!src) fail(FACTCHECK_USAGE)
+    let factCheck
+    try { factCheck = JSON.parse(src === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(path.resolve(src), 'utf8')) } catch (e) { fail(`cannot read the fact check JSON: ${e.message}`) }
+    await ensureServer(opt); needEffort()
+    await runAndPrint('factcheck', { factCheck, model: opt.model }, opt)
+  },
+  /** The effort level of the current review: show it, change it (`gr effort bugs`), or
+   *  record that the bug hunt was done at this state (`gr effort --done bugs`). */
+  async effort(pos, opt) {
+    const level = effortArg(pos[0] ?? opt.effort ?? null)
+    await ensureServer(opt); needEffort()
+    if (opt.done != null && level) fail('gr effort --done bugs records the bug hunt; gr effort LEVEL changes the level. One at a time.')
+    if (opt.done != null) return runAndPrint('effort-done', { level: opt.done, model: opt.model }, opt)
+    const sessionId = await currentSession(opt)
+    const set = level ? await rpc('setEffort', sessionId, level) : null
+    const loaded = await rpc('loadSession', sessionId)
+    if (opt.json) return printJson({ sessionId, effort: loaded.session.effort ?? DEFAULT_EFFORT, was: set?.was ?? null, parts: effortStatus(loaded) })
+    out(`review #${sessionId}`)
+    for (const l of effortLines(loaded, sessionId)) out(l)
+    if (set && effortChange(set)) out(`note: ${effortChange(set)}`)
   },
 
   async visualize(pos, opt) {
@@ -1183,6 +1338,7 @@ const commands = {
         fail(`operation ${i + 1} (${name}): ${e.message.replace(/^usage: gr \S+ /, 'needs ')} — nothing was applied`)
       }
     }
+    await ensureServer(opt); if (list.some((o) => storesEffort(o.op, o))) needEffort()
     let results
     try { ({ results } = await rpc('batch', sessionId, built.map(({ channel, args }) => ({ channel, args })))) } catch (e) {
       const m = /^operation (\d+) \([^)]*\) failed: (cancelled|displaced)/.exec(e.server ?? '')
@@ -1207,12 +1363,18 @@ const commands = {
     out(`gr — guided-review bridge. Full reference: ${path.join(SKILL, 'references', 'cli.md')}
 
   review <commit | A..B | branch> [--base REF] [--freeze] [--direct] [--new]   open a comparison
+         [--effort read | check | bugs]  how far the review goes; each level includes the ones before it:
+                                         read = the walkthrough only (on Sonnet) · check = also a fact check
+                                         (on Sonnet; the default) · bugs = also a bug hunt (on the session's model)
   review --working-tree [--base REF]     uncommitted changes (staged, unstaged, untracked)
-  review --resume [SPEC] [--list]        reopen a saved review
+  review --resume [SPEC] [--list] [--effort LEVEL]     reopen a saved review; --effort raises or lowers its level
   diff [--file P] [--stat]   state   drift   sessions   open   archive [N]   unarchive N
-  annotate --file walkthrough.json [--request ID]      store the walkthrough you wrote
+  effort [read | check | bugs]           show or change the level of the current review
+  effort --done bugs --model M           record that the bug hunt was done at this state
+  annotate --file walkthrough.json [--request ID] [--model M]   store the walkthrough you wrote
+  factcheck --file factcheck.json [--model M]          store the fact check on its own
   visualize --file visual.json [--request ID]          store diagrams of the whole change (architecture, data flow, calls)
-  comment <anchor> --text T   comments   reply   resolve   reopen   delete-comment
+  comment <anchor> --text T [--finding bug]   comments   reply   resolve   reopen   delete-comment
   focus <anchor>   tour --stop "path:line | note" …   say "text"   note "text" [<anchor>]
   listen [--on-change]                   persistent listener for a background Monitor: one JSON line
                                          per request the reviewer makes in the UI (any review of the repo)
@@ -1225,7 +1387,7 @@ const commands = {
 
   <anchor>: --file P [--line N [--side new|old] [--expect TEXT]] | --section ID | --summary
             | --title | --question ID | --artifact PATH --line N | --step N
-  common:   --repo DIR  --session N  --json`)
+  common:   --repo DIR  --session N  --json  --owner ID (the Claude Code session a call is made for)`)
   }
 }
 for (const name of ['generate', 'chat', 'apply', 'permit', 'cancel']) commands[name] = async () => fail(`gr ${name}: ${REMOVED}`)

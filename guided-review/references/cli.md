@@ -1,6 +1,6 @@
 # `gr` reference
 
-Contents: [Install and launch](#install-and-launch) · [Comparison semantics](#comparison-semantics) · [Edge cases](#edge-cases) · [Commands](#commands) · [Requests from the reviewer](#requests-from-the-reviewer) · [Anchors](#anchors) · [Spec and plan discovery](#spec-and-plan-discovery) · [State and identity](#state-and-identity) · [Environment](#environment) · [HTTP contract](#http-contract) · [What costs Claude usage](#what-costs-claude-usage)
+Contents: [Install and launch](#install-and-launch) · [Comparison semantics](#comparison-semantics) · [Edge cases](#edge-cases) · [Commands](#commands) · [Effort levels](#effort-levels) · [Requests from the reviewer](#requests-from-the-reviewer) · [Anchors](#anchors) · [Spec and plan discovery](#spec-and-plan-discovery) · [State and identity](#state-and-identity) · [Environment](#environment) · [HTTP contract](#http-contract) · [What costs Claude usage](#what-costs-claude-usage)
 
 ## Install and launch
 
@@ -29,7 +29,7 @@ Every review is a (base, compare) pair. Each side is a **moving branch** (the re
 | `--working-tree` | `HEAD`, frozen at its current commit | current branch, moving (or the working tree itself when `HEAD` is detached) | `HEAD` → working tree: staged, unstaged and untracked changes. |
 | `--working-tree --base REF` | `REF` | as above | Commits since `REF` plus uncommitted changes. |
 
-Flags: `--freeze` pins any branch name to its current commit. `--new` starts a second review of the same pair instead of resuming. `--no-open` skips the browser. `--force` opens an empty diff anyway.
+Flags: `--effort read|check|bugs` sets how far the review pass goes (see [Effort levels](#effort-levels); a new review runs at `check`). `--freeze` pins any branch name to its current commit. `--new` starts a second review of the same pair instead of resuming. `--no-open` skips the browser. `--force` opens an empty diff anyway.
 
 **Uncommitted changes.** Whenever the compare side is a branch that is checked out (in the main checkout or a linked worktree), its uncommitted changes are part of the review. Each changed line is then labelled `committed`, `staged`, or `unstaged`. Untracked files appear as fully added files (over 2 MB or containing NUL bytes: listed as binary). The reviewer can exclude an untracked file in the UI, and untracked files the walkthrough does not place in a section are left out. There is no separate staged-only or unstaged-only comparison: both are shown together, distinguished by label.
 
@@ -66,8 +66,10 @@ Common options: `--repo DIR` (default: cwd), `--session N` (default: the review 
 
 | Command | Purpose |
 |---|---|
-| `review <spec> [--base REF] [--freeze] [--direct] [--new] [--no-open]` | Open or resume a comparison; opens the browser. |
-| `review --resume [SPEC] [--list]` | Reopen the latest saved review, a specific comparison, or list them. |
+| `review <spec> [--base REF] [--freeze] [--direct] [--new] [--no-open] [--effort read\|check\|bugs]` | Open or resume a comparison; opens the browser. Prints the effort level, what it covers, and what is still to do at it. |
+| `review --resume [SPEC] [--list] [--effort LEVEL]` | Reopen the latest saved review, a specific comparison, or list them. With `--effort`, raise or lower its level. |
+| `effort [read\|check\|bugs]` | Show the current review's level and where each part of the pass stands (done for this state, for an earlier one, or not yet); with a level, change it. |
+| `effort --done bugs --model M` | Record that the bug hunt was done at the current state, on model `M`. |
 | `sessions [--include-archived]` · `archive [N]` · `unarchive N` | Manage saved reviews (archive is a soft delete). |
 | `open` | Open the current review in the browser. |
 | `diff [--file P] [--stat]` | The git diff with old/new line numbers and line labels. |
@@ -78,10 +80,11 @@ Common options: `--repo DIR` (default: cwd), `--session N` (default: the review 
 
 | Command | Purpose |
 |---|---|
-| `annotate --file F.json` (`-` = stdin) `[--request ID]` | Store the walkthrough (see walkthrough-schema.md). |
+| `annotate --file F.json` (`-` = stdin) `[--request ID] [--model M]` | Store the walkthrough (see walkthrough-schema.md), and the fact check when the JSON has `factCheck`. `--model`: the model that wrote it, shown beside it in the page. |
+| `factcheck --file F.json` (`-` = stdin) `[--model M]` | Store the fact check on its own: `{ "rows": […], "checked": N }` (see effort-levels.md). The rows are checked against git; a row this change made false gets a note beside the line that contradicts it. |
 | `visualize --file F.json` (`-` = stdin) `[--request ID]` | Store diagrams of the whole change: architecture, data flow, function calls (see visual-schema.md). Paths and lines are checked against git (only git: the file system is not asked about a path); each box's status comes from the diff. A `visualize` request is completed only by this command, not by `annotate --request`. |
 | `artifact add PATH --role spec\|plan` · `artifact remove PATH` · `artifact list` | Attach or detach spec/plan files the review is judged against. |
-| `comment <anchor> --text T [--expect TEXT] [--as user] [--queued]` | Add a comment. From this session it is a `note`; `--queued` or `--as user` puts it in the reviewer's queue. |
+| `comment <anchor> --text T [--expect TEXT] [--as user] [--queued] [--finding bug]` | Add a comment. From this session it is a `note`; `--queued` or `--as user` puts it in the reviewer's queue. `--finding bug` labels it as a defect the bug hunt confirmed. Every comment of the session records the state of the code it was written at. |
 | `comments [--status note\|queued\|sent\|answered\|resolved\|outdated]` | List comments. |
 | `reply ID --text T` · `resolve ID --verdict addressed\|reworked\|skipped --note T [--changed "path:start-end" …] [--sha C]` · `reopen ID` · `delete-comment ID` | Manage a comment thread and its resolution. `--changed` (repeatable; `path:line` or `path:start-end`) names the lines edited for the comment, which the page offers as jumps to the fix: see [Where the fix is](#requests-from-the-reviewer). |
 | `focus <anchor>` | Scroll every open tab of this review to a spot and highlight it. Opens a tab if none is open. |
@@ -97,13 +100,31 @@ Common options: `--repo DIR` (default: cwd), `--session N` (default: the review 
 
 Exit codes: `0` ok, `1` usage error or refused, `3` server unreachable, `130` the reviewer cancelled the request.
 
+## Effort levels
+
+`--effort` says how far a review pass (the walkthrough, the fact check, the bug hunt) goes. The levels add up; [effort-levels.md](effort-levels.md) says how each part is done.
+
+| Level | Covers | Runs on |
+|---|---|---|
+| `read` | the walkthrough only | Sonnet (a subagent the session starts) |
+| `check` (default) | the walkthrough and a fact check | Sonnet (a subagent the session starts) |
+| `bugs` | the walkthrough, a fact check and a bug hunt | the session's model |
+
+- **Stored with the review.** A new review gets the level named, or `check` (also when it is started from the page). Resuming keeps the stored level; `--effort` on a resume, or `gr effort LEVEL`, raises or lowers it from then on. Raising adds only what the higher level adds; lowering removes nothing. A review made before effort levels has none until `gr review --resume`, which gives it `check` and says so.
+- **Per part, what was done.** The review records for each level the state its part was last done at, when, and on which model: `read` when a walkthrough is stored, `check` when a fact check is stored (even an empty one), `bugs` by `gr effort --done bugs`. `--model` on those commands is the model that did the work; it is recorded as given, and as "not recorded" when left out (`gr` then says so), never assumed from the level. A walkthrough from before effort levels counts as done, with no model recorded: it is not owed again.
+- **The fact check** is a list of rows: a statement that does not hold, where it stands, the line of code that contradicts it, what the code does instead, and the group, "made false by this change" or "was already false". The server checks it as it checks a walkthrough: a path must be one git has on the compare side (git alone is asked about a file the diff does not hold), a line must exist, and its text is copied from git; what cannot be confirmed is taken out of the row and reported, and the row stays. The list is stored apart from the walkthrough (`state.factCheck`), so a later walkthrough leaves it. At most 100 rows.
+- **Notes beside the code come from the rows.** For every "made false by this change" row whose contradicting line is part of the diff, the server writes one comment on that line (`finding: "fact"`). Storing the fact check again keeps the two in step: a row given again keeps its id and its note; the note of a row that is gone is deleted unless somebody replied to it. With `"update": true` the stored rows stay unless given again or named in `"retire"`; a fact check that comes with the answer to an update request is an update unless it says `"update": false`. Without it the list is replaced and `gr` says how many earlier rows went. A fact check with a row that has no `statement` is refused whole, so that a malformed one is never stored as "nothing found". A row follows its note: when the note is re-anchored after the code moved, the row names the same line. A comment can only be anchored in a changed file or an attached spec or plan, which is why a statement in a README outside the diff is a row of the list and not a comment on the README.
+- **Findings carry their state.** Every comment written by the session, and every fact check row, records the compare commit and the fingerprint of the code at that moment. Once the code has changed, a finding says "found at `<commit>`, an earlier state" in the page and in `gr state` / `gr comments`; nothing is removed.
+- **A walkthrough request carries the level.** Its event has `"effort"`, and its `do` field says who does the work: at `read` and `check` a Sonnet subagent, with the `--session` and `--owner` its `gr` calls need (the request is held by the session that claimed it, so the subagent's calls have to carry that session's id); at `bugs` the session itself.
+- **An older server.** One server serves every session and outlives an update of the skill. Against a server older than 0.3.0, `gr review` opens the review without a level and says the server has to be restarted; `gr effort`, `gr factcheck`, `gr annotate` with a `factCheck`, and `gr comment --finding` are refused with the same advice, since the older server would accept the last two and drop the finding.
+
 ## Requests from the reviewer
 
 The page cannot do agent work itself. What the reviewer does there that needs Claude Code becomes a **request**, stored in the review, that the attached session receives and completes with one command. Walkthrough, question, and apply are distinct kinds with distinct completions.
 
 | Kind | Created by | Carries | Completed by |
 |---|---|---|---|
-| `walkthrough` | Ask for / Update walkthrough | optional steer; `update` flag | `gr annotate --file F --request ID` |
+| `walkthrough` | Ask for / Update walkthrough | optional steer; `update` flag; `effort` (the review's level) | `gr annotate --file F --request ID` (run by the Sonnet subagent at `read` and `check`, with `--owner`) |
 | `question` | The Conversation box, "Ask Claude Code" on a line, or a follow-up typed in a Question thread | the question, optional anchor with the line's text; for a follow-up also `follows` and the `thread` so far | `gr answer ID --text "…"` (an anchor or `--stop`s attach clickable focus/tour chips; the first one also plays live) |
 | `apply` | Review ▾ → Send | every pending comment and every thread with a pending reply; optional note; `commit`; `editable` | `gr reply` / edits + `gr resolve` per item (with `--changed` for the lines edited), then `gr done ID` |
 | `decisions` | Answering the walkthrough's open questions | the answer comments | updated walkthrough, `gr resolve` per answer, then `gr done ID` |
@@ -146,7 +167,7 @@ Lifecycle: `pending` → `running` (claimed by a listener) → `done` | `failed`
 ]
 ```
 
-Operations: `comment`, `reply`, `resolve`, `reopen`, `delete-comment`, `answer`, `note`, `progress`, `done`, `fail`, `annotate` (`walkthrough` object), `visualize` (`visual` object), `focus`, `viewed`. A `resolve` operation takes `changed` as an array of `"path:start-end"` strings or `{"file", "start", "end"}` objects.
+Operations: `comment` (takes `"finding": "bug"`), `reply`, `resolve`, `reopen`, `delete-comment`, `answer`, `note`, `progress`, `done`, `fail`, `annotate` (`walkthrough` object, `model`), `factcheck` (`factCheck` object, `model`), `effort-done` (`"level": "bugs"`, `model`), `visualize` (`visual` object), `focus`, `viewed`. A `resolve` operation takes `changed` as an array of `"path:start-end"` strings or `{"file", "start", "end"}` objects.
 
 ## Anchors
 
@@ -178,7 +199,7 @@ When a review is first loaded: every recognised file the diff touches is attache
 
 ## State and identity
 
-Everything is local and human-readable: `<home>/sessions/<id>.json` holds one review (walkthrough and its history, the diagrams of the Visualize tab, comments and replies, conversation, requests, viewed and reviewed marks, excluded untracked files, approval history, attached spec/plan paths); `<home>/index.json` holds opened repositories and preferences; `<home>/bridge.json` holds the server port and the current review per repository. Diffs and file contents are never stored; they are read from git on every load. Writes are atomic (temp file, then rename). A file that fails to parse is set aside as `*.corrupt-<time>`, never deleted.
+Everything is local and human-readable: `<home>/sessions/<id>.json` holds one review (its effort level and what was done at each level, walkthrough and its history, the fact check, the diagrams of the Visualize tab, comments and replies, conversation, requests, viewed and reviewed marks, excluded untracked files, approval history, attached spec/plan paths); `<home>/index.json` holds opened repositories and preferences; `<home>/bridge.json` holds the server port and the current review per repository. Diffs and file contents are never stored; they are read from git on every load. Writes are atomic (temp file, then rename). A file that fails to parse is set aside as `*.corrupt-<time>`, never deleted.
 
 - Default home: `~/Library/Application Support/guided-review` (macOS), `$XDG_CONFIG_HOME/guided-review` or `~/.config/guided-review` (Linux).
 - **Identity** of a review is (repository, base identity, compare identity, direct or not). A branch side's identity is its name; a commit side's is its SHA. So `main..feature` is one review that follows `feature`, `main..<sha>` is a different, frozen one, and `--direct` is a third. `gr review` resumes the matching review unless `--new`.
@@ -215,4 +236,6 @@ Routes the UI understands: `#/` (dashboard), `#/repo?path=<abs>`, `#/review?sess
 
 ## What costs Claude usage
 
-Only this Claude Code session. The server, UI, storage and every `gr` command are local tooling: they make no network calls and start no model. There is no second agent run, no API key, and no other service; work the reviewer requests in the UI is done by the session that is attached, on its existing login.
+Only this Claude Code session, and the subagent it starts. The server, UI, storage and every `gr` command are local tooling: they make no network calls and start no model. There is no API key and no other service; work the reviewer requests in the UI is done by the session that is attached, on its existing login.
+
+The effort level sets where the review pass is spent. At `read` and `check` the session hands the pass to a subagent on Sonnet and does not read the diff or the result itself, so the pass costs Sonnet's price; at `bugs` the whole pass runs on the session's model. Questions, apply requests, decisions and diagrams are always the session's, so a `read` review is not Sonnet-priced end to end, and the first question in one is slower: the session reads the walkthrough then. On a session that is itself on a smaller model than Sonnet, `read` and `check` cost more than the session's own model would.

@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
 import type {
-  AnchorInput, Comment, CommentAnchor, DriftSummary, FileDiff, FocusTarget, Hunk, LoadedReview, Message, RefSide, ReviewRequest, Section
+  AnchorInput, Comment, CommentAnchor, DriftSummary, EffortLevel, FileDiff, FocusTarget, Hunk, LoadedReview, Message, RefSide, ReviewRequest, Section, StateMark
 } from '@shared/types'
 
 // ── routing ───────────────────────────────────────────────────
@@ -113,6 +113,19 @@ export function hunksForMode(f: FileDiff, mode: DiffMode): Hunk[] {
   if (mode === 'viewed') return f.untracked ? f.hunks : (f.sinceViewedHunks ?? [])
   return f.hunks
 }
+
+// ── effort levels ─────────────────────────────────────────────
+/** Lowest first. The names do not say that each level includes the ones before it, so
+ *  wherever a level is shown, what it covers is said with it. */
+export const EFFORT_LEVELS: EffortLevel[] = ['read', 'check', 'bugs']
+export const EFFORT: Record<EffortLevel, { part: string; covers: string; sum: string; runs: string }> = {
+  read: { part: 'Walkthrough', covers: 'the walkthrough only', sum: 'walkthrough only', runs: 'Sonnet' },
+  check: { part: 'Fact check', covers: 'the walkthrough and a fact check', sum: 'walkthrough + fact check', runs: 'Sonnet' },
+  bugs: { part: 'Bug hunt', covers: 'the walkthrough, a fact check and a bug hunt', sum: 'walkthrough + fact check + bug hunt', runs: "the session's model" }
+}
+export const effortTitle = (l: EffortLevel): string => `Effort level "${l}": ${EFFORT[l].covers}, on ${EFFORT[l].runs}. Chosen with /guided-review --effort read | check | bugs; each level includes the ones before it.`
+/** Whether something recorded at `mark` is about an earlier state of the code than the one shown. */
+export const fromEarlier = (mark: StateMark | undefined, loaded: LoadedReview | null): boolean => Boolean(mark && loaded && mark.signature !== loaded.signature)
 
 /** Whether the "since approved / since reviewed" switch has anything to show. */
 export function sinceActive(loaded: LoadedReview | null): boolean {

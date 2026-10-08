@@ -626,6 +626,156 @@ export async function reconcileVisual(repo, loaded, raw, read) {
   return { visual: { title: cut(raw.title, 120), summary: str(raw.summary).trim().slice(0, 1200), views }, warnings }
 }
 
+// ── fact check: statements that do not hold ──────────────────
+/** The effort levels, lowest first. Each does everything the ones before it do. */
+export const EFFORT_LEVELS = /** @type {const} */ (['read', 'check', 'bugs'])
+/** @param {unknown} v @returns {import('../shared/types.ts').EffortLevel | null} */
+export const effortLevel = (v) => EFFORT_LEVELS.find((l) => l === v) ?? null
+/** How many rows one fact check holds. A longer list is not read. */
+export const FACT_MAX = { rows: 100, warnings: 40 }
+const FACT_GROUPS = /** @type {Record<string, 'changed' | 'already'>} */ ({
+  changed: 'changed', new: 'changed', 'made-false': 'changed', 'made false by this change': 'changed',
+  already: 'already', before: 'already', 'already-false': 'already', 'was already false': 'already'
+})
+/** Check a fact check a session wrote against git, the way a walkthrough is. A row says
+ *  that a statement does not hold: where the statement stands, and which line of code
+ *  contradicts it. Both places have to be there: a path is one git has on the compare side
+ *  (only git is asked about a path the diff does not hold, as for a visual), a line exists,
+ *  and its text is copied from git. A place that cannot be confirmed is taken out of the
+ *  row and reported; the row stays, since the finding may still be right.
+ *  Returns, per row, the anchor of its note when the contradicting line is part of the diff.
+ *  `opts.update`: what `update` means when the fact check does not say (true for one that
+ *  answers a request to update the walkthrough: what was found earlier then stays).
+ *  @param {string} repo @param {LoadedReview} loaded @param {any} raw @param {ReturnType<typeof sideReader>} read @param {{ update?: boolean }} [opts] */
+export async function reconcileFactCheck(repo, loaded, raw, read, opts = {}) {
+  const str = (/** @type {unknown} */ v) => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : '')
+  const cut = (/** @type {unknown} */ v, /** @type {number} */ n) => { const t = str(v).replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t }
+  const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? raw.rows : null
+  if (!Array.isArray(list)) throw new Error('a fact check is { "rows": [{ "statement", "where": "path:line", "contradicts": "path:line", "why", "group": "changed" | "already" }] }; "rows" may be empty when every statement holds')
+  /** @type {string[]} */
+  const warnings = []
+  let unsaid = 0
+  const warn = (/** @type {string} */ w) => { if (warnings.length < FACT_MAX.warnings) warnings.push(w); else unsaid++ }
+  const files = loaded.files.filter((f) => !f.excluded)
+  const inDiff = (/** @type {string} */ rel) => files.find((x) => x.path === rel) ?? files.find((x) => x.oldPath === rel)
+  /** A path as git spells it, or null. @param {string} given */
+  const spelled = (given) => {
+    const rel = given.replace(/\/+$/, '')
+    return !rel || given.length > 1000 || path.isAbsolute(rel) || rel.split('/').some((p) => p === '..' || p === '.' || p === '' || p.toLowerCase() === '.git') ? null : rel
+  }
+  /** The lines of a file git has on the compare side and the diff does not hold. @type {Map<string, Promise<string[] | null>>} */
+  const untouched = new Map()
+  const linesAt = (/** @type {string} */ rel) => {
+    if (!untouched.has(rel)) {
+      untouched.set(rel, tryGit(repo, ['cat-file', '-t', `${loaded.headSha}:${rel}`]).then(async (t) => {
+        if (t?.trim() !== 'blob') return null
+        const text = (await tryGit(repo, ['show', `${loaded.headSha}:${rel}`])) ?? ''
+        const l = text.split('\n'); if (l.at(-1) === '') l.pop()
+        return l
+      }))
+    }
+    return /** @type {Promise<string[] | null>} */ (untouched.get(rel))
+  }
+  /** "path", "path:12" or "path:12:old", or { file, line, side }. @param {any} v */
+  const named = (v) => {
+    if (v && typeof v === 'object') return { file: str(v.file ?? v.path).trim(), line: v.line == null ? undefined : Number(v.line), side: v.side === 'old' ? /** @type {const} */ ('old') : /** @type {const} */ ('new') }
+    const m = /^(.*?)(?::(\d+)(?::(old|new))?)?$/.exec(str(v).replace(/\s+/g, ' ').trim())
+    return { file: m?.[1] ?? '', line: m?.[2] ? Number(m[2]) : undefined, side: m?.[3] === 'old' ? /** @type {const} */ ('old') : /** @type {const} */ ('new') }
+  }
+  /** Where the statement stands. @param {string} name @param {any} v @returns {Promise<import('../shared/types.ts').FactWhere>} */
+  const whereOf = async (name, v) => {
+    const text = v && typeof v === 'object' ? '' : str(v).replace(/\s+/g, ' ').trim()
+    const asked = v && typeof v === 'object' ? str(v.commit).trim() : /^commit\s+([0-9a-f]{4,40})$/i.exec(text)?.[1] ?? ''
+    if (asked) {
+      const c = /^[0-9a-f]{4,40}$/i.test(asked) ? loaded.commits.find((x) => x.sha.startsWith(asked.toLowerCase())) : undefined
+      if (c) return { label: `the message of commit ${short(c.sha)}`, commit: c.sha }
+      warn(`${name}: commit ${cut(asked, 40)} is not part of this comparison — kept as a label only`)
+      return { label: (v && typeof v === 'object' ? cut(v.label, 160) : cut(text, 160)) || `commit ${cut(asked, 40)}` }
+    }
+    const n = named(v)
+    const label = cut(v && typeof v === 'object' ? v.label : '', 160)
+    if (!n.file) return { label: label || 'not said' }
+    const rel = spelled(n.file)
+    const f = rel ? inDiff(rel) : undefined
+    const art = rel ? loaded.artifacts.find((a) => a.path === rel) : undefined
+    const lines = !rel ? null : f ? (f.binary || f.status === 'deleted' ? null : await read(f, 'new')) : art ? art.lines : await linesAt(rel)
+    if (!rel || !lines) {
+      // free words ("the pull request description") are a label; something written like a path is reported
+      if (rel && (v && typeof v === 'object' || n.line != null || !/\s/.test(n.file))) warn(`${name}: the statement is said to stand in ${cut(n.file, 200)}, which ${f ? `has no lines on the compare side (${f.binary ? 'binary' : f.status})` : 'git does not have on the compare side'} — kept as a label only`)
+      return { label: label || cut(text || n.file, 160) }
+    }
+    const file = f ? f.path : /** @type {string} */ (rel)
+    const flags = { ...(f ? { inDiff: true } : {}), ...(art ? { artifact: true } : {}) }
+    if (n.line == null) return { label: label || file, file, ...flags }
+    if (!Number.isInteger(n.line) || n.line < 1 || n.line > lines.length) {
+      warn(`${name}: ${file} has ${lines.length} lines; line ${Number.isNaN(n.line) ? '?' : n.line} does not exist — the line was removed`)
+      return { label: label || file, file, ...flags }
+    }
+    return { label: label || `${file}:${n.line}`, file, line: n.line, lineContent: clipLine(lines[n.line - 1]), ...flags }
+  }
+  /** The line of code that contradicts it, and the anchor of a note on it when the line is
+   *  part of the diff. @param {string} name @param {any} v */
+  const against = async (name, v) => {
+    const n = named(v)
+    if (!n.file) return null
+    const rel = spelled(n.file)
+    if (!rel || n.line == null) { warn(`${name}: the contradicting line ${JSON.stringify(cut(typeof v === 'string' ? v : n.file, 200))} is not "path:line" — removed`); return null }
+    if (inDiff(rel)) {
+      try {
+        const anchor = await makeAnchor(loaded, { kind: 'diff', file: rel, side: n.side, line: n.line }, read)
+        if (anchor.kind !== 'diff') return null
+        return { at: { file: anchor.file, line: anchor.line, side: anchor.side, lineContent: clipLine(anchor.lineContent), inDiff: true }, anchor }
+      } catch (err) { warn(`${name}: the contradicting line was removed — ${err instanceof Error ? err.message : err}`); return null }
+    }
+    const lines = await linesAt(rel)
+    if (!lines) { warn(`${name}: the contradicting line is said to be in ${rel}, which git does not have on the compare side — removed`); return null }
+    if (!Number.isInteger(n.line) || n.line < 1 || n.line > lines.length) { warn(`${name}: ${rel} has ${lines.length} lines; line ${n.line} does not exist — the contradicting line was removed`); return null }
+    return { at: { file: rel, line: n.line, side: /** @type {const} */ ('new'), lineContent: clipLine(lines[n.line - 1]), inDiff: false }, anchor: null }
+  }
+
+  if (list.length > FACT_MAX.rows) warn(`${list.length} rows given; a fact check holds ${FACT_MAX.rows} — the rest were dropped`)
+  // A row without a statement is not a finding that can be listed, and leaving it out would
+  // let a fact check that found things be stored as one that found nothing: it is refused whole.
+  const blank = list.slice(0, FACT_MAX.rows).flatMap((r, i) => (cut(r?.statement, 500) ? [] : [i + 1]))
+  if (blank.length) throw new Error(`fact check: row${blank.length === 1 ? '' : 's'} ${blank.slice(0, 10).join(', ')}${blank.length > 10 ? '…' : ''} ha${blank.length === 1 ? 's' : 've'} no "statement" (a row is { "statement", "where", "contradicts", "why", "group" }) — nothing was stored`)
+  /** @type {{ id: string, statement: string, why: string, group: 'changed' | 'already', where: import('../shared/types.ts').FactWhere, contradicts?: NonNullable<import('../shared/types.ts').FactRow['contradicts']>, anchor: CommentAnchor | null }[]} */
+  const rows = []
+  const seen = new Set()
+  for (const [i, r] of list.slice(0, FACT_MAX.rows).entries()) {
+    const statement = cut(r.statement, 500)
+    const name = `row ${i + 1} (${JSON.stringify(cut(statement, 50))})`
+    const asked = str(r?.group).trim().toLowerCase()
+    const group = Object.hasOwn(FACT_GROUPS, asked) ? FACT_GROUPS[asked] : undefined
+    if (!group) warn(`${name} has group ${JSON.stringify(cut(r?.group, 40) || null)}; it is listed under "was already false" (groups: "changed" for a statement this change made false, "already" for one that was false before it)`)
+    const where = await whereOf(name, r?.where)
+    const key = factKey({ statement, where })
+    if (seen.has(key)) { warn(`${name} is given twice for the same place — the second was dropped`); continue }
+    seen.add(key)
+    const hit = r?.contradicts == null || r.contradicts === '' ? null : await against(name, r.contradicts)
+    if ((group ?? 'already') === 'changed' && !hit?.anchor) warn(`${name} is listed as made false by this change, but ${hit ? `the line that contradicts it (${hit.at.file}:${hit.at.line}) is not part of the diff` : 'no line of the diff is named as contradicting it'}: it gets no note beside the code`)
+    // `id`: a stored row given again under its id, so that it can be reworded
+    rows.push({ id: cut(r?.id, 20), statement, why: cut(r?.why, 800), group: group ?? 'already', where, ...(hit ? { contradicts: hit.at } : {}), anchor: hit?.anchor ?? null })
+  }
+  const obj = Array.isArray(raw) ? {} : raw
+  if (obj.retire != null && !Array.isArray(obj.retire)) warn('"retire" is a list of row ids, such as ["f3"] — ignored')
+  if (unsaid) warnings.push(`…and ${unsaid} more correction(s) of the same kinds`)
+  const said = Array.isArray(raw) ? undefined : raw.checked
+  const checked = typeof said === 'number' && Number.isInteger(said) && said >= 0 ? said : undefined
+  return {
+    rows, warnings, ...(checked != null ? { checked: Math.max(checked, rows.length) } : {}),
+    // with `update`, the rows already stored stay unless one is given again or named in `retire`
+    update: typeof obj.update === 'boolean' ? obj.update : Boolean(opts.update), retire: Array.isArray(obj.retire) ? obj.retire.map(str) : []
+  }
+}
+/** A line of code as a row quotes it: a minified file's one line is megabytes, and a row is kept whole in the review. @param {string} t */
+export const clipLine = (t) => (t.length > 400 ? `${t.slice(0, 399)}…` : t)
+/** What makes two rows the same finding: the statement, and where it stands (not the line
+ *  number, which moves). @param {{ statement: string, where: import('../shared/types.ts').FactWhere }} r */
+export const factKey = (r) => `${squash(r.statement).toLowerCase()}\0${r.where.commit ?? r.where.file ?? squash(r.where.label).toLowerCase()}`
+/** The note the server puts beside the line that contradicts a statement.
+ *  @param {{ statement: string, why: string, where: import('../shared/types.ts').FactWhere }} r */
+export const factNote = (r) => `**Fact check:** this change makes a statement false.\n\n> ${r.statement}\n\nIt stands in ${r.where.label}.${r.why ? ` ${r.why}` : ''}`
+
 // ── assembly ─────────────────────────────────────────────────
 /** Paths named by `git status --porcelain -z` entries ("XY path", renames are followed
  *  by their original path as a separate entry). @param {string[]} entries */
@@ -663,7 +813,7 @@ export async function assemble(store, session, opts) {
   const viewing = Boolean(view.ignoreWhitespace || view.commit)
   const state = viewing ? structuredClone(session.state) : session.state
   const extra = view.ignoreWhitespace ? ['-w'] : []
-  const meta = { id: session.id, repo, pair, direct, createdAt: session.createdAt, updatedAt: session.updatedAt, archived: session.archived }
+  const meta = { id: session.id, repo, pair, direct, ...(session.effort ? { effort: session.effort } : {}), createdAt: session.createdAt, updatedAt: session.updatedAt, archived: session.archived }
   const now = await resolveNow(repo, pair)
   /** @type {LoadedReview} */
   const loaded = {
@@ -777,6 +927,14 @@ export async function assemble(store, session, opts) {
       if (lines) full.set(`${f.path}\0${a.side}`, lines)
     }
     if (reanchor(state.comments, files, loaded.artifacts, full)) changed = true
+    // a fact check row follows its note: the note is re-anchored as the code moves, and the
+    // row names the same line
+    for (const r of state.factCheck?.rows ?? []) {
+      const a = r.commentId ? state.comments.find((c) => c.id === r.commentId && !c.lineGone)?.anchor : undefined
+      if (!r.contradicts || a?.kind !== 'diff') continue
+      const at = { file: a.file, line: a.line, side: a.side, lineContent: clipLine(a.lineContent) }
+      if (Object.entries(at).some(([k, v]) => /** @type {any} */ (r.contradicts)[k] !== v)) { Object.assign(r.contradicts, at); changed = true }
+    }
   }
   if (changed && opts.persist && store && !viewing) store.save(session, { touch: false })
 
