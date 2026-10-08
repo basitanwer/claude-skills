@@ -3,11 +3,11 @@ import type {
   AnchorInput, Artifact, Comment, FactRow, FileDiff, FocusTarget, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, focusQuestion, followFiles, goToSection, holdPlaces, showInPane, showSection, startTour } from '../focus'
+import { focusAnchor, focusQuestion, followFiles, goToSection, holdCodePlace, holdPlaces, showInPane, showSection, startTour, unparkCodePlace } from '../focus'
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
-  sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Guide
+  PANES_SETTLED, sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Guide
 } from '../util'
 import { AwayHint, BackBar, CopyButton, DiffStat, FileIcon, Icon, Md, Menu, MenuItem, PresenceDot, ThemeToggle, currentTheme, setTheme } from '../components/common'
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
@@ -38,24 +38,20 @@ function useWide(px: number): boolean {
  *  a pane is decided by the pane's own width, since beside the other pane it has only a
  *  part of the window. Read when the pane is first drawn and whenever its size changes;
  *  the caller is drawn again only when a step is crossed. While the divider is being
- *  dragged the reading waits until the width has held still, so the content of a pane is
- *  not laid out anew at every step of the drag. A pane that is hidden keeps its last width. */
+ *  dragged the reading waits for its release, so the content of a pane is not laid out
+ *  anew at every step of the drag. A pane that is hidden keeps its last width. */
 function usePaneWidth(ref: RefObject<HTMLElement | null>, steps: readonly number[]): number {
   const stepOf = (w: number): number => steps.reduce((at, s) => (w >= s ? s : at), 0)
   const [step, setStep] = useState(() => stepOf(window.innerWidth))
   useLayoutEffect(() => {
     const el = ref.current
     if (!el) return
-    let timer = 0
     const read = (): void => { const w = el.getBoundingClientRect().width; if (w > 0) setStep(stepOf(w)) }
     read()
-    const ro = new ResizeObserver(() => {
-      window.clearTimeout(timer)
-      if (el.closest('[data-dragging]')) timer = window.setTimeout(read, 140)
-      else read()
-    })
+    const ro = new ResizeObserver(() => { if (!el.closest('[data-dragging]')) read() })
     ro.observe(el)
-    return () => { ro.disconnect(); window.clearTimeout(timer) }
+    window.addEventListener(PANES_SETTLED, read)
+    return () => { ro.disconnect(); window.removeEventListener(PANES_SETTLED, read) }
   }, [ref])       // eslint-disable-line react-hooks/exhaustive-deps
   return step
 }
@@ -65,11 +61,11 @@ const below = (width: number, marks: number[]): string => marks.filter((m) => wi
 /** For a scroller that is hidden at times (a Guide while another is on show, a pane folded
  *  away): a box that is not drawn forgets how far it was scrolled in some browsers, so the
  *  position is noted while it is on show and put back when it returns. */
-function useKeptScroll<T extends HTMLElement>(shown: boolean): { ref: RefObject<T | null>; onScroll: () => void } {
+function useKeptScroll<T extends HTMLElement>(shown: boolean): { ref: RefObject<T | null>; onScroll: () => void; y: RefObject<number> } {
   const ref = useRef<T>(null)
   const y = useRef(0)
   useLayoutEffect(() => { if (shown && ref.current && ref.current.scrollTop !== y.current) ref.current.scrollTop = y.current }, [shown])
-  return { ref, onScroll: () => { if (shown && ref.current) y.current = ref.current.scrollTop } }
+  return { ref, y, onScroll: () => { if (shown && ref.current) y.current = ref.current.scrollTop } }
 }
 
 // ── the top bar ───────────────────────────────────────────────
@@ -417,6 +413,10 @@ const TREE_GAP = 24
  *  beside a section (1200), tree, diff and section side by side (1600). They are the
  *  window widths the same things changed at while the code had the window to itself. */
 const CODE_STEPS = [520, 760, 900, 1100, SPLIT_BESIDE_SECTION, 1600] as const
+/** Beside a Guide a diff is split by the room its own column has, since the tree may or
+ *  may not be in the pane with it: never split under 700px, split unless the reviewer chose
+ *  otherwise from 900px. */
+const FILES_STEPS = [700, 900] as const
 /** Drag (or arrow keys) to resize the file panel; double-click resets it. */
 function ResizeHandle({ width, onChange }: { width: number; onChange: (px: number | null) => void }) {
   const drag = useRef<{ x: number; w: number } | null>(null)
@@ -670,6 +670,10 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   const widest = width >= 1600
   const fits = width >= SPLIT_BESIDE_SECTION
   const scroll = useKeptScroll<HTMLDivElement>(shown)
+  // back on show, perhaps at another width than it was folded away with: on the line it showed, not at the same offset
+  useLayoutEffect(() => { if (shown) unparkCodePlace(scroll.y.current) }, [shown])       // eslint-disable-line react-hooks/exhaustive-deps
+  // how wide the column of files itself is (the pane less the tree and an open section)
+  const column = usePaneWidth(scroll.ref, FILES_STEPS)
   const [closed, setClosed] = useState<Set<string>>(() => new Set())
   const [, bump] = useState(0)
   const wt = loaded.state.walkthrough
@@ -705,7 +709,10 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   // closed, and where the diff column left beside it is too narrow to read two-up, the diff
   // is unified. Between 760 and 1100px it is still a drawer, and the tree gives way just
   // the same, or the two together would leave a sliver of the code the section is about.
-  const forTree = secPanel && medium && !widest
+  // Beside a Guide a pane under 1100px has no room for that drawer either (it would leave a
+  // strip of the code the section is about): the section sits on top of the files instead.
+  const secOnTop = secPanel && guideBeside && !wide
+  const forTree = secPanel && ((medium && !widest) || secOnTop)
   // Where the tree has room it shows whenever it is switched on: in a pane of 760px or
   // more, and, while a Guide is beside the code, on a window wide enough for Guide, tree
   // and code (the Workspace then leaves the tree its room). Elsewhere it folds by itself
@@ -739,8 +746,8 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [forTree, set])
-  const canSplit = roomy && !(forTree && !fits)
-  const split = canSplit && (diffView ?? (wide ? 'split' : 'unified')) === 'split'
+  const canSplit = guideBeside ? column >= 700 : roomy && !(forTree && !fits)
+  const split = canSplit && (diffView ?? ((guideBeside ? column >= 900 : wide) ? 'split' : 'unified')) === 'split'
 
   const wsOnly = useStore((s) => s.wsOnly)
   const wsPaths = useMemo(() => new Set(wsOnly.map((f) => f.path)), [wsOnly])
@@ -812,8 +819,8 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
           {(close) => (
             <>
               <div className="pop-head">Diff view</div>
-              <MenuItem checked={split} disabled={!canSplit} title={roomy && !canSplit ? 'Not enough room beside the section — close it to split the diff' : undefined} onClick={() => { setDiffView('split'); close() }}>Split</MenuItem>
-              <MenuItem checked={!split} onClick={() => { if (canSplit) setDiffView('unified'); close() }}>Unified</MenuItem>
+              <MenuItem checked={split} disabled={!canSplit} title={canSplit ? undefined : guideBeside ? 'Not enough room beside the Guide — drag the divider, or close the Guide pane, to split the diff' : roomy ? 'Not enough room beside the section — close it to split the diff' : undefined} onClick={() => { const hold = holdCodePlace(); setDiffView('split'); hold.settle(); close() }}>Split</MenuItem>
+              <MenuItem checked={!split} onClick={() => { if (canSplit) { const hold = holdCodePlace(); setDiffView('unified'); hold.settle() } close() }}>Unified</MenuItem>
               <label className="menu-item" title="Leave out changes that only alter whitespace"><span className="menu-check"><input type="checkbox" name="gr-field" data-gr="hide-whitespace" checked={Boolean(view.ignoreWhitespace)} onChange={(e) => { void setView({ ignoreWhitespace: e.target.checked }); close() }} /></span>Hide whitespace</label>
               <div className="pop-head">File panel</div>
               <MenuItem checked={treeView === 'tree'} onClick={() => { setTreeView('tree'); close() }}>Tree</MenuItem>
@@ -832,7 +839,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
           <button className="btn sm" onClick={() => void setView({ commit: undefined })}>Show all changes</button>
         </div>
       )}
-      <div className={'files-layout' + (treeShown ? '' : ' no-panel') + (secPanel ? ' with-sec' : '') + (wide ? ' sec-col' : '') + (widest ? ' sec-3' : '')} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties}>
+      <div className={'files-layout' + (treeShown ? '' : ' no-panel') + (secPanel ? ' with-sec' : '') + (wide ? ' sec-col' : secOnTop ? ' sec-top' : '') + (widest ? ' sec-3' : '')} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties}>
         {treeShown && (
           <SectionsCtx.Provider value={bySection ? NO_SECTIONS : sections}>
           <aside className="tree-panel" aria-label="Files" data-gr="files-view" data-gr-files-view={bySection ? 'sections' : treeView}>
@@ -1327,7 +1334,7 @@ function CommitsTab({ loaded }: { loaded: LoadedReview }) {
         {loaded.commits.map((c, i) => (
           <div key={c.sha}>
             {i === cut && cut > 0 && <div className="list-divider">↑ New since the {since?.kind === 'approved' ? 'approved state' : 'walkthrough'}</div>}
-            <div className="list-row" data-gr-commit={c.sha}>
+            <div className={'list-row' + (loaded.view?.commit === c.sha ? ' on' : '')} data-gr-commit={c.sha} aria-current={loaded.view?.commit === c.sha ? 'true' : undefined}>
               <div className="grow">
                 <button className="link strong commit-link" title="Show only this commit's changes in the Code pane" onClick={() => { useStore.getState().revealCode(); void useStore.getState().setView({ commit: c.sha }) }}>{c.subject}</button>
                 <div className="muted small">{c.author} committed {ago(c.date)}</div>
@@ -1492,10 +1499,10 @@ function GuideBody({ id, shown, children }: { id: Guide; shown: boolean; childre
  *  to give one of them more of the window; double-click puts it back where the Guide
  *  starts. While it is dragged the panes follow at once, and the code stays on the line it
  *  showed; what has to be laid out anew for the new width (a diagram, split or unified)
- *  waits until the drag holds still. `pct`: the Guide pane's share of the room;
+ *  waits until it is released. `pct`: the Guide pane's share of the room;
  *  `tree`: how much of the workspace is not theirs to share (the tree's column). */
 function PaneDivider({ frame, pct, tree, onChange }: { frame: RefObject<HTMLElement | null>; pct: number; tree: number; onChange: (pct: number | null) => void }) {
-  const drag = useRef<{ hold: ReturnType<typeof holdPlaces>; pct: number; tick: number; late: number } | null>(null)
+  const drag = useRef<{ hold: ReturnType<typeof holdPlaces>; pct: number; tick: number } | null>(null)
   /** the share a divider at `x` gives the Guide pane, within what each pane needs */
   const shareAt = (x: number): number => {
     const r = frame.current?.getBoundingClientRect()
@@ -1507,7 +1514,7 @@ function PaneDivider({ frame, pct, tree, onChange }: { frame: RefObject<HTMLElem
   const down = (e: RPointerEvent<HTMLDivElement>): void => {
     e.preventDefault()
     try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* a pointer the browser does not know: the drag still follows it while it is over the divider */ }
-    drag.current = { hold: holdPlaces(), pct, tick: 0, late: 0 }
+    drag.current = { hold: holdPlaces(), pct, tick: 0 }
     if (frame.current) frame.current.dataset.dragging = ''
   }
   const move = (e: RPointerEvent<HTMLDivElement>): void => {
@@ -1517,17 +1524,14 @@ function PaneDivider({ frame, pct, tree, onChange }: { frame: RefObject<HTMLElem
     // straight onto the frame: nothing is drawn again by React at each step of the drag
     frame.current?.style.setProperty('--guide-w', String(d.pct))
     d.tick ||= window.requestAnimationFrame(() => { d.tick = 0; d.hold.now() })
-    // and once more if the drag rests here: what waited for the width to hold still is laid out by then
-    window.clearTimeout(d.late)
-    d.late = window.setTimeout(() => d.hold.now(), 300)
   }
   const up = (): void => {
     const d = drag.current
     if (!d) return
     drag.current = null
-    window.clearTimeout(d.late)
     delete frame.current?.dataset.dragging
     onChange(d.pct)
+    window.dispatchEvent(new window.Event(PANES_SETTLED))     // (`Event` here is the timeline's)
     d.hold.settle()
   }
   const step = (by: number | null, at: number): void => { const hold = holdPlaces(); onChange(by == null ? null : shareAt(at + by)); hold.settle() }

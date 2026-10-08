@@ -5,7 +5,7 @@ import type {
 } from '@shared/types'
 import { api, connect } from './api'
 import { errText, guideOf, isOpen, newId, parseHash, refInput, routeHash, targetLabel, type DiffMode, type Guide, type Pane, type Route } from './util'
-import { focusAnchor, holdCodePlace, startTour } from './focus'
+import { focusAnchor, holdCodePlace, parkCodePlace, startTour } from './focus'
 
 /** `key`: a newer toast with the same key takes the place of an older one. */
 export interface Toast { id: string; text: string; kind: 'error' | 'info'; action?: { label: string; run: () => void }; key?: string }
@@ -101,8 +101,8 @@ interface Store {
   docPath: string | null
   /** the diagram open in the Visualize Guide, by view id (null: the first one) */
   visualView: string | null
-  /** the pick in that diagram: the box whose code the Code pane was last taken to. It stays outlined until another is picked */
-  visualNode: string | null
+  /** the pick in the diagrams: the box (of which diagram) whose code the Code pane was last taken to. It stays outlined until another is picked */
+  visualNode: { view: string; node: string } | null
   composer: string | null
   tour: Tour | null
   /** Where a pane was before a jump took it far from there: offered back by the "Back to …"
@@ -370,7 +370,7 @@ export const useStore = create<Store>((set, get) => {
     async applyRoute(route) {
       const seq = ++routeSeq
       const stale = (): boolean => seq !== routeSeq      // a newer navigation took over
-      // the same review, another tab or focus: nothing to load
+      // the same review, another Guide or focus: nothing to load
       if (route.name === 'review' && route.session != null && route.session === get().sessionId && get().loaded) {
         const next = viewOfRoute(route)
         const cur = get().view
@@ -679,7 +679,8 @@ export const useStore = create<Store>((set, get) => {
     showGuide(guide) {
       const cur = get()
       if (cur.guide === guide && cur.front === (guide ? 'guide' : 'code')) return
-      // the Code pane changes width under what is being read in it: hold it on that line
+      // the Code pane changes width under what is being read in it, or is folded away: hold it on that line
+      parkCodePlace()
       const hold = holdCodePlace()
       // (nothing is discarded: the Guide left behind is kept as it is, and so is a comment being written beside the code)
       set({ guide, front: guide ? 'guide' : 'code', ...(guide ? {} : { guideWide: false }) })
@@ -733,6 +734,7 @@ export const useStore = create<Store>((set, get) => {
       set({ sectionOpen: { ...get().sectionOpen, [id]: open } })
     },
     set(patch) {
+      if ('guideWide' in patch || 'front' in patch) parkCodePlace()     // the Code pane may be folded away by this
       set(patch)
       if (patch.status) {
         if (statusTimer != null) window.clearTimeout(statusTimer)
@@ -778,8 +780,8 @@ export const useStore = create<Store>((set, get) => {
       // an answer never moves the page by itself: it shows where the question was asked,
       // and the code it cites is one click away
       if (answerTo) { get().toast('Claude Code answered.', 'info', { label: action.kind === 'tour' ? 'Start the tour' : 'Show the code it cites', run: () => get().applyAction(action) }); return }
-      // Nor does the session take the page away while the reviewer is writing (a tab switch
-      // would discard the text): the jump waits behind a toast until they ask for it.
+      // Nor does the session move anything while the reviewer is writing (the code they are
+      // writing about would leave the screen): the jump waits behind a toast until they ask for it.
       const what = action.kind === 'focus' ? targetLabel(action.target) : action.kind === 'tour' ? `a tour of ${action.stops.length} ${action.stops.length === 1 ? 'stop' : 'stops'}` : action.kind === 'navigate' ? 'another page' : null
       if (what && typing()) { get().toast(`Claude Code wants to show you ${what}`, 'info', { label: 'Go', run: () => get().applyAction(action) }, { key: SHOW_KEY, keep: true }); return }
       // a newer jump, played at once, replaces one that was still on offer

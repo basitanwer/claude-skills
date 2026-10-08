@@ -201,7 +201,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .list-head { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: var(--bg-soft); border-bottom: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0; }
 .list-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--border); }
 .list-head + .list-row, .list-row:first-child { border-top: 0; }
-.list-row:hover { background: var(--bg-soft); } .list-row.archived { opacity: 0.65; }
+.list-row:hover { background: var(--bg-soft); } .list-row.archived { opacity: 0.65; } .list-row.on { background: var(--bg-sunk); box-shadow: inset 3px 0 0 var(--accent); }
 .list-row > .ico { margin-top: 3px; } .list-row .btn, .list-row .ref-chip + .icon-btn { align-self: center; }
 .row-title { font-size: 16px; font-weight: 600; color: var(--text); margin-right: 6px; } .row-title:hover { color: var(--accent-ink); }
 .row-count { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; align-self: center; }
@@ -241,8 +241,9 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .tab { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border: 1px solid transparent; border-bottom: 0; background: none; border-radius: var(--radius) var(--radius) 0 0; cursor: pointer; white-space: nowrap; color: var(--text-2); margin-bottom: -1px; }
 .tab:hover { color: var(--text); } .tab.on { border-color: var(--border); background: var(--bg); color: var(--text); font-weight: 600; box-shadow: inset 0 2px 0 var(--accent); }
 .tabs-row .diffstat { padding-bottom: 10px; } .tabs-row > .icon-btn, .tabs-row > .btn { align-self: center; margin-bottom: 5px; }
-/* in a narrow Guide pane only the Guide on show keeps its name: the others are their icon and count */
-@container (max-width: 600px) { .tab { padding: 8px 10px; } .tab:not(.on) .tab-label { display: none; } }
+/* in a narrow Guide pane only the Guide on show keeps its name, the others are their icon and count; narrower still, none does */
+@container (max-width: 720px) { .tab { padding: 8px 10px; } .tab:not(.on) .tab-label { display: none; } }
+@container (max-width: 480px) { .tab { padding: 8px 6px; gap: 4px; } .tab .tab-label { display: none; } }
 .req-strip { max-height: 40vh; overflow: auto; background: var(--panel); border-bottom: 1px solid var(--border); }
 .ws-banners .flash-banner { margin: 0; border-width: 0 0 1px; border-radius: 0; padding: 8px 16px; }
 /* the two panes and the divider between them. --guide-w: the Guide pane's share of the
@@ -483,6 +484,10 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .files-layout.with-sec.sec-col.sec-3:not(.no-panel) { grid-template-columns: var(--tree-w, 300px) minmax(0, 1fr) 400px; }
 .sec-col > .sec-panel { position: static; z-index: auto; width: auto; align-self: start; max-height: calc(100% - 32px); margin: 16px var(--pad) 16px 0; border: 1px solid var(--border); border-top: 3px solid var(--sec); border-radius: var(--radius); box-shadow: none; }
 .sec-col > .code-scroll:not(:last-child) { padding-right: 0; }
+/* beside a Guide, in a pane with no room for that column or for a drawer: on top of the files, which keep the pane's width */
+.files-layout.with-sec.sec-top { grid-template-rows: auto minmax(0, 1fr); }
+.sec-top > .sec-panel { position: static; z-index: auto; width: auto; grid-row: 1; max-height: 38vh; margin: 12px var(--pad) 0 0; border: 1px solid var(--border); border-top: 3px solid var(--sec); border-radius: var(--radius); box-shadow: none; }
+.sec-top > .code-scroll { grid-row: 2; }
 
 /* diffs held back (large, generated) and lines too long to show whole */
 .file-msg.held { display: flex; flex-direction: column; align-items: center; gap: 6px; }
@@ -531,7 +536,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .viz-edge.lit path { stroke-width: 2.5; } .viz-edge.lit:not(.new):not(.removed) path { stroke: var(--text); } .viz-edge.lit:not(.new):not(.removed) polygon { fill: var(--text); }
 .viz-edge-label rect { fill: var(--bg); } .viz-edge-label text { font-size: 11px; fill: var(--text-2); }
 .viz-edge-label.lit text { fill: var(--text); font-weight: 600; }
-.viz-edge, .viz-edge-label, .viz-node { transition: opacity 0.12s; } .viz-edge.dim, .viz-edge-label.dim { opacity: 0.15; } .viz-node.dim { opacity: 0.35; }
+.viz-edge, .viz-edge-label, .viz-node { transition: opacity 0.12s; } .viz-edge.dim, .viz-edge-label.dim { opacity: 0.15; } .viz-node.dim { opacity: 0.35; } .viz-node.dim.pinned { opacity: 1; }
 .viz-node { outline: none; cursor: default; } .viz-node.link { cursor: pointer; }
 .viz-box { fill: var(--bg); stroke: color-mix(in srgb, var(--muted) 75%, var(--bg)); stroke-width: 1.5; }
 .viz-node.new .viz-box { fill: var(--ok-soft); stroke: var(--ok); }

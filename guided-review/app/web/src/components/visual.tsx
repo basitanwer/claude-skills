@@ -3,7 +3,7 @@ import type { LoadedReview, VisualEdge, VisualKind, VisualNode, VisualStatus, Vi
 import { useStore } from '../store'
 import { focusAnchor, focusLines } from '../focus'
 import { layout } from '../graph'
-import { ago, baseName, isOpen, plural, secStyle, short } from '../util'
+import { ago, baseName, isOpen, PANES_SETTLED, plural, secStyle, short } from '../util'
 import { AwayHint, Icon, Md } from './common'
 
 // ── what a box says ───────────────────────────────────────────
@@ -25,6 +25,14 @@ const placeOf = (n: VisualNode, full = true): string =>
  *  no "Back to …" pill. */
 function goTo(n: VisualNode, loaded: LoadedReview): (() => void) | null {
   if (!n.file || !n.inDiff) return null
+  // While the Code pane shows one commit only, the page has that commit's files, not the
+  // comparison's: the pick leaves the commit view first, then goes to the code as it then is.
+  if (loaded.view?.commit) {
+    return () => void useStore.getState().setView({ commit: undefined }).then(() => {
+      const now = useStore.getState().loaded
+      if (now && !now.view?.commit) goTo(n, now)?.()
+    })
+  }
   const dir = n.file.endsWith('/')
   const f = dir ? loaded.files.find((x) => !x.excluded && x.path.startsWith(n.file!)) : loaded.files.find((x) => x.path === n.file)
   if (!f) return null
@@ -153,8 +161,8 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
   // stays outlined while the reviewer reads that code, points at other boxes, or looks at
   // another Guide and comes back, until another box is picked. Only outlined: it does not
   // hold the diagram dimmed
-  const pinned = useStore((s) => s.visualNode)
-  const pin = (id: string | null): void => useStore.getState().set({ visualNode: id })
+  const pinned = useStore((s) => (s.visualNode?.view === view.id ? s.visualNode.node : null))
+  const pin = (id: string): void => useStore.getState().set({ visualNode: { view: view.id, node: id } })
   const root = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLDivElement>(null)
   // how wide the drawing may be (the Guide pane's width): the layout breaks a wider layer into rows
@@ -170,11 +178,16 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
       setRoom(Math.max(280, Math.floor(el.clientWidth) - 16 - 32))
     }
     measure()
-    // The drawing is laid out anew only once the pane's width has settled: while the divider
-    // is being dragged, the drawing as it is is shown smaller or with more room round it.
-    const ro = new ResizeObserver(() => { window.clearTimeout(timer); timer = window.setTimeout(measure, SETTLE) })
+    // The drawing is laid out anew only once the pane's width has settled. While the divider
+    // is being dragged that is its release (PANES_SETTLED): until then the drawing as it is
+    // is shown smaller, or with more room round it. Otherwise it is a moment of quiet.
+    const ro = new ResizeObserver(() => {
+      window.clearTimeout(timer)
+      if (!el.closest('[data-dragging]')) timer = window.setTimeout(measure, SETTLE)
+    })
     ro.observe(el)
-    return () => { ro.disconnect(); window.clearTimeout(timer) }
+    window.addEventListener(PANES_SETTLED, measure)
+    return () => { ro.disconnect(); window.clearTimeout(timer); window.removeEventListener(PANES_SETTLED, measure) }
   }, [])
   const groups = useMemo(() => [...new Set(view.nodes.map((n) => n.group).filter((g): g is string => Boolean(g)))], [view])
   const items = useMemo(() => view.nodes.map(drawn), [view])
@@ -333,7 +346,7 @@ export function VisualTab({ loaded }: { loaded: LoadedReview }) {
       )}
       <div className="viz-views" role="group" aria-label="Diagrams">
         {visual.views.map((v) => (
-          <button key={v.id} aria-pressed={v.id === view.id} className={'btn sm' + (v.id === view.id ? ' selected' : '')} data-gr-view-tab={v.id} title={KIND[v.kind]} onClick={() => { if (v.id !== view.id) set({ visualView: v.id, visualNode: null }) }}>
+          <button key={v.id} aria-pressed={v.id === view.id} className={'btn sm' + (v.id === view.id ? ' selected' : '')} data-gr-view-tab={v.id} title={KIND[v.kind]} onClick={() => { if (v.id !== view.id) set({ visualView: v.id }) }}>
             {v.title}<span className="counter">{v.nodes.length}</span>
           </button>
         ))}

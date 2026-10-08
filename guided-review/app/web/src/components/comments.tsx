@@ -1,4 +1,4 @@
-import { createContext, Fragment, useContext, useMemo, useState } from 'react'
+import { createContext, Fragment, useContext, useEffect, useMemo, useState } from 'react'
 import type { AnchorInput, Comment } from '@shared/types'
 import { useStore } from '../store'
 import { focusAnchor, focusChanged, focusQuestion } from '../focus'
@@ -9,6 +9,21 @@ import { Icon, Md, Menu, MenuItem } from './common'
 export const CommentsCtx = createContext<Map<string, Comment[]>>(new Map())
 export const useCommentsAt = (key: string): Comment[] => useContext(CommentsCtx).get(key) ?? EMPTY
 const EMPTY: Comment[] = []
+
+/** What is being written and not sent yet, kept by where it is written (per review),
+ *  outside the components that show it. A diff is drawn anew when its pane changes width
+ *  enough to go from split to unified, which a Guide opening beside the code does, and
+ *  when changed code is folded in: a comment or a reply being typed in it comes back with it. */
+const drafts = new Map<string, { mode: string; text: string }>()
+const draftKey = (id: string): string => `${useStore.getState().sessionId ?? 'preview'}:${id}`
+/** A thread's state of being written in (`idle`: nothing is), with the text so far. */
+function useDraft<M extends string>(id: string, idle: M): { mode: M; text: string; setMode: (m: M) => void; setText: (t: string) => void } {
+  const [key] = useState(() => draftKey(id))
+  const [mode, setMode] = useState<M>(() => (drafts.get(key)?.mode as M | undefined) ?? idle)
+  const [text, setText] = useState(() => drafts.get(key)?.text ?? '')
+  useEffect(() => { if (mode === idle) drafts.delete(key); else drafts.set(key, { mode, text }) }, [key, mode, text, idle])
+  return { mode, text, setMode, setText }
+}
 
 export const STATUS: Record<Comment['status'], { cls: string; text: string; title: string }> = {
   note: { cls: 'note', text: 'Note', title: 'A remark from Claude. It is not waiting on anyone.' },
@@ -37,7 +52,7 @@ export function Thread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
 
 /** A question the reviewer asked Claude Code about this spot, with the answer under it,
  *  and every follow-up asked from here with its answer: one thread per first question.
- *  The same exchanges are in the Conversation tab; here they sit beside what they are about.
+ *  The same exchanges are in the Conversation; here they sit beside what they are about.
  *  A follow-up is not a pending comment: like the question, it goes to Claude Code at once. */
 function AskThread({ c }: { c: Comment }) {
   const root = c.id.slice(ASK.length)
@@ -49,10 +64,8 @@ function AskThread({ c }: { c: Comment }) {
   const resolveAsk = useStore((s) => s.resolveAsk)
   // a resolved thread folds away, as a resolved comment does; the reviewer can look into it
   const [shown, setShown] = useState(false)
-  // what is being typed lives here, in a component keyed by the thread, so a background refresh that
-  // leaves the code as it is does not lose it (folding in changed code redraws the diff, and it is lost)
-  const [mode, setMode] = useState<'view' | 'reply'>('view')
-  const [text, setText] = useState('')
+  // what is being typed is kept outside this component, so neither a background refresh nor the diff being drawn anew loses it
+  const { mode, text, setMode, setText } = useDraft<'view' | 'reply'>(`ask:${root}`, 'view')
   const [busy, setBusy] = useState(false)
   const exchanges = useMemo(() => askExchanges(root, messages ?? [], requests ?? []), [root, messages, requests])
   const last = exchanges.at(-1)
@@ -156,8 +169,7 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
   const withClaude = sentAt !== undefined
   // a finding is about the code as it was when Claude Code found it: once the code has changed, it says so
   const earlier = useStore((s) => Boolean(c.finding) && fromEarlier(c.foundAt, s.loaded))
-  const [mode, setMode] = useState<'view' | 'edit' | 'reply'>('view')
-  const [text, setText] = useState('')
+  const { mode, text, setMode, setText } = useDraft<'view' | 'edit' | 'reply'>(`thread:${c.id}`, 'view')
   const [toggled, setToggled] = useState<boolean | null>(null)
   const target = focusable(c.anchor)
   const st = STATUS[c.status]
@@ -300,9 +312,12 @@ export function Composer({ anchor, k }: { anchor: AnchorInput; k: string }) {
   const addComment = useStore((s) => s.addComment)
   const request = useStore((s) => s.request)
   const set = useStore((s) => s.set)
-  const [text, setText] = useState('')
+  // (kept while the composer is elsewhere or its diff is drawn anew; dropped when it is sent or cancelled)
+  const [key] = useState(() => draftKey(`composer:${k}`))
+  const [text, write] = useState(() => drafts.get(key)?.text ?? '')
+  const setText = (t: string): void => { write(t); if (t) drafts.set(key, { mode: 'open', text: t }); else drafts.delete(key) }
   const [busy, setBusy] = useState(false)
-  const close = (): void => set({ composer: null })
+  const close = (): void => { drafts.delete(key); set({ composer: null }) }
   const add = (): void => {
     if (!text.trim() || busy) return
     setBusy(true)

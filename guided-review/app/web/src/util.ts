@@ -10,6 +10,9 @@ const TABS: Tab[] = ['conversation', 'commits', 'spec', 'visual', 'files']
  *  The address names it as `tab=`; `tab=files`, or none, is the Guide pane closed. */
 export type Guide = Exclude<Tab, 'files'>
 export const guideOf = (tab: Tab | undefined): Guide | null => (tab && tab !== 'files' ? tab : null)
+/** The event the page sends itself (on `window`) when a drag of the divider between the
+ *  panes is released: what waits for a pane's width to settle is laid out for it then. */
+export const PANES_SETTLED = 'gr-panes-settled'
 /** A pane of the workspace that scrolls by itself: the Code pane, or one Guide in the Guide pane. */
 export type Pane = 'code' | Guide
 export type Route =

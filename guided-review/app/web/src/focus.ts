@@ -159,6 +159,7 @@ function jump(t: FocusTarget, origin: Spot | null, top = false): void {
     st.showGuide('conversation')
     if (t.kind === 'section') st.setSectionOpen(t.sectionId, true)
   } else {
+    parked = null                     // the Code pane is about to be somewhere else than it was folded away on
     st.revealCode()
     const file = loaded.files.find((f) => f.path === t.file || f.oldPath === t.file)
     if (st.diffMode !== 'all') st.set({ diffMode: 'all' })
@@ -272,6 +273,26 @@ function readingSpot(): Held[] {
     if (line && box) return [{ sel: `[data-gr-line="${cssq(line.dataset.grLine ?? '')}"]`, top: topIn(line, sc), el: line }, box]
   }
   return box ? [box] : []
+}
+/** What the Code pane showed when it was last folded away (the Guide took the whole
+ *  width, or the window shows one pane at a time). It can come back at another width than
+ *  it left with, where the same scroll offset is other code: it is put back on the line. */
+let parked: { spots: Held[]; y: number } | null = null
+/** Note the Code pane's place: it may be about to be folded away. (No-op while it is.) */
+export function parkCodePlace(): void {
+  const spots = readingSpot()
+  if (spots.length) parked = { spots, y: codeScroller()?.scrollTop ?? 0 }
+}
+/** The Code pane is on show again: put it on the line it was folded away on, now and after
+ *  late layout, unless a jump has taken it elsewhere meanwhile. `y`: how far it was
+ *  scrolled when it was folded away; if that is not where its place was noted, the
+ *  reviewer scrolled in between, and the note is of an older place. */
+export function unparkCodePlace(y: number): void {
+  const mine = parked
+  if (!mine || Math.abs(mine.y - y) > 2) return
+  const place = (): void => { if (parked === mine) putBack(mine.spots) }
+  place()
+  holding(place, true).settle()
 }
 /** Put the Code pane back on what it showed: the line if it is still there, else the file it was in. */
 function putBack(spots: Held[]): void {
