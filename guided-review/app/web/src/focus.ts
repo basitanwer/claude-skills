@@ -1,6 +1,30 @@
 import type { ChangedRange, FocusTarget, TourStop } from '@shared/types'
 import { typing, useStore } from './store'
-import { baseName, cssq, type Tab } from './util'
+import { baseName, cssq, type Pane } from './util'
+
+// ── the panes ─────────────────────────────────────────────────
+// The page itself never scrolls. The Code pane and each Guide scroll by themselves, and
+// everything in this file that moves the reviewer moves one pane's own scroller: nothing
+// here scrolls the window, and nothing uses scrollIntoView (which would move every
+// scrollable box above its target, the frame of the workspace included).
+/** A pane's scroller. A Guide has one once it has been shown; it is kept, hidden, while another Guide is. */
+const scrollerFor = (pane: Pane): HTMLElement | null => document.querySelector<HTMLElement>(`[data-gr-scroll="${pane}"]`)
+/** The Code pane's scroller: the column of file boxes. */
+export const codeScroller = (): HTMLElement | null => scrollerFor('code')
+/** The scroller an element sits in. */
+const scrollerOf = (el: Element): HTMLElement | null => el.closest<HTMLElement>('[data-gr-scroll]')
+/** Whether an element is drawn: it is not in a pane, or a Guide, that is hidden. */
+const drawn = (el: Element): boolean => el.getClientRects().length > 0
+/** How far below the top edge of its scroller an element is. */
+const topIn = (el: Element, sc: Element): number => el.getBoundingClientRect().top - sc.getBoundingClientRect().top
+/** Bring an element into view by scrolling the pane it is in, and only that: to the top of
+ *  the pane, or to its middle (an element taller than the pane is shown from its top). */
+export function showInPane(el: HTMLElement, at: 'top' | 'middle' = 'middle'): void {
+  const sc = scrollerOf(el)
+  if (!sc) return
+  const h = el.getBoundingClientRect().height
+  sc.scrollBy({ top: at === 'top' || h > sc.clientHeight - 16 ? topIn(el, sc) - 8 : topIn(el, sc) + h / 2 - sc.clientHeight / 2 })
+}
 
 function selectorsFor(t: FocusTarget): string[] {
   switch (t.kind) {
@@ -22,44 +46,54 @@ function selectorsFor(t: FocusTarget): string[] {
   }
 }
 
-/** The first of these selectors that matches something. */
-function find(sels: string[]): HTMLElement | null {
+/** The first of these selectors that matches something drawn, in one pane (`within`: its
+ *  scroller) or on the whole page. The panes are all in the page at once, and a Guide that
+ *  is not on show is still there, hidden: the same section, say, can be found in several. */
+function find(sels: string[], within: ParentNode = document): HTMLElement | null {
   for (const s of sels) {
-    try { const el = document.querySelector<HTMLElement>(s); if (el) return el } catch { /* not a valid selector for this id */ }
+    try { for (const el of within.querySelectorAll<HTMLElement>(s)) if (drawn(el)) return el } catch { /* not a valid selector for this id */ }
   }
   return null
 }
 
-const TAB_NAMES: Record<Tab, string> = { conversation: 'Conversation', commits: 'Commits', spec: 'Spec & plan', visual: 'Visualize', files: 'Files changed' }
+const PANE_NAMES: Record<Pane, string> = { code: 'the code', conversation: 'Conversation', commits: 'Commits', spec: 'Spec & plan', visual: 'Visualize' }
 type Spot = NonNullable<ReturnType<typeof useStore.getState>['returnTo']>
-/** The reviewer's current position: the tab, the scroll position and, among the files,
- *  the file under the top of the window with how far down the window it starts. */
-function whereAmI(tab: Tab): Spot {
-  const here = { tab, y: window.scrollY, top: null as number | null, label: TAB_NAMES[tab] }
-  if (tab !== 'files') return here
-  // the file the tree marks as the current one, when it is known; else the first one under the pinned headers
+/** The reviewer's place in a pane: how far it is scrolled and, in the Code pane, the file
+ *  under the top of the pane with how far down the pane it starts. Null when the pane is
+ *  not on screen: there is no place in it to come back to. */
+function whereAmI(pane: Pane): Spot | null {
+  const sc = scrollerFor(pane)
+  if (!sc || !drawn(sc)) return null
+  const here: Spot = { pane, y: sc.scrollTop, top: null, label: PANE_NAMES[pane] }
+  if (pane !== 'code') return here
+  // the file the tree marks as the current one, when it is known; else the first one that reaches below the top of the pane
   const cur = useStore.getState().currentFile
-  const at = cur ? document.querySelector<HTMLElement>(`[data-gr-file="${cssq(cur)}"]`) : null
-  for (const el of at ? [at] : document.querySelectorAll<HTMLElement>('[data-gr-file]')) {
-    const r = el.getBoundingClientRect()
-    if (at || r.bottom > 160) return { ...here, top: r.top, label: baseName(el.dataset.grFile ?? ''), target: { kind: 'file', file: el.dataset.grFile ?? '' } }
+  const at = cur ? sc.querySelector<HTMLElement>(`[data-gr-file="${cssq(cur)}"]`) : null
+  for (const el of at ? [at] : sc.querySelectorAll<HTMLElement>('[data-gr-file]')) {
+    const top = topIn(el, sc)
+    if (at || top + el.offsetHeight > 24) return { ...here, top, label: baseName(el.dataset.grFile ?? ''), target: { kind: 'file', file: el.dataset.grFile ?? '' } }
   }
   return here
 }
-/** Whether a jump that stayed on the tab took the reviewer away from what they were
- *  reading: the file they were in (or, elsewhere, the page) is now about a window or more
- *  from where it was. A shorter hop leaves the old spot on screen or one scroll away. */
+/** Whether a jump took the reviewer away from what they were reading in the pane it
+ *  landed in: the file they were in (or, in a Guide, the Guide itself) is now about a
+ *  pane's height or more from where it was. A shorter hop leaves the old spot on screen
+ *  or one scroll away. */
 function movedFrom(spot: Spot): boolean {
-  const el = spot.target && spot.top != null ? find(selectorsFor(spot.target).slice(-1)) : null
-  const by = el && spot.top != null ? el.getBoundingClientRect().top - spot.top : window.scrollY - spot.y
-  return Math.abs(by) > window.innerHeight * 0.9
+  const sc = scrollerFor(spot.pane)
+  if (!sc) return false
+  const el = spot.target && spot.top != null ? find(selectorsFor(spot.target).slice(-1), sc) : null
+  const by = el && spot.top != null ? topIn(el, sc) - spot.top : sc.scrollTop - spot.y
+  return Math.abs(by) > sc.clientHeight * 0.9
 }
 
-/** Run `then` on the first element matching one of the selectors, once it is mounted. */
-function whenMounted(sels: string[], then: (el: HTMLElement) => void, tries = 25): void {
-  const el = find(sels)
+/** Run `then` on the first drawn element matching one of the selectors, once there is one
+ *  (`pane`: looked for in that pane only, once the pane is on show). */
+function whenMounted(sels: string[], then: (el: HTMLElement) => void, pane?: Pane, tries = 25): void {
+  const sc = pane ? scrollerFor(pane) : null
+  const el = pane ? (sc && drawn(sc) ? find(sels, sc) : null) : find(sels)
   if (el) then(el)
-  else if (tries > 0) window.setTimeout(() => whenMounted(sels, then, tries - 1), 40)
+  else if (tries > 0) window.setTimeout(() => whenMounted(sels, then, pane, tries - 1), 40)
 }
 
 function flash(el: HTMLElement): void {
@@ -69,56 +103,63 @@ function flash(el: HTMLElement): void {
   window.setTimeout(() => el.classList.remove('gr-flash'), 1000)
 }
 
-/** Scroll the review to a target and flash it. Whatever would hide the target gives
- *  way first: the tab is switched (code lives in "Files changed", the summary and
- *  the sections in "Conversation"), filters that hide the file are lifted, a
- *  collapsed file is opened, and a diff held back as large or generated is loaded.
+/** The pane a target is shown in. Code is in the Code pane; the summary and the sections
+ *  are in the Conversation. A section asked for while the Guide pane is closed is shown
+ *  beside the code instead (see jump). */
+function paneOf(t: FocusTarget): Pane {
+  return t.kind === 'file' || t.kind === 'diff' || (t.kind === 'section' && useStore.getState().guide == null) ? 'code' : 'conversation'
+}
+/** Take one pane to a target and flash it: a jump. Code is shown in the Code pane and the
+ *  Guide beside it does not move; the summary and the sections are shown in the
+ *  Conversation, which becomes the Guide on show. Whatever would hide the target gives
+ *  way first: a Code pane folded away comes back, filters that hide the file are lifted,
+ *  a collapsed file is opened, and a diff held back as large or generated is loaded.
  *  A jump the reviewer did not aim themselves (a link in the text, a comment in a menu,
- *  the session showing something) leaves a "Back to …" pill when it takes them away from
- *  their place. `nav`: they picked the destination from a list of files — no pill.
- *  `top`: the target is put under the toolbar, to be read from its first line, instead of
- *  in the middle of the window (where a file taller than the window shows its middle). */
+ *  the session showing something) leaves a "Back to …" pill when it takes the pane far
+ *  from where it was. `nav`: they picked the destination themselves (a file in the tree,
+ *  a box of a diagram) — no pill. `top`: the target is put at the top of the pane, to be
+ *  read from its first line, instead of in its middle. */
 export function focusAnchor(t: FocusTarget, opts: { nav?: boolean; top?: boolean } = {}): void {
   const st = useStore.getState()
   // during a tour the way back leads to where the tour started, from whichever stop
-  jump(t, opts.nav ? null : st.tour?.origin ?? whereAmI(st.tab), false, opts.top)
+  jump(t, opts.nav ? null : st.tour?.origin ?? whereAmI(paneOf(t)), opts.top)
 }
-/** Start a tour at one of its stops, remembering where the reviewer was. */
+/** Start a tour at one of its stops, remembering where the reviewer was in the code. */
 export function startTour(stops: TourStop[], loop?: boolean, idx = 0): void {
   const st = useStore.getState()
   if (!stops[idx]) return
-  st.set({ tour: { stops, idx, loop, origin: st.tour?.origin ?? whereAmI(st.tab) } })
+  st.set({ tour: { stops, idx, loop, origin: st.tour?.origin ?? whereAmI('code') ?? undefined } })
   focusAnchor(stops[idx].target)
 }
-/** `origin`: where to offer the way back to, if the jump moves the reviewer. `keep`: leave
- *  an already remembered spot alone. `top`: see focusAnchor. */
-function jump(t: FocusTarget, origin: Spot | null, keep: boolean, top = false): void {
+/** `origin`: where to offer the way back to, if the jump takes its pane far from there.
+ *  `top`: see focusAnchor. */
+function jump(t: FocusTarget, origin: Spot | null, top = false): void {
   const st = useStore.getState()
   const loaded = st.loaded
   if (!loaded) return
-  // A section asked for while reading code opens beside the code instead of taking the
-  // reviewer to another tab (grouped by section, its header is already on this tab).
-  const beside = t.kind === 'section' && st.tab === 'files'
+  // A section asked for while the Guide pane is closed opens beside the code instead of
+  // opening the Conversation (grouped by section, its header is already in the Code pane).
+  const beside = t.kind === 'section' && st.guide == null
   if (beside && !(st.filters.bySection && loaded.state.walkthrough)) {
     showSection(t.sectionId)
     whenMounted([`[data-gr-section-panel="${cssq(t.sectionId)}"]`], flash)
     return
   }
-  // a jump to another tab than the one the reviewer was on remembers that place at once;
-  // one within it is remembered when it lands, if it went far. Any other jump makes the
-  // remembered spot stale.
-  const to = beside ? st.tab : t.kind === 'summary' || t.kind === 'section' ? 'conversation' : 'files'
-  const leaves = Boolean(origin) && origin?.tab !== to
-  if (!keep) st.set({ returnTo: leaves ? origin : null })
+  const to = paneOf(t)
+  // The way back is offered once the jump has landed, if it took its pane far. A place in
+  // another pane needs none: that pane has not moved (and a Guide swapped for another is
+  // kept as it was). Any other jump makes a remembered spot stale.
+  const from = origin?.pane === to ? origin : null
+  st.set({ returnTo: null })
   // a commit view shows another diff: targets belong to the whole comparison
-  if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, origin, keep || leaves, top)); return }
+  if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, origin, top)); return }
   if (beside) {
-    // nothing to switch or open
+    // nothing to show or open
   } else if (t.kind === 'summary' || t.kind === 'section') {
-    st.setTab('conversation')
+    st.showGuide('conversation')
     if (t.kind === 'section') st.setSectionOpen(t.sectionId, true)
   } else {
-    st.setTab('files')
+    st.revealCode()
     const file = loaded.files.find((f) => f.path === t.file || f.oldPath === t.file)
     if (st.diffMode !== 'all') st.set({ diffMode: 'all' })
     if (st.fileQuery) st.set({ fileQuery: '' })
@@ -142,18 +183,19 @@ function jump(t: FocusTarget, origin: Spot | null, keep: boolean, top = false): 
   const tick = (): void => {
     // give the exact selector a few frames to mount before accepting a fallback
     const usable = tries < (t.kind === 'diff' ? 30 : 8) ? sels.slice(0, t.kind === 'diff' ? 2 : 1) : sels
-    const el = find(usable)
-    if (el) {
+    // (the pane may still be coming on show: a Guide being mounted, the Code pane unfolding)
+    const sc = scrollerFor(to)
+    const el = sc && drawn(sc) ? find(usable, sc) : null
+    if (el && sc) {
       const land = (): void => {
-        if (top) window.scrollBy({ top: el.getBoundingClientRect().top - pinnedHeight() - 8 })
-        else el.scrollIntoView({ block: 'center', behavior: 'auto' })
+        showInPane(el, top ? 'top' : 'middle')
         arriveAt(el)
       }
       land()
       // once more after late layout (a section opening beside the code changes every height above), unless the reviewer has scrolled since
-      if (top) { const y = window.scrollY; window.setTimeout(() => { if (el.isConnected && window.scrollY === y) land() }, 150) }
+      if (top) { const y = sc.scrollTop; window.setTimeout(() => { if (el.isConnected && sc.scrollTop === y) land() }, 150) }
       flash(el)
-      if (origin && !leaves && !keep && movedFrom(origin)) useStore.getState().set({ returnTo: origin })
+      if (from && movedFrom(from)) useStore.getState().set({ returnTo: from })
       return
     }
     if (tries++ < 45) window.setTimeout(tick, 40)
@@ -161,44 +203,48 @@ function jump(t: FocusTarget, origin: Spot | null, keep: boolean, top = false): 
   window.requestAnimationFrame(tick)
 }
 
-/** Show a question asked from a spot where it sits in the Conversation tab: its message,
- *  centred and flashed, with the way back to the spot. */
+/** Show a question asked from a spot where it sits in the Conversation: that Guide comes
+ *  on show with the question's message in the middle of it, flashed. Asked from within
+ *  the Conversation itself, far from there, it leaves the way back. */
 export function focusQuestion(requestId: string): void {
   const st = useStore.getState()
   const m = st.loaded?.state.messages.find((x) => x.role === 'user' && x.requestId === requestId)
-  const origin = whereAmI(st.tab)
-  const leaves = st.tab !== 'conversation'
-  st.set({ returnTo: leaves ? origin : null })
-  st.setTab('conversation')
+  const origin = st.guide === 'conversation' ? whereAmI('conversation') : null
+  st.set({ returnTo: null })
+  st.showGuide('conversation')
   if (!m) return
   whenMounted([`[data-gr-message="${cssq(m.id)}"]`], (el) => {
-    el.scrollIntoView({ block: 'center', behavior: 'auto' })
+    showInPane(el)
     flash(el.querySelector<HTMLElement>('.tl-box') ?? el)
-    if (!leaves && movedFrom(origin)) useStore.getState().set({ returnTo: origin })
-  })
+    if (origin && movedFrom(origin)) useStore.getState().set({ returnTo: origin })
+  }, 'conversation')
 }
 
-/** Return to where the reviewer was before a jump: the same tab, the same file at the
- *  same height in the window, its header flashed so the eye finds it. */
+/** Return a pane to where it was before a jump: in the Code pane the same file at the
+ *  same height, its header flashed so the eye finds it; a Guide scrolled as it was. */
 export function goBack(): void {
   const st = useStore.getState()
   const back = st.returnTo
   if (!back) return
   st.set({ returnTo: null })
-  st.setTab(back.tab)
+  if (back.pane === 'code') st.revealCode()
+  else st.showGuide(back.pane)
   const sels = back.target ? selectorsFor(back.target).slice(-1) : []
   let tries = 0
   const place = (): HTMLElement | null => {
-    const el = find(sels)
-    // put the thing the link sat in back at the same height in the window
-    if (el && back.top != null) window.scrollBy({ top: el.getBoundingClientRect().top - back.top })
-    else window.scrollTo({ top: back.y })
+    const sc = scrollerFor(back.pane)
+    if (!sc) return null
+    const el = find(sels, sc)
+    // put the thing the link sat in back at the same height in the pane
+    if (el && back.top != null) sc.scrollBy({ top: topIn(el, sc) - back.top })
+    else sc.scrollTo({ top: back.y })
     return el
   }
   const tick = (): void => {
-    // the tab has to lay out again before the old position exists
-    const ready = document.documentElement.scrollHeight - window.innerHeight >= back.y - window.innerHeight
-    if (!(ready && (find(sels) || !sels.length)) && tries++ < 45) { window.setTimeout(tick, 40); return }
+    // a pane that was folded away has to lay out again before the old position exists
+    const sc = scrollerFor(back.pane)
+    const ready = sc != null && drawn(sc) && sc.scrollHeight - sc.clientHeight >= back.y - sc.clientHeight
+    if (!(ready && (find(sels, sc) || !sels.length)) && tries++ < 45) { window.setTimeout(tick, 40); return }
     const el = place()
     window.setTimeout(place, 150)     // once more, after late layout (wrapped lines, highlighting)
     const head = el?.querySelector<HTMLElement>('.file-head') ?? el
@@ -207,45 +253,108 @@ export function goBack(): void {
   window.requestAnimationFrame(tick)
 }
 
-/** What the reviewer is reading in Files changed, as something that can be found again
- *  after the page lays out anew: the first diff line under everything pinned to the top
- *  of the window (by its address, since switching between split and unified replaces
- *  the rows), or failing that the file box there. `top`: where it is in the window. */
-function readingSpot(): { sel: string; top: number }[] {
-  const list = document.querySelector('.files-list')?.getBoundingClientRect()
-  if (!list) return []
-  const strip = document.querySelector('.req-strip')?.getBoundingClientRect().height ?? 0
-  let box: { sel: string; top: number } | null = null
-  for (let y = strip + 96; y < window.innerHeight; y += 20) {
-    const at = document.elementFromPoint(list.left + 80, y)
+/** A thing on show in the Code pane and how far below the top of the pane it is. */
+interface Held { sel: string; top: number; el: HTMLElement }
+/** What the reviewer is reading in the Code pane, as something that can be found again
+ *  after the pane lays out anew: the first diff line under the file header pinned to the
+ *  top of the pane (by its address, since switching between split and unified replaces
+ *  the rows), or failing that the file box there. Empty while the pane is folded away. */
+function readingSpot(): Held[] {
+  const sc = codeScroller()
+  if (!sc || !drawn(sc)) return []
+  const r = sc.getBoundingClientRect()
+  let box: Held | null = null
+  for (let y = r.top + 44; y < r.bottom; y += 20) {
+    const at = document.elementFromPoint(r.left + 80, y)
     const file = at?.closest<HTMLElement>('[data-gr-file]')
-    if (file) box ??= { sel: `[data-gr-file="${cssq(file.dataset.grFile ?? '')}"]`, top: file.getBoundingClientRect().top }
+    if (file) box ??= { sel: `[data-gr-file="${cssq(file.dataset.grFile ?? '')}"]`, top: topIn(file, sc), el: file }
     const line = at?.closest('.dr-wrap')?.querySelector<HTMLElement>('[data-gr-line]')
-    if (line && box) return [{ sel: `[data-gr-line="${cssq(line.dataset.grLine ?? '')}"]`, top: line.getBoundingClientRect().top }, box]
+    if (line && box) return [{ sel: `[data-gr-line="${cssq(line.dataset.grLine ?? '')}"]`, top: topIn(line, sc), el: line }, box]
   }
   return box ? [box] : []
+}
+/** Put the Code pane back on what it showed: the line if it is still there, else the file it was in. */
+function putBack(spots: Held[]): void {
+  const sc = codeScroller()
+  if (!sc || !drawn(sc)) return
+  for (const spot of spots) {
+    const el = spot.el.isConnected ? spot.el : find([spot.sel], sc)
+    if (el && drawn(el)) {
+      const by = topIn(el, sc) - spot.top
+      if (Math.abs(by) >= 1) sc.scrollBy({ top: by })
+      return
+    }
+  }
+}
+/** The parts of a Guide that can be held on to: the pieces of text, the rows and the boxes of a diagram. */
+const GUIDE_PARTS = 'p, li, h1, h2, h3, h4, pre, textarea, [data-gr-node], .dr-wrap, .list-row, .tl-event, .thread-head, .viz-legend'
+/** What is at the top of the Guide on show, and how far below the top of its scroller:
+ *  the element itself, which is kept when the Guide is laid out for another width (text
+ *  wraps anew, the boxes of a diagram move). Null when no Guide is on show or it is at its top. */
+function guideSpot(): { sc: HTMLElement; el: Element; top: number } | null {
+  const sc = [...document.querySelectorAll<HTMLElement>('[data-gr-guide]')].find(drawn)
+  if (!sc || sc.scrollTop < 1) return null
+  const line = sc.getBoundingClientRect().top + 4
+  for (const el of sc.querySelectorAll(GUIDE_PARTS)) {
+    const r = el.getBoundingClientRect()
+    if (r.height > 0 && r.bottom > line) return { sc, el, top: topIn(el, sc) }
+  }
+  return null
+}
+/** What `hold…Place` hands back. `now` puts the place back at once (each step of a drag);
+ *  `settle` puts it back once the change is drawn, and again after late layout (a diagram
+ *  laid out anew, a diff gone unified), unless the reviewer has moved on by then. */
+interface Hold { now: () => void; settle: () => void }
+function holding(put: () => void, any: boolean): Hold {
+  return {
+    now: put,
+    settle: () => {
+      if (!any) return
+      let live = true
+      const stop = (): void => { live = false }
+      const moves = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const
+      for (const m of moves) window.addEventListener(m, stop, { capture: true, passive: true, once: true })
+      const place = (): void => { if (live) put() }
+      window.requestAnimationFrame(place)
+      window.setTimeout(place, 150)
+      window.setTimeout(() => { place(); for (const m of moves) window.removeEventListener(m, stop, { capture: true }) }, 420)
+    }
+  }
+}
+/** Hold the Code pane on the line it shows while its width changes under it: a Guide
+ *  opens, closes or gives way to one of another width, a section opens beside the code.
+ *  A narrower pane wraps more lines, and may turn a split diff into a unified one, so
+ *  everything above the line changes height. Call it before the change. */
+export function holdCodePlace(): Hold {
+  const spots = readingSpot()
+  return holding(() => putBack(spots), spots.length > 0)
+}
+/** Hold both panes where they are while the width between them is shared out anew (the
+ *  divider is dragged, the Guide takes the whole width or gives it back): the Code pane
+ *  on its line, the Guide on what is at its top. Call it before the change. */
+export function holdPlaces(): Hold {
+  const spots = readingSpot()
+  const guide = guideSpot()
+  return holding(() => {
+    putBack(spots)
+    if (guide && guide.el.isConnected && drawn(guide.sc)) {
+      const by = topIn(guide.el, guide.sc) - guide.top
+      if (Math.abs(by) >= 1) guide.sc.scrollBy({ top: by })
+    }
+  }, spots.length > 0 || guide != null)
 }
 
 /** Open a walkthrough section beside the code (null closes it). Where the panel is a
  *  column of its own, opening or closing it changes the width of the diff (and may hide
  *  the file tree, or turn a split diff into a unified one) and so the height of
- *  everything above: the line under the top of the window is put back where it was, so
+ *  everything above: the line under the top of the pane is put back where it was, so
  *  the reviewer does not lose their place. */
 export function showSection(id: string | null): void {
   const st = useStore.getState()
   if (st.sectionPanel === id) return
-  const spots = readingSpot()
+  const hold = holdCodePlace()
   st.set({ sectionPanel: id })
-  if (!spots.length) return
-  const place = (): void => {
-    // the line if it is still on the page, else the file it was in
-    for (const spot of spots) {
-      const el = find([spot.sel])
-      if (el) { window.scrollBy({ top: el.getBoundingClientRect().top - spot.top }); return }
-    }
-  }
-  window.requestAnimationFrame(place)
-  window.setTimeout(place, 150)       // once more, after late layout
+  hold.settle()
 }
 
 /** one toast about a changed range at a time */
@@ -277,7 +386,7 @@ export async function focusChanged(r: ChangedRange): Promise<void> {
   const first = `[data-gr-line="${cssq(`${file.path}:new:${r.start}`)}"]`
   let tries = 0
   const tick = (): void => {
-    if (find([first])) {
+    if (find([first], codeScroller() ?? document)) {
       // focusAnchor has scrolled to the first line by now, or does at its next look
       window.setTimeout(() => flashRange(file.path, r), 60)
       // a later edit shifted or rewrote the lines
@@ -289,19 +398,23 @@ export async function focusChanged(r: ChangedRange): Promise<void> {
   }
   window.requestAnimationFrame(tick)
 }
-/** Go to lines of a changed file and flash all of them: the code a box of a diagram
- *  stands for. A jump like any other the reviewer did not aim at a line themselves. */
-export function focusLines(file: string, start: number, end: number): void {
+/** The lines of a file's new side that are in the Code pane, from `start` to `end`. */
+function linesOf(file: string, start: number, end: number): HTMLElement[] {
+  return [...(codeScroller()?.querySelectorAll<HTMLElement>(`[data-gr-file="${cssq(file)}"] [data-new]`) ?? [])].filter((el) => { const n = Number(el.dataset.new); return n >= start && n <= end })
+}
+/** Show lines of a changed file in the Code pane and flash all of them: the code a box of
+ *  a diagram stands for. `nav`: see focusAnchor (a box is a pick: the reviewer's own aim). */
+export function focusLines(file: string, start: number, end: number, opts: { nav?: boolean } = {}): void {
   // exact lines are asked for: a Markdown file is shown as its source
   if (end > start) useStore.getState().setMdSource(file, true)
-  focusAnchor({ kind: 'diff', file, side: 'new', line: start })
+  focusAnchor({ kind: 'diff', file, side: 'new', line: start }, opts)
   if (end <= start) return
   // the lines of the range between the hunks are not on the page: have them fetched too
   useStore.getState().revealLine(file, 'new', start, end)
   // flash once every line of the range is on the page (as many as a jump fetches, for a
   // very long one), or after a moment whatever of it is
   const want = Math.min(end - start + 1, 400)
-  const have = (): number => new Set([...document.querySelectorAll<HTMLElement>(`[data-gr-file="${cssq(file)}"] [data-new]`)].map((el) => Number(el.dataset.new)).filter((n) => n >= start && n <= end)).size
+  const have = (): number => new Set(linesOf(file, start, end).map((el) => Number(el.dataset.new))).size
   let tries = 0
   const tick = (): void => {
     if (have() >= want || tries++ > 40) { if (have()) flashRange(file, { file, start, end, lineContent: '' }); return }
@@ -309,14 +422,15 @@ export function focusLines(file: string, start: number, end: number): void {
   }
   window.setTimeout(tick, 60)
 }
-/** Flash every line of a range that is on the page, and bring the range into the window:
- *  centred when it fits, else with its first line near the top. */
+/** Flash every line of a range that is in the Code pane, and bring the range into view
+ *  there: centred when it fits, else with its first line near the top. */
 function flashRange(file: string, r: ChangedRange): void {
-  const els = [...document.querySelectorAll<HTMLElement>(`[data-gr-file="${cssq(file)}"] [data-new]`)].filter((el) => { const n = Number(el.dataset.new); return n >= r.start && n <= r.end })
-  if (!els.length) return
-  const top = els[0].getBoundingClientRect().top; const bottom = els[els.length - 1].getBoundingClientRect().bottom
-  const room = window.innerHeight
-  window.scrollBy({ top: bottom - top < room * 0.6 ? (top + bottom - room) / 2 : top - room * 0.3 })
+  const sc = codeScroller()
+  const els = linesOf(file, r.start, r.end)
+  if (!sc || !els.length || !drawn(sc)) return
+  const top = topIn(els[0], sc); const bottom = topIn(els[els.length - 1], sc) + els[els.length - 1].getBoundingClientRect().height
+  const room = sc.clientHeight
+  sc.scrollBy({ top: bottom - top < room * 0.6 ? (top + bottom - room) / 2 : top - room * 0.3 })
   arriveAt(els[0])                    // the file these lines are in is where the reviewer now is
   for (const el of els) {
     el.classList.remove('gr-flash', 'gr-flash-range')
@@ -329,7 +443,7 @@ function flashRange(file: string, r: ChangedRange): void {
 /** Take the reviewer to a walkthrough section: it opens beside the code, and the code
  *  moves to the first of its files not yet marked Viewed (the first one, when all are).
  *  This is their own step through the walkthrough, so it leaves no "Back to …" pill, and
- *  unlike showSection it does not hold the page where it was: the page is meant to move. */
+ *  unlike showSection it does not hold the Code pane where it was: it is meant to move. */
 export function goToSection(id: string): void {
   const st = useStore.getState()
   const section = st.loaded?.state.walkthrough?.sections.find((s) => s.id === id)
@@ -342,37 +456,32 @@ export function goToSection(id: string): void {
   else st.toast(`None of the files of “${section.name}” are part of this comparison any more, so there is no code to show for it.`, 'info', undefined, { key: 'section-gone' })
 }
 
-/** How much of the top of the window stays covered in Files changed: the requests strip
- *  and the toolbar, which stick there. */
-function pinnedHeight(): number {
-  const h = (sel: string): number => document.querySelector<HTMLElement>(sel)?.offsetHeight ?? 0
-  return h('.req-strip') + h('.files-toolbar')
-}
-/** The file the reviewer was just taken to, and where its box then was in the window.
- *  A file is not always under the top of the window after a jump to it (one near the end
- *  of the page cannot be brought up that far; a line is shown in the middle): until the
+/** The file the reviewer was just taken to, and where its box then was in the Code pane.
+ *  A file is not always under the top of the pane after a jump to it (one near the end
+ *  of the list cannot be brought up that far; a line is shown in the middle): until the
  *  reviewer scrolls, it is still the file they are at. */
 let arrived: { box: HTMLElement; top: number } | null = null
 function arriveAt(el: HTMLElement): void {
   const box = el.closest<HTMLElement>('[data-gr-file]')
-  if (!box) return
-  arrived = { box, top: box.getBoundingClientRect().top }
+  const sc = box && scrollerOf(box)
+  if (!box || !sc) return
+  arrived = { box, top: topIn(box, sc) }
   useStore.setState({ currentFile: box.dataset.grFile ?? null })
 }
-/** The file under the top of the window in Files changed: the first of `boxes` (the file
- *  boxes, in page order) to reach below what is pinned there — the requests strip, the
- *  toolbar, the top of a sticky file header. Between two files, or on a section's header,
- *  that is the next file down; past the last one it stays the last. A binary search: a
- *  handful of rectangles are read however many files there are and however long their
- *  diffs (asking the document what lies at a point costs tens of milliseconds on a long
- *  review, and finding the boxes anew walks every line of every diff). */
-function fileAtTop(boxes: HTMLElement[]): HTMLElement | null {
+/** The file under the top of the Code pane (`sc`: its scroller): the first of `boxes` (the
+ *  file boxes, in order) to reach below the top of a file header pinned there. Between two
+ *  files, or on a section's header, that is the next file down; past the last one it stays
+ *  the last. A binary search: a handful of rectangles are read however many files there
+ *  are and however long their diffs (asking the document what lies at a point costs tens
+ *  of milliseconds on a long review, and finding the boxes anew walks every line of every
+ *  diff). */
+function fileAtTop(boxes: HTMLElement[], sc: HTMLElement): HTMLElement | null {
   if (arrived) {
-    if (arrived.box.isConnected && Math.abs(arrived.box.getBoundingClientRect().top - arrived.top) < 4) return arrived.box
+    if (arrived.box.isConnected && Math.abs(topIn(arrived.box, sc) - arrived.top) < 4) return arrived.box
     arrived = null
   }
   if (!boxes.length) return null
-  const line = Math.max(document.querySelector('.files-toolbar')?.getBoundingClientRect().bottom ?? 0, 0) + 24
+  const line = sc.getBoundingClientRect().top + 24
   let lo = 0
   let hi = boxes.length - 1
   while (lo < hi) {
@@ -382,33 +491,36 @@ function fileAtTop(boxes: HTMLElement[]): HTMLElement | null {
   }
   return boxes[lo]
 }
-/** Keep the store's `currentFile` true while Files changed is on screen (`list`: the
- *  column of file boxes, which the caller follows anew when it draws other boxes or
- *  draws them in another order). Scrolling asks for one reading on the next frame,
- *  however many scroll events arrive before it; so does the list changing height under
- *  a still window (a file folds, a diff loads). Returns the way to stop. */
+/** Keep the store's `currentFile` true while the Code pane is on screen (`list`: the
+ *  column of file boxes inside the pane's scroller, which the caller follows anew when it
+ *  draws other boxes or draws them in another order). Scrolling the pane asks for one
+ *  reading on the next frame, however many scroll events arrive before it; so does the
+ *  list changing height under a still pane (a file folds, a diff loads) and the pane
+ *  itself changing size (the window, the divider). Returns the way to stop. */
 export function followFiles(list: HTMLElement): () => void {
+  const sc = scrollerOf(list)
+  if (!sc) return () => { /* not in a pane: nothing to follow */ }
   const collect = (): HTMLElement[] => [...list.querySelectorAll<HTMLElement>('[data-gr-file]')]
   let boxes = collect()
   let frame = 0
   const read = (): void => {
     frame = 0
-    let box = fileAtTop(boxes)
+    if (!drawn(sc)) return            // folded away: the file the reviewer was at stays the one
+    let box = fileAtTop(boxes, sc)
     // drawn again since they were collected (boxes that are gone have no place, so the search ends on one)
-    if (box && !box.isConnected) { boxes = collect(); box = fileAtTop(boxes) }
+    if (box && !box.isConnected) { boxes = collect(); box = fileAtTop(boxes, sc) }
     const file = box?.dataset.grFile
     if (file != null && file !== useStore.getState().currentFile) useStore.setState({ currentFile: file })
   }
   const soon = (): void => { frame ||= window.requestAnimationFrame(read) }
   const ro = new ResizeObserver(soon)
   ro.observe(list)
-  window.addEventListener('scroll', soon, { passive: true })
-  window.addEventListener('resize', soon)
+  ro.observe(sc)
+  sc.addEventListener('scroll', soon, { passive: true })
   soon()
   return () => {
     ro.disconnect()
-    window.removeEventListener('scroll', soon)
-    window.removeEventListener('resize', soon)
+    sc.removeEventListener('scroll', soon)
     if (frame) window.cancelAnimationFrame(frame)
   }
 }

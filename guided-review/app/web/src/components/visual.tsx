@@ -3,7 +3,7 @@ import type { LoadedReview, VisualEdge, VisualKind, VisualNode, VisualStatus, Vi
 import { useStore } from '../store'
 import { focusAnchor, focusLines } from '../focus'
 import { layout } from '../graph'
-import { ago, baseName, cssq, isOpen, plural, secStyle, short } from '../util'
+import { ago, baseName, isOpen, plural, secStyle, short } from '../util'
 import { AwayHint, Icon, Md } from './common'
 
 // ── what a box says ───────────────────────────────────────────
@@ -19,16 +19,18 @@ const KIND: Record<VisualKind, string> = { architecture: 'Architecture', flow: '
 const placeOf = (n: VisualNode, full = true): string =>
   !n.file ? '' : `${full || n.file.endsWith('/') ? n.file : baseName(n.file)}${n.line != null ? `:${n.line}${n.end != null ? `–${n.end}` : ''}` : ''}`
 
-/** What clicking a box does: go to its code, when that code is part of the diff as the
- *  page has it now (the diagrams may be older than the code). */
+/** What picking a box does: the Code pane shows its code and flashes its lines, when that
+ *  code is part of the diff as the page has it now (the diagrams may be older than the
+ *  code). The diagram stays where it is. A pick is the reviewer's own aim, so it leaves
+ *  no "Back to …" pill. */
 function goTo(n: VisualNode, loaded: LoadedReview): (() => void) | null {
   if (!n.file || !n.inDiff) return null
   const dir = n.file.endsWith('/')
   const f = dir ? loaded.files.find((x) => !x.excluded && x.path.startsWith(n.file!)) : loaded.files.find((x) => x.path === n.file)
   if (!f) return null
-  if (dir || n.line == null || f.status === 'deleted' || f.binary) return () => focusAnchor({ kind: 'file', file: f.path }, { top: true })
+  if (dir || n.line == null || f.status === 'deleted' || f.binary) return () => focusAnchor({ kind: 'file', file: f.path }, { nav: true, top: true })
   const { line } = n
-  return () => focusLines(f.path, line, n.end ?? line)
+  return () => focusLines(f.path, line, n.end ?? line, { nav: true })
 }
 
 // ── text in an SVG has to be measured to be boxed ─────────────
@@ -99,7 +101,7 @@ function codeOf(n: VisualNode, loaded: LoadedReview): { lines: { sign: string; n
 
 /** What the reviewer sees when they point at a box: everything the box could not hold. Its
  *  full name and line, what it does (the session's note), what it is connected to, and its
- *  code as the diff has it. Nothing in it is clicked: a click on the box itself goes to the code. */
+ *  code as the diff has it. Nothing in it is clicked: a click on the box itself is the pick. */
 function NodeCard({ node, view, loaded, at, link }: { node: VisualNode; view: VisualView; loaded: LoadedReview; at: DOMRect; link: boolean }) {
   const name = (id: string): string => view.nodes.find((n) => n.id === id)?.label ?? id
   const into = view.edges.filter((e) => e.to === node.id)
@@ -136,32 +138,43 @@ function NodeCard({ node, view, loaded, at, link }: { node: VisualNode; view: Vi
           {code.more > 0 && <span className="more">… {plural(code.more, 'more line')}</span>}
         </pre>
       )}
-      <div className="muted small">{link ? 'Click the box to go to this code.' : node.file ? (node.inDiff ? 'This code is no longer in the comparison.' : 'This change does not touch it, so the page cannot open it.') : 'Not code of this repository.'}</div>
+      <div className="muted small">{link ? 'Click the box to show this code in the Code pane.' : node.file ? (node.inDiff ? 'This code is no longer in the comparison.' : 'This change does not touch it, so the page cannot open it.') : 'Not code of this repository.'}</div>
     </div>
   )
 }
 
 // ── one diagram ───────────────────────────────────────────────
+/** how long the Guide pane's width has to hold still before a diagram is laid out for it */
+const SETTLE = 140
 function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
   // the box under the pointer or the keyboard, and where it is on the screen
   const [hover, setHover] = useState<{ id: string; at: DOMRect } | null>(null)
-  // the box last picked: kept in the store, so it is still outlined on the way back from its
-  // code. Only outlined: it does not hold the diagram dimmed, and the next box pointed at takes over
+  // the pick: the box whose code the Code pane was last taken to. Kept in the store, it
+  // stays outlined while the reviewer reads that code, points at other boxes, or looks at
+  // another Guide and comes back, until another box is picked. Only outlined: it does not
+  // hold the diagram dimmed
   const pinned = useStore((s) => s.visualNode)
   const pin = (id: string | null): void => useStore.getState().set({ visualNode: id })
   const root = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLDivElement>(null)
-  // how wide the drawing may be: the layout breaks a wider layer into rows
+  // how wide the drawing may be (the Guide pane's width): the layout breaks a wider layer into rows
   const [room, setRoom] = useState(0)
   useLayoutEffect(() => {
     const el = canvas.current
     if (!el) return
-    // (less the canvas's own padding and the margin the layout draws round the boxes)
-    const measure = (): void => setRoom(Math.max(280, Math.floor(el.clientWidth) - 16 - 32))
+    let timer = 0
+    const measure = (): void => {
+      // a Guide that is not on show has no width: the drawing stays as it was, to come back as it was
+      if (!el.clientWidth) return
+      // (less the canvas's own padding and the margin the layout draws round the boxes)
+      setRoom(Math.max(280, Math.floor(el.clientWidth) - 16 - 32))
+    }
     measure()
-    const ro = new ResizeObserver(measure)
+    // The drawing is laid out anew only once the pane's width has settled: while the divider
+    // is being dragged, the drawing as it is is shown smaller or with more room round it.
+    const ro = new ResizeObserver(() => { window.clearTimeout(timer); timer = window.setTimeout(measure, SETTLE) })
     ro.observe(el)
-    return () => ro.disconnect()
+    return () => { ro.disconnect(); window.clearTimeout(timer) }
   }, [])
   const groups = useMemo(() => [...new Set(view.nodes.map((n) => n.group).filter((g): g is string => Boolean(g)))], [view])
   const items = useMemo(() => view.nodes.map(drawn), [view])
@@ -177,31 +190,21 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
     for (const e of view.edges) { if (e.from === cur.id) ids.add(e.to); if (e.to === cur.id) ids.add(e.from) }
     return ids
   }, [cur, view])
-  // back from the code: the keyboard is where it was, on the box that was picked. That focus
-  // is the page's doing, not the reviewer pointing at the box, so it lights nothing up
-  const restoring = useRef(false)
-  useEffect(() => {
-    const id = useStore.getState().visualNode
-    const el = id ? root.current?.querySelector<SVGGElement>(`[data-gr-node="${cssq(id)}"]`) : null
-    if (el) { restoring.current = true; el.focus({ preventScroll: true }); restoring.current = false }
-  }, [])
-  // the card is placed on the screen, so it goes when the page scrolls under it
+  // the card is placed on the screen, so it goes when the Guide scrolls under it (the
+  // Code pane scrolling beside it, as it does after a pick, moves nothing the card points at)
   useEffect(() => {
     if (!hover) return
-    const off = (): void => setHover(null)
+    const off = (e: Event): void => { if (e.target instanceof Node && e.target.contains(root.current)) setHover(null) }
     window.addEventListener('scroll', off, { passive: true, capture: true })
     return () => window.removeEventListener('scroll', off, { capture: true })
   }, [hover])
   const touches = (e: VisualEdge): boolean => Boolean(cur) && (e.from === cur?.id || e.to === cur?.id)
+  // a pick: the card gives way, so that it does not lie over the code it has just brought up
   const act = (n: VisualNode): void => {
     const run = links.get(n.id)
     if (run) { pin(n.id); setHover(null); run() }
   }
-  const point = (n: VisualNode, el: Element): void => {
-    if (restoring.current) return
-    if (pinned && pinned !== n.id) pin(null)
-    setHover({ id: n.id, at: el.getBoundingClientRect() })
-  }
+  const point = (n: VisualNode, el: Element): void => setHover({ id: n.id, at: el.getBoundingClientRect() })
   const onKey = (e: RKeyboardEvent, n: VisualNode): void => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(n) } else if (e.key === 'Escape') setHover(null) }
   const said = (n: VisualNode): string => [n.label, STATUS[n.status].label.toLowerCase(), placeOf(n), n.sub, n.note].filter(Boolean).join(', ')
   return (
@@ -214,10 +217,10 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
         {view.edges.some((e) => e.kind === 'removed') && <span className="viz-key" title="Claude Code's reading of the change, not something git can confirm"><span className="viz-line removed" aria-hidden="true" />Connection removed</span>}
         {groups.map((g, i) => <span key={g} className="viz-key" style={secStyle(i)}><span className="sec-dot" aria-hidden="true" />{g}</span>)}
         <span className="grow" />
-        <span className="muted">Point at a box for what it is and its code. Click one to go to its code.</span>
+        <span className="muted">Point at a box for what it is and its code. Click one to show its code beside the diagram.</span>
       </div>
       <div className="viz-canvas" ref={canvas}>
-        {/* never wider than the page: a wide layer was broken into rows, and what is still too wide is drawn smaller */}
+        {/* never wider than the Guide pane: a wide layer was broken into rows, and what is still too wide is drawn smaller */}
         <svg viewBox={`${lay.x} 0 ${lay.width} ${lay.height}`} style={{ width: lay.width, maxWidth: '100%', height: 'auto' }} role="group" aria-label={`${view.title}: ${view.nodes.length} boxes, ${plural(view.edges.length, 'connection')}`}>
           <g>
             {lay.wires.map((w, i) => (
@@ -249,13 +252,14 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
               return (
                 <g
                   key={n.id} className={`viz-node ${n.status}` + (link ? ' link' : '') + (near ? (near.has(n.id) ? (n.id === cur?.id ? ' cur' : '') : ' dim') : '') + (pinned === n.id ? ' pinned' : '')}
-                  transform={`translate(${b.x},${b.y})`} style={secStyle(gi)} tabIndex={0} role="button" aria-label={`${said(n)}${link ? '. Go to the code' : ''}`}
-                  aria-describedby={cur?.id === n.id ? 'gr-viz-card' : undefined}
-                  data-gr-node={n.id} data-gr-node-status={n.status}
-                  onMouseEnter={(e) => point(n, e.currentTarget)} onMouseLeave={() => { setHover(null); if (pinned === n.id) pin(null) }}
+                  transform={`translate(${b.x},${b.y})`} style={secStyle(gi)} tabIndex={0} role="button" aria-label={`${said(n)}${link ? '. Show the code' : ''}`}
+                  aria-describedby={cur?.id === n.id ? 'gr-viz-card' : undefined} aria-pressed={link ? pinned === n.id : undefined}
+                  data-gr-node={n.id} data-gr-node-status={n.status} data-gr-pick={pinned === n.id ? 'true' : undefined}
+                  onMouseEnter={(e) => point(n, e.currentTarget)} onMouseLeave={() => setHover(null)}
                   onFocus={(e) => point(n, e.currentTarget)} onBlur={() => setHover(null)}
                   onClick={() => act(n)} onKeyDown={(e) => onKey(e, n)}
                 >
+                  {pinned === n.id && <rect className="viz-pick" x={-4} y={-4} width={b.w + 8} height={b.h + 8} rx={9} />}
                   <rect className="viz-box" width={b.w} height={b.h} rx={6} />
                   {gi >= 0 && <rect className="viz-group" x={1.5} y={1.5} width={4} height={b.h - 3} rx={2} />}
                   <text className="viz-label" x={14} y={d.sub.length ? 19 : 21}>{d.label}</text>
@@ -272,7 +276,7 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
   )
 }
 
-// ── the tab ───────────────────────────────────────────────────
+// ── the Guide ─────────────────────────────────────────────────
 export function VisualTab({ loaded }: { loaded: LoadedReview }) {
   const picked = useStore((s) => s.visualView)
   const { request, set } = useStore.getState()

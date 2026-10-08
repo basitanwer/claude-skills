@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { on, onStreamOpen } from './api'
 import { isBusy, useStore } from './store'
 import { parseHash } from './util'
-import { applyStoredTheme, BackBar, Toasts, TourBar } from './components/common'
+import { applyStoredTheme, Toasts, TourBar } from './components/common'
 import { Dashboard, Hub } from './screens/Home'
 import { Review } from './screens/Review'
 import './styles.css'
@@ -44,7 +44,6 @@ function App() {
     <div className="app" data-gr="app" data-gr-busy={busy ? 'true' : 'false'}>
       {route.name === 'review' ? <Review /> : route.name === 'hub' ? <Hub /> : <Dashboard />}
       <TourBar />
-      <BackBar />
       <Toasts />
     </div>
   )

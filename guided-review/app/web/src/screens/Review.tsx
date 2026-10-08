@@ -3,13 +3,13 @@ import type {
   AnchorInput, Artifact, Comment, FactRow, FileDiff, FocusTarget, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, focusQuestion, followFiles, goToSection, showSection, startTour } from '../focus'
+import { focusAnchor, focusQuestion, followFiles, goToSection, holdPlaces, showInPane, showSection, startTour } from '../focus'
 import {
-  ago, anchorKey, anchorLabel, askThreads, baseName, driftText, EFFORT, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
+  ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
-  sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Tab
+  sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Guide
 } from '../util'
-import { AwayHint, CopyButton, DiffStat, FileIcon, Icon, Md, Menu, MenuItem, PresenceDot, currentTheme, setTheme } from '../components/common'
+import { AwayHint, BackBar, CopyButton, DiffStat, FileIcon, Icon, Md, Menu, MenuItem, PresenceDot, ThemeToggle, currentTheme, setTheme } from '../components/common'
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
 import { FileBox, hoveredLine } from '../components/diff'
 import { VisualTab } from '../components/visual'
@@ -34,8 +34,45 @@ function useWide(px: number): boolean {
   }, [q])
   return wide
 }
+/** How wide a pane is, as the widest of `steps` it reaches (0: none of them): what fits in
+ *  a pane is decided by the pane's own width, since beside the other pane it has only a
+ *  part of the window. Read when the pane is first drawn and whenever its size changes;
+ *  the caller is drawn again only when a step is crossed. While the divider is being
+ *  dragged the reading waits until the width has held still, so the content of a pane is
+ *  not laid out anew at every step of the drag. A pane that is hidden keeps its last width. */
+function usePaneWidth(ref: RefObject<HTMLElement | null>, steps: readonly number[]): number {
+  const stepOf = (w: number): number => steps.reduce((at, s) => (w >= s ? s : at), 0)
+  const [step, setStep] = useState(() => stepOf(window.innerWidth))
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el) return
+    let timer = 0
+    const read = (): void => { const w = el.getBoundingClientRect().width; if (w > 0) setStep(stepOf(w)) }
+    read()
+    const ro = new ResizeObserver(() => {
+      window.clearTimeout(timer)
+      if (el.closest('[data-dragging]')) timer = window.setTimeout(read, 140)
+      else read()
+    })
+    ro.observe(el)
+    return () => { ro.disconnect(); window.clearTimeout(timer) }
+  }, [ref])       // eslint-disable-line react-hooks/exhaustive-deps
+  return step
+}
+/** Class names for a pane narrower than each of these widths (" lt760 lt1000"): the
+ *  styles for a narrow pane hang on them, where they used to hang on the window's width. */
+const below = (width: number, marks: number[]): string => marks.filter((m) => width < m).map((m) => ` lt${m}`).join('')
+/** For a scroller that is hidden at times (a Guide while another is on show, a pane folded
+ *  away): a box that is not drawn forgets how far it was scrolled in some browsers, so the
+ *  position is noted while it is on show and put back when it returns. */
+function useKeptScroll<T extends HTMLElement>(shown: boolean): { ref: RefObject<T | null>; onScroll: () => void } {
+  const ref = useRef<T>(null)
+  const y = useRef(0)
+  useLayoutEffect(() => { if (shown && ref.current && ref.current.scrollTop !== y.current) ref.current.scrollTop = y.current }, [shown])
+  return { ref, onScroll: () => { if (shown && ref.current) y.current = ref.current.scrollTop } }
+}
 
-// ── header ────────────────────────────────────────────────────
+// ── the top bar ───────────────────────────────────────────────
 function RefChip({ side, sha }: { side: RefSide; sha?: string }) {
   const kind = SIDE_KIND[side.kind]
   return <span className="ref-chip mono" title={`${kind.label}: ${kind.title}${sha ? ` · now at ${short(sha)}` : ''}`}>{symLabel(side.symbol)}</span>
@@ -48,34 +85,102 @@ function reviewState(loaded: LoadedReview, saved: boolean): { cls: string; text:
   return { cls: 'open', text: 'Open' }
 }
 
-function PageHeader({ loaded }: { loaded: LoadedReview }) {
+/** What the top bar holds back until it is asked for: the whole title with its comments,
+ *  the comparison, the size of the change, the effort line and the commits. It stays in
+ *  the page while it is closed, so that what the session and the browser checks look for
+ *  in it (the effort level, the thread on the title) is always there to be found. */
+function Details({ loaded, title }: { loaded: LoadedReview; title: string }) {
+  const saved = useStore((s) => s.sessionId != null)
+  const composing = useStore((s) => s.composer === 'title')
+  const threads = useCommentsAt('title')
+  const [open, setOpen] = useState(false)
+  const box = useRef<HTMLDivElement>(null)
+  const { pair } = loaded.session
+  const files = loaded.files.filter((f) => !f.excluded)
+  // a comment on the title is written, and read, in here
+  useEffect(() => { if (composing) setOpen(true) }, [composing])
+  useEffect(() => {
+    if (!open) return
+    const off = (e: MouseEvent): void => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false) }
+    const key = (e: KeyboardEvent): void => { if (e.key === 'Escape' && !(e.target instanceof Element && e.target.closest('input, textarea'))) setOpen(false) }
+    document.addEventListener('mousedown', off)
+    document.addEventListener('keydown', key)
+    return () => { document.removeEventListener('mousedown', off); document.removeEventListener('keydown', key) }
+  }, [open])
+  const showCommit = (sha: string): void => { setOpen(false); useStore.getState().revealCode(); void useStore.getState().setView({ commit: sha }) }
+  return (
+    <div className="menu" ref={box}>
+      <button className="btn sm" aria-haspopup="true" aria-expanded={open} aria-controls="gr-details" data-gr="details" title="The comparison, the commits, the effort and the size of this change" onClick={() => setOpen(!open)}>
+        Details{threads.length > 0 && <span className="counter" title={`${plural(threads.length, 'comment')} on the title`}>{threads.length}</span>}<Icon name="chevDown" size={12} />
+      </button>
+      <div className="menu-pop left details-pop" id="gr-details" hidden={!open} role="group" aria-label="About this review" data-gr="details-pop">
+        <div className="details-body">
+          <div className="pr-title-row">
+            <h2>{title}{saved && <span className="pr-num"> #{loaded.sessionId}</span>}</h2>
+            <CommentButton k="title" title="Comment on the title" />
+          </div>
+          <CommentSlot anchor={{ kind: 'title' }} k="title" />
+          <div className="pr-compare">
+            Comparing <RefChip side={pair.base} /> ← <RefChip side={pair.compare} sha={loaded.headSha} />
+            <CopyButton text={pair.compare.kind === 'commit' ? pair.compare.anchorSha : pair.compare.symbol} title="Copy the compare ref" />
+            {loaded.session.direct && <span className="label" title="The two endpoints are compared as they are, not from their merge-base">endpoints</span>}
+            {loaded.dirty && <span className="label warn" title="The working tree has uncommitted changes; they are part of this review">uncommitted changes</span>}
+          </div>
+          <div className="details-size" data-gr="diff-totals">
+            <span>{plural(files.length, 'file')} changed</span>
+            <DiffStat add={files.reduce((a, f) => a + f.add, 0)} del={files.reduce((a, f) => a + f.del, 0)} />
+          </div>
+          <EffortLine loaded={loaded} />
+        </div>
+        <div className="pop-head">{loaded.commits.length ? plural(loaded.commits.length, 'commit') : 'No commits'}</div>
+        {loaded.commits.map((c) => (
+          <button key={c.sha} className="menu-item commit-item" data-gr-details-commit={c.sha} title="Show only this commit's changes in the Code pane" onClick={() => showCommit(c.sha)}>
+            <span className="menu-check">{loaded.view?.commit === c.sha ? <Icon name="check" size={14} /> : null}</span>
+            <span className="grow"><span className="clip strong">{c.subject}</span><span className="muted small"><span className="mono">{short(c.sha)}</span> · {c.author} · {ago(c.date)}</span></span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** The top bar: the one slim bar that is always in view. The title (cut short; whole on
+ *  hover and in Details), the state of the review, what Details opens, Claude Code's
+ *  presence, the comments, Review and the theme. */
+function ReviewBar({ loaded }: { loaded: LoadedReview }) {
+  const saved = useStore((s) => s.sessionId != null)
+  const { pair } = loaded.session
+  const st = reviewState(loaded, saved)
+  const title = loaded.state.walkthrough?.title || `${symLabel(pair.compare.symbol)} against ${symLabel(pair.base.symbol)}`
+  const hub = routeHash({ name: 'hub', path: loaded.session.repo })
+  return (
+    <header className="topbar slim" data-gr="top-bar">
+      <a className="brand" href="#/" title="All repositories"><span className="brand-mark" aria-hidden="true" /></a>
+      <nav className="crumbs" aria-label="Breadcrumb">
+        <a className="strong" href={hub} title={`${loaded.session.repo} — its reviews`}>{baseName(loaded.session.repo)}</a>
+        <span className="crumb-more"><span className="muted crumb-sep">/</span><a href={hub}>reviews</a></span>
+        <span className="muted crumb-sep">/</span>
+      </nav>
+      <h1 className="bar-title" data-gr="title" title={`${title}${saved ? ` #${loaded.sessionId}` : ''}`}><span className="clip">{title}</span>{saved && <span className="pr-num"> #{loaded.sessionId}</span>}</h1>
+      <span className={'state ' + st.cls} data-gr="state" data-gr-state={st.cls}><Icon name={st.cls === 'approved' ? 'check' : 'pr'} size={14} />{st.text}</span>
+      <Details loaded={loaded} title={title} />
+      <span className="grow" />
+      <PresenceDot presence={loaded.presence} />
+      <CommentsMenu loaded={loaded} />
+      <ReviewMenu loaded={loaded} />
+      <ThemeToggle />
+    </header>
+  )
+}
+
+/** What has to be said across the whole workspace: a side of the comparison that no
+ *  longer resolves, code that changed since the page loaded it. */
+function Banners({ loaded }: { loaded: LoadedReview }) {
   const saved = useStore((s) => s.sessionId != null)
   const retarget = useStore((s) => s.retarget)
   const [ref, setRef] = useState('')
-  const { pair } = loaded.session
-  const wt = loaded.state.walkthrough
-  const st = reviewState(loaded, saved)
-  const title = wt?.title || `${symLabel(pair.compare.symbol)} against ${symLabel(pair.base.symbol)}`
   return (
-    <div className="pr-head">
-      <div className="pr-title-row">
-        <h1 data-gr="title">{title}{saved && <span className="pr-num"> #{loaded.sessionId}</span>}</h1>
-        <CommentButton k="title" title="Comment on the title" />
-        <span className="grow" />
-        <PresenceDot presence={loaded.presence} />
-      </div>
-      <div className="pr-meta">
-        <span className={'state ' + st.cls} data-gr="state" data-gr-state={st.cls}><Icon name={st.cls === 'approved' ? 'check' : 'pr'} />{st.text}</span>
-        <span className="pr-compare">
-          Comparing <RefChip side={pair.base} /> ← <RefChip side={pair.compare} sha={loaded.headSha} />
-          <CopyButton text={pair.compare.kind === 'commit' ? pair.compare.anchorSha : pair.compare.symbol} title="Copy the compare ref" />
-          <span className="muted">· {plural(loaded.commits.length, 'commit')}</span>
-          {loaded.session.direct && <span className="label" title="The two endpoints are compared as they are, not from their merge-base">endpoints</span>}
-          {loaded.dirty && <span className="label warn" title="The working tree has uncommitted changes; they are part of this review">uncommitted changes</span>}
-        </span>
-      </div>
-      <EffortLine loaded={loaded} />
-      <CommentSlot anchor={{ kind: 'title' }} k="title" />
+    <div className="ws-banners">
       {loaded.refMissing && (
         <div className="flash-banner bad" data-gr="ref-missing">
           <span className="grow">The {loaded.refMissing.side} ref <span className="mono">{loaded.refMissing.symbol}</span> no longer resolves.</span>
@@ -87,6 +192,7 @@ function PageHeader({ loaded }: { loaded: LoadedReview }) {
           )}
         </div>
       )}
+      <DriftBanner />
     </div>
   )
 }
@@ -104,37 +210,23 @@ function DriftBanner() {
   )
 }
 
-/** What Claude Code has been asked and has not finished: one compact row each, on every tab. */
+/** What Claude Code has been asked and has not finished: one compact row each, under the top bar whatever is on show. */
 function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
   useTick(loaded.state.requests.some(isOpen) ? 1000 : 30_000)
   const dismissed = useStore((s) => s.dismissed)
-  const { cancelRequest, dismissRequest, retryRequest, setTab } = useStore.getState()
+  const { cancelRequest, dismissRequest, retryRequest, showGuide } = useStore.getState()
   const away = loaded.presence === 'away'
   const rows = loaded.state.requests.filter((r) => isOpen(r) || (r.status === 'failed' && !dismissed.includes(r.id) && Date.now() - Date.parse(r.finishedAt ?? r.createdAt) < 600_000))
-  // Everything that sticks below the strip (toolbar, file headers, tree, section panel)
-  // is offset by its height, which varies: rows stack, and wrap on a narrow window.
-  const strip = useRef<HTMLDivElement>(null)
-  const shown = rows.length > 0
-  useLayoutEffect(() => {
-    const el = strip.current
-    const page = el?.parentElement
-    if (!el || !page) return
-    const measure = (): void => page.style.setProperty('--strip-h', `${el.offsetHeight}px`)
-    measure()
-    const ro = new ResizeObserver(measure)
-    ro.observe(el)
-    return () => { ro.disconnect(); page.style.removeProperty('--strip-h') }
-  }, [shown])
-  if (!shown) return null
+  if (rows.length === 0) return null
   return (
-    <div className="req-strip" data-gr="requests" ref={strip}>
+    <div className="req-strip" data-gr="requests">
       {rows.map((r) => {
         const stuck = stuckReason(r, away)
         const why = stuck && stuckText(r, stuck)
         return (
           <div key={r.id} className={'req-row ' + r.status} data-gr-request={r.id} data-gr-request-kind={r.kind} data-gr-request-status={r.status}>
             {isOpen(r) ? <span className="spinner" /> : <Icon name="x" size={14} />}
-            <button className="link strong" onClick={() => setTab(r.kind === 'visualize' ? 'visual' : 'conversation')}>{requestTitle(r)}</button>
+            <button className="link strong" onClick={() => showGuide(r.kind === 'visualize' ? 'visual' : 'conversation')}>{requestTitle(r)}</button>
             <span className="muted" data-gr="request-state">
               {r.status === 'pending' ? 'waiting for Claude Code' : r.status === 'running' ? `${stuck === 'away' ? 'picked up' : 'working for'} ${elapsed(r.startedAt) || '0s'}${stuck === 'away' ? ' ago' : ''}` : `failed: ${r.error ?? 'no reason given'}`}
             </span>
@@ -153,34 +245,58 @@ function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
   )
 }
 
-// ── tabs ──────────────────────────────────────────────────────
+// ── the Guide row ─────────────────────────────────────────────
 const generalComment = (c: Comment): boolean => ['summary', 'title', 'section', 'plan-step', 'acceptance', 'deviation'].includes(c.anchor.kind)
 
-function Tabs({ loaded }: { loaded: LoadedReview }) {
-  const tab = useStore((s) => s.tab)
-  const setTab = useStore((s) => s.setTab)
+/** The row that names the Guides and switches between them: the row of tabs, as it was,
+ *  less "Files changed" (the code is always there, in the Code pane). It sits on top of
+ *  the Guide pane; while that pane is closed it sits on top of the Code pane, where it is
+ *  the way to open one. Clicking the name of the Guide on show closes the Guide pane.
+ *  `onePane`: the window fits one pane at a time. */
+function GuideRow({ loaded, onePane }: { loaded: LoadedReview; onePane: boolean }) {
+  const guide = useStore((s) => s.guide)
+  const front = useStore((s) => s.front)
+  const guideWide = useStore((s) => s.guideWide)
   const wsOnly = useStore((s) => s.wsOnly)
+  const { showGuide, set } = useStore.getState()
   const files = [...loaded.files, ...wsOnly.filter((f) => !loaded.files.some((x) => x.path === f.path))].filter((f) => !f.excluded)
   const conv = loaded.state.messages.length + loaded.state.comments.filter(generalComment).length
   const hasSpec = loaded.artifacts.length > 0 || Boolean(loaded.state.walkthrough?.planMap)
-  const items: { id: Tab; label: string; icon: string; n: number }[] = [
+  const items: { id: Guide; label: string; icon: string; n: number }[] = [
     { id: 'conversation', label: 'Conversation', icon: 'comment', n: conv },
     { id: 'commits', label: 'Commits', icon: 'commit', n: loaded.commits.length },
-    ...(hasSpec ? [{ id: 'spec' as Tab, label: 'Spec & plan', icon: 'book', n: loaded.artifacts.length }] : []),
-    { id: 'visual', label: 'Visualize', icon: 'graph', n: loaded.state.visual?.views.length ?? 0 },
-    { id: 'files', label: 'Files changed', icon: 'file', n: files.length }
+    ...(hasSpec ? [{ id: 'spec' as Guide, label: 'Spec & plan', icon: 'book', n: loaded.artifacts.length }] : []),
+    { id: 'visual', label: 'Visualize', icon: 'graph', n: loaded.state.visual?.views.length ?? 0 }
   ]
+  // in a window that fits one pane, a Guide can be open behind the code: its name brings it back
+  const behind = onePane && front === 'code'
+  const widen = (): void => { const hold = holdPlaces(); set({ guideWide: !guideWide }); hold.settle() }
   return (
-    <div className="tabs-row">
-      <nav className="tabs" role="tablist" aria-label="Review">
-        {items.map((t) => (
-          <button key={t.id} role="tab" aria-selected={tab === t.id} className={'tab' + (tab === t.id ? ' on' : '')} data-gr-tab={t.id} onClick={() => { useStore.getState().set({ returnTo: null }); setTab(t.id) }}>
-            <Icon name={t.icon} />{t.label}<span className="counter">{t.n}</span>
-          </button>
-        ))}
+    <div className="tabs-row guide-row" data-gr="guide-row">
+      <nav className="tabs" role="tablist" aria-label="Guides">
+        {items.map((t) => {
+          const on = guide === t.id
+          return (
+            <button
+              key={t.id} role="tab" aria-selected={on} className={'tab' + (on ? ' on' : '')} data-gr-tab={t.id}
+              title={on ? (behind ? `Back to ${t.label}` : `${t.label} — click again to close the Guide pane`) : `${t.label}, beside the code`}
+              onClick={() => showGuide(on && !behind ? null : t.id)}
+            >
+              <Icon name={t.icon} /><span className="tab-label">{t.label}</span><span className="counter">{t.n}</span>
+            </button>
+          )
+        })}
       </nav>
       <span className="grow" />
-      <DiffStat add={files.reduce((a, f) => a + f.add, 0)} del={files.reduce((a, f) => a + f.del, 0)} />
+      {guide == null && <DiffStat add={files.reduce((a, f) => a + f.add, 0)} del={files.reduce((a, f) => a + f.del, 0)} />}
+      {guide != null && !behind && (onePane
+        ? <button className="btn sm" data-gr="guide-to-code" title="Show the code (the Guide stays as it is)" onClick={() => set({ front: 'code' })}><Icon name="file" size={14} />Code</button>
+        : (
+          <button className="icon-btn" aria-pressed={guideWide} data-gr="guide-wide" title={guideWide ? 'Show the code beside this again' : 'Give this the whole width (the code comes back with a jump to it)'} aria-label={guideWide ? 'Show the Code pane again' : 'Give the Guide pane the whole width'} onClick={widen}>
+            <Icon name={guideWide ? 'columns' : 'expand'} />
+          </button>
+        ))}
+      {guide != null && <button className="icon-btn" data-gr="guide-close" data-gr-tab="files" title="Close the Guide pane: the code alone" aria-label="Close the Guide pane" onClick={() => showGuide(null)}><Icon name="x" /></button>}
     </div>
   )
 }
@@ -251,7 +367,7 @@ function ReviewMenu({ loaded }: { loaded: LoadedReview }) {
 }
 
 function CommentsMenu({ loaded }: { loaded: LoadedReview }) {
-  const setTab = useStore((s) => s.setTab)
+  const showGuide = useStore((s) => s.showGuide)
   const all = loaded.state.comments
   const groups: { title: string; list: Comment[] }[] = [
     { title: 'Pending', list: all.filter((c) => c.status === 'queued' || hasPendingReply(c)) },
@@ -272,7 +388,7 @@ function CommentsMenu({ loaded }: { loaded: LoadedReview }) {
               {g.list.map((c) => {
                 const t = c.lineGone || c.status === 'outdated' ? null : focusable(c.anchor)
                 return (
-                  <button key={c.id} className="pop-item col" onClick={() => { close(); if (t) focusAnchor(t); else setTab(c.anchor.kind === 'artifact' ? 'spec' : 'conversation') }}>
+                  <button key={c.id} className="pop-item col" onClick={() => { close(); if (t) focusAnchor(t); else showGuide(c.anchor.kind === 'artifact' ? 'spec' : 'conversation') }}>
                     <span className="mono small muted">{c.author === 'agent' ? 'Claude' : 'You'} · {anchorLabel(c.anchor)}</span>
                     <span className="clip">{c.text}</span>
                   </button>
@@ -286,11 +402,21 @@ function CommentsMenu({ loaded }: { loaded: LoadedReview }) {
   )
 }
 
-// ── Files changed ─────────────────────────────────────────────
-/** The narrowest window in which a diff stays split while a section is docked in the
+// ── the Code pane (Files changed) ─────────────────────────────
+/** The narrowest Code pane in which a diff stays split while a section is docked in the
  *  tree's place: its column is then as wide (about 730px) as the narrowest one that is
  *  split by default with the tree showing. */
 const SPLIT_BESIDE_SECTION = 1200
+/** The window width from which the tree keeps its column while a Guide is beside the code:
+ *  below it Guide, tree and code do not fit side by side, and the tree folds. */
+const TREE_BESIDE_GUIDE = 1500
+/** the gap between the tree's column and the files (px) */
+const TREE_GAP = 24
+/** The widths of the Code pane at which what it holds changes: a file's header on one line (520), the tree as a column (760),
+ *  room for a split diff (900), split by default and the section as a column (1100), split
+ *  beside a section (1200), tree, diff and section side by side (1600). They are the
+ *  window widths the same things changed at while the code had the window to itself. */
+const CODE_STEPS = [520, 760, 900, 1100, SPLIT_BESIDE_SECTION, 1600] as const
 /** Drag (or arrow keys) to resize the file panel; double-click resets it. */
 function ResizeHandle({ width, onChange }: { width: number; onChange: (px: number | null) => void }) {
   const drag = useRef<{ x: number; w: number } | null>(null)
@@ -338,8 +464,8 @@ const TREE_STEP = 16
 const STATUS_MARK: Record<FileDiff['status'], string> = { added: 'A', deleted: 'D', renamed: 'R', modified: '' }
 /** `nested`: the row is in the folder tree, so it keeps an empty slot where a folder has its chevron. */
 /** Whether a row in a list of files is the one to mark as where the reviewer is: `is`
- *  says so of the file under the top of the window. When the mark lands on a row of the
- *  file tree, the tree scrolls itself just enough to show it — never the page, which a
+ *  says so of the file under the top of the Code pane. When the mark lands on a row of the
+ *  file tree, the tree scrolls itself just enough to show it — never the code, which a
  *  scrollIntoView would also move. */
 function useHere<T extends HTMLElement>(is: (file: string) => boolean): { ref: RefObject<T | null>; here: boolean } {
   const here = useStore((s) => s.currentFile != null && is(s.currentFile))
@@ -413,7 +539,7 @@ function SectionHeader({ section, files, no }: { section: Section; files: FileDi
   )
 }
 /** A walkthrough section beside the code: what it says, its files, and the same
- *  Reviewed mark and comment thread it has in the Conversation tab. Opened from a file's
+ *  Reviewed mark and comment thread it has in the Conversation. Opened from a file's
  *  section chip, so reading about a group of files never means leaving them. It is also
  *  how the walkthrough is gone through in order: its arrows and "Reviewed, next" open
  *  another section and bring the code to it (goToSection). */
@@ -515,11 +641,19 @@ function Diagram({ section }: { section: Section }) {
   )
 }
 
-function FilesTab({ loaded }: { loaded: LoadedReview }) {
+/** What the Code pane holds: for this step, the whole of what the "Files changed" tab was.
+ *  Its toolbar stays put on top; under it the file tree, the files and (on a wide pane) an
+ *  open section are columns that each scroll by themselves. The column of files is the
+ *  Code pane's scroller: every jump to code moves it, and nothing else. `shown`: the pane
+ *  is on screen (it is kept, hidden, while the Guide has the whole width). */
+function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   const mode = useStore((s) => s.diffMode)
   const filters = useStore((s) => s.filters)
   const query = useStore((s) => s.fileQuery)
   const panelOpen = useStore((s) => s.panelOpen)
+  const treeAsked = useStore((s) => s.treeAsked)
+  const guideBeside = useStore((s) => s.guide != null)
+  const bigWindow = useWide(TREE_BESIDE_GUIDE)
   const diffView = useStore((s) => s.diffView)
   const treeView = useStore((s) => s.treeView)
   const view = useStore((s) => s.view)
@@ -527,11 +661,15 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
   const { set, setFilters, setDiffView, setTreeView, setView, setTreeWidth } = useStore.getState()
   const commitView = loaded.view?.commit
   const shownCommit = commitView ? loaded.commits.find((c) => c.sha === commitView) : undefined
-  const wide = useWide(1100)
-  const medium = useWide(760)
-  const roomy = useWide(900)
-  const widest = useWide(1600)
-  const fits = useWide(SPLIT_BESIDE_SECTION)
+  // what fits is decided by the pane's width, not the window's: beside a Guide the pane has a part of it
+  const root = useRef<HTMLDivElement>(null)
+  const width = usePaneWidth(root, CODE_STEPS)
+  const wide = width >= 1100
+  const medium = width >= 760
+  const roomy = width >= 900
+  const widest = width >= 1600
+  const fits = width >= SPLIT_BESIDE_SECTION
+  const scroll = useKeptScroll<HTMLDivElement>(shown)
   const [closed, setClosed] = useState<Set<string>>(() => new Set())
   const [, bump] = useState(0)
   const wt = loaded.state.walkthrough
@@ -562,13 +700,45 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
   const secPanelId = useStore((s) => s.sectionPanel)
   const reviewed = useStore((s) => s.reviewedSections)
   const secPanel = Boolean(secPanelId && wt?.sections.some((s) => s.id === secPanelId))
-  // From 1100px the open section is a column, not a drawer over the code. Up to 1600px
-  // there is no room for three columns: it takes the tree's place until it is closed, and
-  // where the diff column left beside it is too narrow to read two-up, the diff is unified.
-  // Between 760 and 1100px it is still a drawer, and the tree gives way just the same, or
-  // the two together would leave a sliver of the code the section is about.
+  // In a pane from 1100px the open section is a column, not a drawer over the code. Up to
+  // 1600px there is no room for three columns: it takes the tree's place until it is
+  // closed, and where the diff column left beside it is too narrow to read two-up, the diff
+  // is unified. Between 760 and 1100px it is still a drawer, and the tree gives way just
+  // the same, or the two together would leave a sliver of the code the section is about.
   const forTree = secPanel && medium && !widest
-  const treeShown = panelOpen && !forTree
+  // Where the tree has room it shows whenever it is switched on: in a pane of 760px or
+  // more, and, while a Guide is beside the code, on a window wide enough for Guide, tree
+  // and code (the Workspace then leaves the tree its room). Elsewhere it folds by itself
+  // until it is asked for; in a pane under 760px it then sits above the files.
+  const treeRoom = medium && (!guideBeside || bigWindow)
+  const treeShown = panelOpen && (treeRoom || treeAsked) && !forTree
+  // (asked for where it folds, it does not come back by itself the next time it folds)
+  useEffect(() => { if (treeRoom && treeAsked) set({ treeAsked: false }) }, [treeRoom, treeAsked, set])
+  // (the files change width when the tree comes or goes: they are held on the line they showed)
+  const toggleTree = (): void => {
+    const hold = holdPlaces()
+    if (forTree) { showSection(null); set({ panelOpen: true }) }
+    else if (treeRoom) set({ panelOpen: !panelOpen })
+    else set({ panelOpen: true, treeAsked: !treeShown })
+    hold.settle()
+  }
+  // `t`: the tree, with the caret in its filter. The Code pane comes back first if it was folded away.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const el = e.target as HTMLElement | null
+      if (e.key !== 't' || e.metaKey || e.ctrlKey || e.altKey || (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return
+      e.preventDefault()
+      useStore.getState().revealCode()
+      const hold = holdPlaces()
+      // an open section sits in the tree's place where there is no room for both: closing it brings the tree back
+      if (forTree) showSection(null)
+      set({ panelOpen: true, treeAsked: true })
+      hold.settle()
+      window.setTimeout(() => document.getElementById('gr-file-filter')?.focus({ preventScroll: true }), 30)
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [forTree, set])
   const canSplit = roomy && !(forTree && !fits)
   const split = canSplit && (diffView ?? (wide ? 'split' : 'unified')) === 'split'
 
@@ -594,7 +764,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
   const secCount = wt?.sections.length ?? 0
   const secDone = (wt?.sections ?? []).filter((s) => reviewed.includes(s.id)).length
   const secNext = wt?.sections.find((s) => !reviewed.includes(s.id)) ?? wt?.sections[0]
-  // the file under the top of the window, for the tree and the section panel to mark:
+  // the file under the top of the pane, for the tree and the section panel to mark:
   // followed anew when other boxes are drawn, or the same ones in another order or under
   // other groups, which no scroll or resize tells
   const list = useRef<HTMLDivElement>(null)
@@ -604,11 +774,12 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
   const modeLabel = shownCommit ? `${short(shownCommit.sha)} ${shownCommit.subject}` : commitView ? short(commitView) : eff === 'all' ? 'All changes' : eff === 'since' ? (since?.kind === 'approved' ? 'Since approved' : 'Since reviewed') : 'Since viewed'
   const pick = (m: DiffMode, close: () => void): void => { set({ diffMode: m }); if (commitView) void setView({ commit: undefined }); close() }
   const dirty = loaded.dirty && loaded.files.some((f) => f.uncommitted)
+  const stale = loaded.state.comments.filter((c) => c.status === 'outdated' && c.anchor.kind === 'diff')
 
   return (
-    <div className="files-tab">
+    <div className={'files-tab' + below(width, [520, 760, 1200])} ref={root}>
       <div className="files-toolbar">
-        <button className="btn sm icon" title={treeShown ? 'Hide the file tree' : forTree ? 'Show the file tree (closes the section beside the code)' : 'Show the file tree'} aria-label="Toggle file tree" aria-pressed={treeShown} onClick={() => { if (forTree) { showSection(null); set({ panelOpen: true }) } else set({ panelOpen: !panelOpen }) }}><Icon name="sidebar" /></button>
+        <button className="btn sm icon" title={treeShown ? 'Hide the file tree' : forTree ? 'Show the file tree (closes the section beside the code)' : 'Show the file tree'} aria-label="Toggle file tree" aria-pressed={treeShown} data-gr="tree-toggle" onClick={toggleTree}><Icon name="sidebar" /></button>
         <Menu label={<><Icon name="commit" /><span className="mode-label">{modeLabel}</span><Icon name="chevDown" size={12} /></>} className="btn sm mode-btn" hook="diff-mode" title="Which changes to show">
           {(close) => (
             <div className="commit-menu">
@@ -637,7 +808,6 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
             {secDone === secCount ? <Icon name="check" size={14} /> : <span className="sec-dot" />}<span><strong>{secDone}</strong> / {plural(secCount, 'section')}</span>
           </button>
         )}
-        <ReviewMenu loaded={loaded} />
         <Menu label={<Icon name="gear" />} className="btn sm icon" align="right" hook="view-settings" title="View settings">
           {(close) => (
             <>
@@ -654,7 +824,6 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
             </>
           )}
         </Menu>
-        <CommentsMenu loaded={loaded} />
       </div>
 
       {commitView && (
@@ -663,7 +832,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
           <button className="btn sm" onClick={() => void setView({ commit: undefined })}>Show all changes</button>
         </div>
       )}
-      <div className={'files-layout' + (treeShown ? '' : ' no-panel') + (secPanel ? ' with-sec' : '')} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties}>
+      <div className={'files-layout' + (treeShown ? '' : ' no-panel') + (secPanel ? ' with-sec' : '') + (wide ? ' sec-col' : '') + (widest ? ' sec-3' : '')} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties}>
         {treeShown && (
           <SectionsCtx.Provider value={bySection ? NO_SECTIONS : sections}>
           <aside className="tree-panel" aria-label="Files" data-gr="files-view" data-gr-files-view={bySection ? 'sections' : treeView}>
@@ -687,7 +856,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
               {bySection
                 ? groups.map((g) => (
                     <div key={g.section?.id ?? '-'} style={g.section ? secStyle(sectionNo(g.section)) : undefined}>
-                      <button className="tree-row dir sec" title={g.section?.desc} data-gr-tree-section={g.section?.id} data-gr-reviewed={g.section && reviewed.includes(g.section.id) ? 'true' : 'false'} onClick={() => { if (g.section) { const el = document.querySelector(`[data-gr-section="${g.section.id}"]`); el?.scrollIntoView({ block: 'start' }) } }}>
+                      <button className="tree-row dir sec" title={g.section?.desc} data-gr-tree-section={g.section?.id} data-gr-reviewed={g.section && reviewed.includes(g.section.id) ? 'true' : 'false'} onClick={() => { const el = g.section && list.current?.querySelector<HTMLElement>(`[data-gr-section="${cssq(g.section.id)}"]`); if (el) showInPane(el, 'top') }}>
                         {g.section && <span className="sec-dot" />}<span className="tree-name">{g.section?.name ?? 'Not in the walkthrough'}</span>
                         {g.section && reviewed.includes(g.section.id) && <span className="sec-tick" role="img" aria-label="Reviewed" title="You marked this section reviewed"><Icon name="check" size={12} /></span>}
                         <span className="muted small">{g.files.length}</span>
@@ -702,6 +871,7 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
           </aside>
           </SectionsCtx.Provider>
         )}
+        <div className="code-scroll" data-gr-scroll="code" ref={scroll.ref} onScroll={scroll.onScroll}>
         <div className="files-list" ref={list}>
           {kept.length === 0 && <div className="blankslate"><h3>No changes</h3><p className="muted">The two sides of this comparison are identical.</p></div>}
           {kept.length > 0 && visible.length === 0 && <div className="blankslate"><h3>No files match</h3><p className="muted">Change the filter or the “{modeLabel}” view.</p></div>}
@@ -719,6 +889,13 @@ function FilesTab({ loaded }: { loaded: LoadedReview }) {
               {excluded.map((f) => <FileBox key={f.path} file={f} split={split} />)}
             </div>
           )}
+        </div>
+        {stale.length > 0 && (
+          <div className="unplaced page-level" data-gr="outdated">
+            <div className="unplaced-head">Outdated comments — the lines they were written on are gone</div>
+            {stale.map((c) => <Thread key={c.id} c={c} showAnchor />)}
+          </div>
+        )}
         </div>
         {secPanel && <SectionPanel sections={wt?.sections ?? []} />}
       </div>
@@ -739,7 +916,7 @@ function TourCard({ stops, loop }: { stops: TourStop[]; loop?: boolean }) {
   )
 }
 function ActionChip({ action }: { action: UiAction }) {
-  if (action.kind === 'focus') return <button className="ref-chip mono link-chip" data-gr="chat-focus" title="Show this in Files changed" onClick={() => focusAnchor(action.target)}>{targetLabel(action.target)}</button>
+  if (action.kind === 'focus') return <button className="ref-chip mono link-chip" data-gr="chat-focus" title="Show this in the Code pane" onClick={() => focusAnchor(action.target)}>{targetLabel(action.target)}</button>
   if (action.kind === 'tour') return <TourCard stops={action.stops} loop={action.loop} />
   return null
 }
@@ -842,9 +1019,9 @@ function planSummary(p: PlanMap): string {
 }
 
 /** The review's effort level with what it covers, and each part of the review as it was
- *  last done: on which model, and for which state of the code. It sits in the header of
- *  every tab: a review whose walkthrough Sonnet wrote and nothing else looked at says so
- *  wherever the reviewer is reading. Everything it has to say is in its text, not in a tooltip. */
+ *  last done: on which model, and for which state of the code. It opens from the top bar
+ *  (Details), whatever the reviewer is reading. Everything it has to say is in its text,
+ *  not in a tooltip. */
 function EffortLine({ loaded }: { loaded: LoadedReview }) {
   const level = loaded.session.effort
   const done = loaded.state.effortDone ?? {}
@@ -877,7 +1054,7 @@ function EffortLine({ loaded }: { loaded: LoadedReview }) {
 /** One statement that does not hold: what it says, where it stands, and the line of code
  *  that contradicts it, each a jump when the page can go there. */
 function FactItem({ row, loaded, listAt }: { row: FactRow; loaded: LoadedReview; listAt: string }) {
-  const { set, setTab } = useStore.getState()
+  const { set, showGuide } = useStore.getState()
   const w = row.where
   // the note beside the code follows its line as the code moves, and the row with it
   const note = row.commentId ? loaded.state.comments.find((c) => c.id === row.commentId) : undefined
@@ -892,13 +1069,13 @@ function FactItem({ row, loaded, listAt }: { row: FactRow; loaded: LoadedReview;
       <Md text={row.statement} className="fact-statement" />
       <div className="fact-meta small">
         <span className="muted">stands in</span>
-        {stands ? <button className="ref-chip mono link-chip" data-gr="fact-where" title="Show it in Files changed" onClick={() => focusAnchor(stands)}>{w.label}</button>
-          : w.artifact && w.file ? <button className="ref-chip mono link-chip" data-gr="fact-where" title="Open the document in Spec & plan" onClick={() => { set({ docPath: w.file ?? null }); setTab('spec') }}>{w.label}</button>
+        {stands ? <button className="ref-chip mono link-chip" data-gr="fact-where" title="Show it in the Code pane" onClick={() => focusAnchor(stands)}>{w.label}</button>
+          : w.artifact && w.file ? <button className="ref-chip mono link-chip" data-gr="fact-where" title="Open the document in Spec & plan" onClick={() => { set({ docPath: w.file ?? null }); showGuide('spec') }}>{w.label}</button>
             : <span className={w.file || w.commit ? 'mono' : ''} data-gr="fact-where">{w.label}{w.file && <span className="muted"> (not part of this change)</span>}</span>}
         {row.contradicts && (
           <>
             <span className="muted">contradicted by</span>
-            {at ? <button className="ref-chip mono link-chip" data-gr="fact-line" title="Show the line in Files changed" onClick={() => focusAnchor(at)}>{row.contradicts.file}:{line}{row.contradicts.side === 'old' ? ' (old)' : ''}</button>
+            {at ? <button className="ref-chip mono link-chip" data-gr="fact-line" title="Show the line in the Code pane" onClick={() => focusAnchor(at)}>{row.contradicts.file}:{line}{row.contradicts.side === 'old' ? ' (old)' : ''}</button>
               : <span className="mono" data-gr="fact-line">{row.contradicts.file}:{line}<span className="muted">{row.contradicts.inDiff ? ' (that line is no longer in the code)' : ' (not part of this change)'}</span></span>}
           </>
         )}
@@ -949,7 +1126,7 @@ function Description({ loaded }: { loaded: LoadedReview }) {
   const wt = loaded.state.walkthrough
   const sectionOpen = useStore((s) => s.sectionOpen)
   const reviewed = useStore((s) => s.reviewedSections)
-  const { request, setSectionOpen, setTab, toggleSectionReviewed } = useStore.getState()
+  const { request, setSectionOpen, showGuide, toggleSectionReviewed } = useStore.getState()
   const [steer, setSteer] = useState('')
   const asking = loaded.state.requests.some((r) => r.kind === 'walkthrough' && isOpen(r))
   const it = loaded.state.iterations.at(-1)
@@ -957,7 +1134,7 @@ function Description({ loaded }: { loaded: LoadedReview }) {
   if (!wt) {
     return (
       <Box author="agent" label="has not written a walkthrough yet" cls="description">
-        <div data-gr="summary" className="muted">The diff in Files changed comes straight from git.</div>
+        <div data-gr="summary" className="muted">The diff in the Code pane comes straight from git.</div>
         <div className="row gap wrap ask-row">
           <input name="gr-field" className="grow" value={steer} placeholder="What should it focus on? (optional)" onChange={(e) => setSteer(e.target.value)} aria-label="Steer" />
           <button className="btn sm primary" data-gr="generate" disabled={asking || Boolean(loaded.refMissing)} onClick={() => ask(false)}>Ask Claude Code for a walkthrough</button>
@@ -1010,7 +1187,7 @@ function Description({ loaded }: { loaded: LoadedReview }) {
           )
         })}
       </div>
-      {wt.planMap && planSummary(wt.planMap) && <div className="plan-line"><Icon name="book" size={14} /> <button className="link" onClick={() => setTab('spec')}>Spec check</button>: {planSummary(wt.planMap)}</div>}
+      {wt.planMap && planSummary(wt.planMap) && <div className="plan-line"><Icon name="book" size={14} /> <button className="link" onClick={() => showGuide('spec')}>Spec check</button>: {planSummary(wt.planMap)}</div>}
       <FactList loaded={loaded} />
       <div className="desc-foot muted small">
         Walkthrough #{it?.n ?? 1} · written at <span className="mono">{short(loaded.state.reviewedAtSha)}</span>
@@ -1053,7 +1230,7 @@ function MessageEntry({ m, request, answered }: { m: Message; request?: ReviewRe
 
 function ConversationTab({ loaded }: { loaded: LoadedReview }) {
   useTick(30_000)
-  const { request, addComment, setTab } = useStore.getState()
+  const { request, addComment, showGuide } = useStore.getState()
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const st = loaded.state
@@ -1125,7 +1302,7 @@ function ConversationTab({ loaded }: { loaded: LoadedReview }) {
         {loaded.artifacts.length > 0 && (
           <div className="side-block">
             <div className="side-title">Spec &amp; plan</div>
-            {loaded.artifacts.map((a) => <button key={a.path} className="link block" data-gr-artifact={a.path} title={a.path} onClick={() => { useStore.getState().set({ docPath: a.path }); setTab('spec') }}>{a.title}</button>)}
+            {loaded.artifacts.map((a) => <button key={a.path} className="link block" data-gr-artifact={a.path} title={a.path} onClick={() => { useStore.getState().set({ docPath: a.path }); showGuide('spec') }}>{a.title}</button>)}
           </div>
         )}
         <div className="side-block">
@@ -1152,7 +1329,7 @@ function CommitsTab({ loaded }: { loaded: LoadedReview }) {
             {i === cut && cut > 0 && <div className="list-divider">↑ New since the {since?.kind === 'approved' ? 'approved state' : 'walkthrough'}</div>}
             <div className="list-row" data-gr-commit={c.sha}>
               <div className="grow">
-                <button className="link strong commit-link" title="Show only this commit's changes" onClick={() => { useStore.getState().setTab('files'); void useStore.getState().setView({ commit: c.sha }) }}>{c.subject}</button>
+                <button className="link strong commit-link" title="Show only this commit's changes in the Code pane" onClick={() => { useStore.getState().revealCode(); void useStore.getState().setView({ commit: c.sha }) }}>{c.subject}</button>
                 <div className="muted small">{c.author} committed {ago(c.date)}</div>
               </div>
               <span className="ref-chip mono">{short(c.sha)}</span>
@@ -1295,11 +1472,133 @@ function SpecTab({ loaded }: { loaded: LoadedReview }) {
   )
 }
 
+// ── the workspace ─────────────────────────────────────────────
+/** How much of the workspace's width a Guide starts with, in percent: a diagram needs more room than text. */
+const GUIDE_START: Record<Guide, number> = { visual: 56, conversation: 40, commits: 40, spec: 40 }
+/** Neither pane is made narrower than this beside the other (px); `bar` is the divider between them. */
+const PANE_MIN = { guide: 320, code: 420, bar: 6 }
+/** the widths at which what a Guide holds is laid out for a narrower pane */
+const GUIDE_STEPS = [520, 760, 1000, 1200] as const
+
+/** One Guide in the Guide pane. It is mounted the first time it is shown and kept from then
+ *  on: hidden while another Guide is on show, so it comes back as it was left, with its
+ *  scroll position, its open parts, its pick and whatever was being written in it. */
+function GuideBody({ id, shown, children }: { id: Guide; shown: boolean; children: ReactNode }) {
+  const scroll = useKeptScroll<HTMLDivElement>(shown)
+  return <div className="guide-scroll" role="tabpanel" data-gr-scroll={id} data-gr-guide={id} hidden={!shown} ref={scroll.ref} onScroll={scroll.onScroll}>{children}</div>
+}
+
+/** The divider between the Guide pane and the Code pane: drag it (or use the arrow keys)
+ *  to give one of them more of the window; double-click puts it back where the Guide
+ *  starts. While it is dragged the panes follow at once, and the code stays on the line it
+ *  showed; what has to be laid out anew for the new width (a diagram, split or unified)
+ *  waits until the drag holds still. `pct`: the Guide pane's share of the room;
+ *  `tree`: how much of the workspace is not theirs to share (the tree's column). */
+function PaneDivider({ frame, pct, tree, onChange }: { frame: RefObject<HTMLElement | null>; pct: number; tree: number; onChange: (pct: number | null) => void }) {
+  const drag = useRef<{ hold: ReturnType<typeof holdPlaces>; pct: number; tick: number; late: number } | null>(null)
+  /** the share a divider at `x` gives the Guide pane, within what each pane needs */
+  const shareAt = (x: number): number => {
+    const r = frame.current?.getBoundingClientRect()
+    if (!r?.width) return pct
+    const room = r.width - tree
+    const px = Math.min(room - PANE_MIN.code - PANE_MIN.bar, Math.max(PANE_MIN.guide, x - r.left))
+    return room > 0 ? Math.round((px / room) * 1000) / 10 : pct
+  }
+  const down = (e: RPointerEvent<HTMLDivElement>): void => {
+    e.preventDefault()
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* a pointer the browser does not know: the drag still follows it while it is over the divider */ }
+    drag.current = { hold: holdPlaces(), pct, tick: 0, late: 0 }
+    if (frame.current) frame.current.dataset.dragging = ''
+  }
+  const move = (e: RPointerEvent<HTMLDivElement>): void => {
+    const d = drag.current
+    if (!d) return
+    d.pct = shareAt(e.clientX)
+    // straight onto the frame: nothing is drawn again by React at each step of the drag
+    frame.current?.style.setProperty('--guide-w', String(d.pct))
+    d.tick ||= window.requestAnimationFrame(() => { d.tick = 0; d.hold.now() })
+    // and once more if the drag rests here: what waited for the width to hold still is laid out by then
+    window.clearTimeout(d.late)
+    d.late = window.setTimeout(() => d.hold.now(), 300)
+  }
+  const up = (): void => {
+    const d = drag.current
+    if (!d) return
+    drag.current = null
+    window.clearTimeout(d.late)
+    delete frame.current?.dataset.dragging
+    onChange(d.pct)
+    d.hold.settle()
+  }
+  const step = (by: number | null, at: number): void => { const hold = holdPlaces(); onChange(by == null ? null : shareAt(at + by)); hold.settle() }
+  const key = (e: RKeyboardEvent<HTMLDivElement>): void => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); step(e.key === 'ArrowLeft' ? -24 : 24, e.currentTarget.getBoundingClientRect().left) }
+    else if (e.key === 'Home') step(null, 0)
+  }
+  return (
+    <div
+      className="pane-divider" role="separator" aria-orientation="vertical" aria-label="Resize the Guide pane and the Code pane" tabIndex={0} data-gr="pane-divider"
+      aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}
+      title="Drag to resize · double-click to reset" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onDoubleClick={() => step(null, 0)} onKeyDown={key}
+    />
+  )
+}
+
+/** The workspace: the Guide pane on the left and the Code pane beside it, each scrolling by
+ *  itself, with a divider between them. The Guide pane can be closed (the code alone, as
+ *  "Files changed" was) or given the whole width; a window too narrow for both shows one
+ *  pane at a time. A jump to code moves the Code pane and nothing else. */
+function Workspace({ loaded }: { loaded: LoadedReview }) {
+  const guide = useStore((s) => s.guide)
+  const guideWide = useStore((s) => s.guideWide)
+  const front = useStore((s) => s.front)
+  // a window narrower than the two panes at their narrowest shows one at a time
+  const twoFit = useWide(PANE_MIN.guide + PANE_MIN.code + 20)
+  const frame = useRef<HTMLElement>(null)
+  const pane = useRef<HTMLElement>(null)
+  const guideWidth = usePaneWidth(pane, GUIDE_STEPS)
+  // Guides are mounted when first shown, and kept
+  const [seen, setSeen] = useState<Guide[]>(guide ? [guide] : [])
+  if (guide && !seen.includes(guide)) setSeen([...seen, guide])
+  // where the reviewer dragged the divider to, as the Guide pane's share of the room; until then each Guide starts at its own width
+  const [dragged, setDragged] = useState<number | null>(null)
+  // The room the two panes share is what the tree leaves: for this step the tree is still a
+  // column inside the Code pane, and it keeps its width whatever the Guide is given.
+  const treeOn = useStore((s) => s.panelOpen)
+  const treeWidth = useStore((s) => s.treeWidth)
+  const bigWindow = useWide(TREE_BESIDE_GUIDE)
+  const guideShown = guide != null && (twoFit || front === 'guide')
+  const codeShown = guide == null || (twoFit ? !guideWide : front === 'code')
+  const both = guideShown && codeShown
+  const tree = both && treeOn && bigWindow ? treeWidth + TREE_GAP : 0
+  const pct = dragged ?? GUIDE_START[guide ?? 'conversation']
+  const row = <GuideRow loaded={loaded} onePane={!twoFit} />
+  return (
+    <main className={'workspace' + (both ? ' both' : '')} ref={frame} style={{ '--guide-w': pct, '--tree-room': `${tree}px` } as React.CSSProperties} data-gr="workspace">
+      <section className={'guide-pane' + below(guideWidth, [520, 760, 1000, 1200])} ref={pane} hidden={!guideShown} aria-label="Guide" data-gr-pane="guide">
+        {guideShown && row}
+        {seen.map((g) => (
+          <GuideBody key={g} id={g} shown={guideShown && g === guide}>
+            {g === 'conversation' ? <ConversationTab loaded={loaded} /> : g === 'commits' ? <CommitsTab loaded={loaded} /> : g === 'spec' ? <SpecTab loaded={loaded} /> : <VisualTab loaded={loaded} />}
+          </GuideBody>
+        ))}
+        <BackBar pane="guide" />
+      </section>
+      {both && <PaneDivider frame={frame} pct={pct} tree={tree} onChange={setDragged} />}
+      <section className="code-pane" hidden={!codeShown} aria-label="Code" data-gr-pane="code">
+        {!guideShown && row}
+        <FilesTab loaded={loaded} shown={codeShown} />
+        <BackBar pane="code" />
+      </section>
+    </main>
+  )
+}
+
 // ── page ──────────────────────────────────────────────────────
 export function Review() {
   const loaded = useStore((s) => s.loaded)
   const loading = useStore((s) => s.loading)
-  const tab = useStore((s) => s.tab)
+  const guide = useStore((s) => s.guide)
   // comments, plus the questions asked from a spot, which show at that spot too
   const index = useMemo(() => indexComments([...(loaded?.state.comments ?? []), ...askThreads(loaded?.state.messages ?? [])]), [loaded?.state.comments, loaded?.state.messages])
 
@@ -1308,13 +1607,7 @@ export function Review() {
       const el = e.target as HTMLElement | null
       if (e.metaKey || e.ctrlKey || e.altKey || (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return
       const st = useStore.getState()
-      if (e.key === 't' && st.tab === 'files') {
-        e.preventDefault()
-        if (!st.panelOpen) st.set({ panelOpen: true })
-        // on a mid-width window an open section sits in the tree's place: closing it brings the tree back
-        if (st.sectionPanel && window.matchMedia('(min-width: 760px) and (max-width: 1599px)').matches) showSection(null)
-        window.setTimeout(() => document.getElementById('gr-file-filter')?.focus(), 30)
-      } else if (e.key === 'c' && hoveredLine()) {
+      if (e.key === 'c' && hoveredLine()) {
         e.preventDefault()
         st.set({ composer: hoveredLine() })
       } else if (e.key === 'Escape' && st.composer) st.set({ composer: null })
@@ -1334,28 +1627,14 @@ export function Review() {
       </div>
     )
   }
-  const stale = loaded.state.comments.filter((c) => c.status === 'outdated' && c.anchor.kind === 'diff')
+  // `data-gr-tab`: the Guide on show, or `files` while the Guide pane is closed (what the tab was called)
   return (
     <CommentsCtx.Provider value={index}>
-      <div className="page review" data-gr-screen="review" data-gr-session={loaded.sessionId || undefined} data-gr-tab={tab}>
-        <TopBar crumbs={[{ label: baseName(loaded.session.repo), href: routeHash({ name: 'hub', path: loaded.session.repo }) }, { label: 'reviews', href: routeHash({ name: 'hub', path: loaded.session.repo }) }]} />
+      <div className="page review" data-gr-screen="review" data-gr-session={loaded.sessionId || undefined} data-gr-tab={guide ?? 'files'}>
+        <ReviewBar loaded={loaded} />
         <RequestsStrip loaded={loaded} />
-        <main className={'pr-body' + (tab === 'files' ? ' wide' : '')}>
-          <PageHeader loaded={loaded} />
-          <DriftBanner />
-          <Tabs loaded={loaded} />
-          {tab === 'files' && <FilesTab loaded={loaded} />}
-          {tab === 'conversation' && <ConversationTab loaded={loaded} />}
-          {tab === 'commits' && <CommitsTab loaded={loaded} />}
-          {tab === 'spec' && <SpecTab loaded={loaded} />}
-          {tab === 'visual' && <VisualTab loaded={loaded} />}
-          {tab === 'files' && stale.length > 0 && (
-            <div className="unplaced page-level" data-gr="outdated">
-              <div className="unplaced-head">Outdated comments — the lines they were written on are gone</div>
-              {stale.map((c) => <Thread key={c.id} c={c} showAnchor />)}
-            </div>
-          )}
-        </main>
+        <Banners loaded={loaded} />
+        <Workspace loaded={loaded} />
       </div>
     </CommentsCtx.Provider>
   )

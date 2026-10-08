@@ -92,7 +92,7 @@ function AskThread({ c }: { c: Comment }) {
                 {i === 0 && resolved && <span className="label resolved" title="You resolved this conversation">Resolved</span>}
                 <span className="grow" />
                 {i === 0 && resolved && <button className="link small nowrap" onClick={() => setShown(false)}>Hide resolved</button>}
-                {i === 0 && <button className="link small nowrap" data-gr="ask-in-conversation" title="Show this question and its answer in the Conversation tab" onClick={() => focusQuestion(root)}>In Conversation</button>}
+                {i === 0 && <button className="link small nowrap" data-gr="ask-in-conversation" title="Show this question and its answer in the Conversation" onClick={() => focusQuestion(root)}>In Conversation</button>}
               </div>
               <div className="thread-body pre-wrap">{x.text}</div>
             </div>
@@ -249,7 +249,7 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
                 <span className="muted small">Changed</span>
                 {changed.map((r, i) => {
                   const lines = r.end > r.start ? `${r.start}–${r.end}` : `${r.start}`
-                  return <button key={i} className="ref-chip mono link-chip" data-gr="changed-chip" title={`${r.file}:${lines} — show ${r.end > r.start ? 'these lines' : 'this line'} in Files changed`} onClick={() => void focusChanged(r)}>{baseName(r.file)}:{lines}</button>
+                  return <button key={i} className="ref-chip mono link-chip" data-gr="changed-chip" title={`${r.file}:${lines} — show ${r.end > r.start ? 'these lines' : 'this line'} in the Code pane`} onClick={() => void focusChanged(r)}>{baseName(r.file)}:{lines}</button>
                 })}
                 {places > changed.length && <span className="muted small" title="The commit changed more places than a resolution keeps">+{places - changed.length} more{c.resolution.commit ? ` in ${c.resolution.commit.slice(0, 7)}` : ''}</span>}
               </span>

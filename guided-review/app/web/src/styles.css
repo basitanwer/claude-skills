@@ -69,6 +69,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
 body { background: var(--bg); color: var(--text); font: 14px/1.5 var(--font); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
 #root, .app { min-height: 100%; }
@@ -211,33 +212,71 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .compare-opts { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; padding: 0 16px 12px; }
 
 /* review page: header, tabs, strip */
-.pr-body { max-width: 1280px; margin: 0 auto; padding: 24px 24px 80px; } .pr-body.wide { max-width: none; }
-.pr-title-row { display: flex; align-items: flex-start; gap: 8px; } .pr-title-row h1 { font-size: 26px; font-weight: 400; line-height: 1.25; overflow-wrap: anywhere; }
+/* The workspace fills the window and the page itself never scrolls: the top bar, the
+   requests strip and any banner keep their height, and the panes share the rest, each
+   scrolling by itself. (clip, not hidden: a hidden box can still be scrolled by a focus
+   or by script, and the frame must never move.) */
+.page.review { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: clip; }
+.page.review > * { flex: none; }
+/* the top bar: one slim bar, always in view */
+.topbar.slim { padding: 6px 16px; gap: 10px; min-width: 0; }
+.topbar.slim .crumbs { flex: 0 1 auto; } .topbar.slim .crumb-sep:last-child { margin-right: 0; }
+.bar-title { display: flex; align-items: baseline; flex: 0 1 auto; min-width: 64px; font-size: 14px; line-height: 20px; white-space: nowrap; }
+.bar-title .clip { flex: 0 1 auto; min-width: 0; } .bar-title .pr-num { flex: none; margin-left: 0.35em; }
+.topbar.slim .state { flex: none; padding: 2px 10px; font-size: 12px; } .topbar.slim .presence { flex: none; }
+.details-pop { width: min(560px, calc(100vw - 24px)); max-width: none; max-height: min(80vh, 760px); }
+.details-body { display: flex; flex-direction: column; gap: 10px; padding: 8px 12px 10px; border-bottom: 1px solid var(--border); }
+.details-body .effort-line { margin: 0; } .details-size { display: flex; align-items: center; gap: 8px; color: var(--text-2); }
+.pr-title-row { display: flex; align-items: flex-start; gap: 8px; } .pr-title-row h2 { font-size: 16px; line-height: 1.35; overflow-wrap: anywhere; }
 .pr-num { color: var(--muted); font-weight: 300; }
-.pr-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0 16px; padding-bottom: 12px; border-bottom: 1px solid var(--border); color: var(--text-2); }
-.pr-compare { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.pr-compare { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; color: var(--text-2); }
 .state { display: inline-flex; align-items: center; gap: 4px; padding: 5px 12px; border-radius: 2em; font-weight: 500; color: #fff; white-space: nowrap; }
 .state.open { background: var(--accent); } .state.approved { background: #6f42c1; } .state.draft { background: var(--muted); } .state.changed { background: var(--warn); }
-.tabs-row { display: flex; align-items: flex-end; gap: 12px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+@media (max-width: 1000px) { .topbar.slim .crumb-more { display: none; } .topbar.slim .presence { font-size: 0; gap: 0; padding: 6px; } }
+/* on a phone the bar takes a second line, so that Review stays in reach */
+@media (max-width: 600px) { .topbar.slim { flex-wrap: wrap; row-gap: 6px; } .topbar.slim .crumbs { display: none; } .bar-title { flex: 1 1 140px; } }
+/* the Guide row: the row of tabs as it was, on top of the Guide pane (of the Code pane while the Guide pane is closed) */
+.tabs-row { flex: none; display: flex; align-items: flex-end; gap: 6px; padding: 6px var(--pad, 16px) 0; border-bottom: 1px solid var(--border); container-type: inline-size; }
 .tabs { display: flex; gap: 0; overflow-x: auto; scrollbar-width: none; min-width: 0; }
 .tab { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border: 1px solid transparent; border-bottom: 0; background: none; border-radius: var(--radius) var(--radius) 0 0; cursor: pointer; white-space: nowrap; color: var(--text-2); margin-bottom: -1px; }
 .tab:hover { color: var(--text); } .tab.on { border-color: var(--border); background: var(--bg); color: var(--text); font-weight: 600; box-shadow: inset 0 2px 0 var(--accent); }
-.tabs-row .diffstat { padding-bottom: 10px; }
-/* --strip-h: the height of the requests strip while one is open (measured: its rows stack
-   and wrap). Everything that sticks below it adds this to its own offset. */
-.page.review { --strip-h: 0px; }
-.req-strip { position: sticky; top: 0; z-index: 30; background: var(--panel); border-bottom: 1px solid var(--border); }
+.tabs-row .diffstat { padding-bottom: 10px; } .tabs-row > .icon-btn, .tabs-row > .btn { align-self: center; margin-bottom: 5px; }
+/* in a narrow Guide pane only the Guide on show keeps its name: the others are their icon and count */
+@container (max-width: 600px) { .tab { padding: 8px 10px; } .tab:not(.on) .tab-label { display: none; } }
+.req-strip { max-height: 40vh; overflow: auto; background: var(--panel); border-bottom: 1px solid var(--border); }
+.ws-banners .flash-banner { margin: 0; border-width: 0 0 1px; border-radius: 0; padding: 8px 16px; }
+/* the two panes and the divider between them. --guide-w: the Guide pane's share of the
+   room (56% for a diagram, 40% for text, or where the divider was dragged to), held
+   within what each pane needs: the Guide never under 320px, the code never under 420px.
+   --tree-room: what the tree's column takes of the workspace before the two share the rest. */
+.page.review > .workspace { flex: 1 1 0; min-height: 0; display: flex; }
+.guide-pane, .code-pane { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.guide-pane { --pad: 16px; } .code-pane { --pad: 24px; } .workspace.both > .code-pane { --pad: 16px; }
+.workspace.both > .guide-pane { flex: none; width: clamp(320px, calc((100% - var(--tree-room, 0px)) * var(--guide-w, 40) / 100), calc(100% - var(--tree-room, 0px) - 426px)); }
+.pane-divider { flex: none; width: 6px; cursor: col-resize; touch-action: none; border-left: 1px solid var(--border); }
+.pane-divider:hover, .pane-divider:focus-visible, .workspace[data-dragging] > .pane-divider { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 30%, transparent); outline: 0; }
+.workspace[data-dragging] { cursor: col-resize; user-select: none; }
+.guide-scroll { flex: 1 1 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 0 var(--pad) 80px; }
+.guide-scroll > * { max-width: 1280px; margin-left: auto; margin-right: auto; } .guide-scroll > :first-child { margin-top: 16px; }
 .req-row { display: flex; align-items: center; gap: 8px; padding: 6px 24px; font-size: 13px; min-width: 0; }
 .req-row + .req-row { border-top: 1px solid var(--border); } .req-row.failed { color: var(--bad); }
 .req-progress { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--text-2); font-family: var(--mono); font-size: 12px; }
 
-/* files changed */
-.files-toolbar { position: sticky; top: var(--strip-h, 0px); z-index: 20; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0; background: var(--bg); border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+/* the Code pane (files changed): its toolbar stays on top; under it the tree, the files and
+   an open section are columns that each scroll by themselves. .code-scroll, the column of
+   files, is the pane's scroller. */
+.files-tab { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+.files-toolbar { flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px var(--pad); background: var(--bg); border-bottom: 1px solid var(--border); }
+.files-tab > .flash-banner { flex: none; margin: 8px var(--pad) 0; }
+/* (no padding at the top of a scroller: a file header pinned there would stop short of the edge by it) */
+.code-scroll { min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 var(--pad) 80px 0; } .code-scroll > :first-child { margin-top: 16px; }
 .viewed-progress { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-2); white-space: nowrap; }
 .legend { display: inline-flex; align-items: center; gap: 4px; } .swatch { width: 3px; height: 12px; display: inline-block; margin-left: 6px; }
 .swatch.staged { background: var(--staged); } .swatch.unstaged { background: var(--unstaged); }
-.files-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 24px; align-items: start; } .files-layout.no-panel { grid-template-columns: minmax(0, 1fr); }
-.tree-panel { position: sticky; top: calc(var(--strip-h, 0px) + 56px); max-height: calc(100vh - var(--strip-h, 0px) - 72px); overflow: auto; }
+.files-layout { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: var(--tree-w, 300px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); column-gap: 24px; padding-left: var(--pad); }
+.files-layout.no-panel { grid-template-columns: minmax(0, 1fr); }
+.tree-panel { position: relative; min-height: 0; display: flex; flex-direction: column; padding-right: 10px; } .files-layout > .tree-panel { padding-top: 16px; }
+.tree-panel > .tree { min-height: 0; overflow: auto; padding-bottom: 16px; }
 .tree-filter { display: flex; gap: 8px; margin-bottom: 8px; } .tree-filter .filter-input { flex: 1; }
 .tree-row { display: flex; align-items: center; gap: 6px; width: 100%; border: 0; background: none; padding: 4px 8px; border-radius: var(--radius); cursor: pointer; text-align: left; min-width: 0; }
 .tree-row:hover, .tree-row.on { background: var(--bg-sunk); }
@@ -250,7 +289,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .tree-dot { font-size: 11px; color: var(--muted); border: 1px solid var(--border-strong); border-radius: 2em; padding: 0 5px; line-height: 14px; }
 .tree-viewed { color: var(--ok); } .tree-changed { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
 .files-list { min-width: 0; }
-.sec-head { scroll-margin-top: calc(var(--strip-h, 0px) + 56px); border: 1px solid var(--hunk-edge); border-left: 3px solid var(--accent); border-radius: var(--radius); background: var(--hunk-bg); padding: 10px 14px; margin-bottom: 12px; }
+.sec-head { border: 1px solid var(--hunk-edge); border-left: 3px solid var(--accent); border-radius: var(--radius); background: var(--hunk-bg); padding: 10px 14px; margin-bottom: 12px; }
 .sec-head.plain { border: 0; background: none; padding: 4px 0; display: flex; gap: 8px; align-items: baseline; } .sec-head h3 { font-size: 16px; }
 .sec-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; } .sec-desc { color: var(--text-2); margin: 4px 0 6px; }
 .diagram { margin: 8px 0; } .nodes { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; } .node-wrap { display: inline-flex; align-items: center; gap: 6px; }
@@ -260,7 +299,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 
 /* a file box */
 .file { border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px; background: var(--bg); }
-.file-head { position: sticky; top: calc(var(--strip-h, 0px) + 45px); z-index: 10; display: flex; align-items: center; gap: 6px; padding: 5px 10px; background: var(--bg-soft); border-radius: var(--radius); min-width: 0; }
+.file-head { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 6px; padding: 5px 10px; background: var(--bg-soft); border-radius: var(--radius); min-width: 0; }
 .file.open > .file-head { border-bottom: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0; }
 .file-path { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 40px; direction: rtl; text-align: left; unicode-bidi: plaintext; }
 .viewed-box { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--border-strong); border-radius: var(--radius); font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; background: var(--bg); }
@@ -362,20 +401,24 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .plan-list { list-style: none; margin: 0; padding: 0; } .plan-list li { border-top: 1px solid var(--border); padding: 6px 16px; } .plan-list li:first-child { border-top: 0; }
 .plan-row { display: flex; align-items: flex-start; gap: 8px; }
 
-@media (max-width: 1000px) {
-  .conv { grid-template-columns: minmax(0, 1fr); } .conv-side { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; } .side-block { border: 0; margin: 0; padding: 0; }
-  .spec-layout { grid-template-columns: minmax(0, 1fr); }
-}
+/* What a narrow pane changes. A pane is narrow on a small window, and also beside the
+   other pane on a large one, so these hang on the pane's own width (the classes lt520,
+   lt760, lt1000 and lt1200 that the page puts on a pane narrower than that), not on the window's. */
+.spec-layout > .tree-panel { position: sticky; top: 0; }
+.lt1000 .conv { grid-template-columns: minmax(0, 1fr); } .lt1000 .conv-side { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; } .lt1000 .side-block { border: 0; margin: 0; padding: 0; }
+.lt1000 .spec-layout { grid-template-columns: minmax(0, 1fr); } .lt1000 .spec-layout > .tree-panel { position: static; }
+.lt760 .files-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); column-gap: 0; }
+.lt760 .files-layout > .tree-panel { max-height: 40vh; margin: 12px var(--pad) 0 0; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
+.lt760 .tree-panel > .tree { padding-bottom: 0; } .lt760 .resize-handle { display: none; }
+.lt520 .file-head { flex-wrap: wrap; } .lt520 .file-head .grow { flex-basis: 0; } .lt520 .file-path { flex-basis: 60%; }
+.lt760 .diff.unified:not(.doc) .dr { grid-template-columns: 34px 34px minmax(0, 1fr); } .lt760 .ln { padding: 0 4px; }
+.lt760 .dr-threads { padding-left: 12px; }
+.lt760 .timeline::before { display: none; } .lt760 .tl-item { gap: 8px; } .lt760 .avatar.lg { width: 28px; height: 28px; font-size: 12px; } .lt760 .tl-event, .lt760 .tl-indent { margin-left: 0; }
+.lt760 .tl-box-body { padding: 12px; } .lt760 .sec-chip { max-width: 100%; } .lt760 .conv-side { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
 @media (max-width: 760px) {
-  .topbar { padding: 10px 16px; } .page-body, .pr-body { padding: 16px 12px 80px; } .req-row { padding: 6px 12px; flex-wrap: wrap; }
-  .pr-title-row { flex-wrap: wrap; } .pr-title-row h1 { font-size: 20px; flex-basis: 100%; }
-  .files-layout { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .tree-panel { position: static; max-height: 40vh; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; margin-bottom: 16px; }
-  .file-head { flex-wrap: wrap; position: static; } .file-head .grow { flex-basis: 0; } .file-path { flex-basis: 60%; }
-  .diff.unified .dr { grid-template-columns: 34px 34px minmax(0, 1fr); } .ln { padding: 0 4px; }
-  .dr-threads { padding-left: 12px; }
-  .timeline::before { display: none; } .tl-item { gap: 8px; } .avatar.lg { width: 28px; height: 28px; font-size: 12px; } .tl-event, .tl-indent { margin-left: 0; }
-  .tl-box-body { padding: 12px; } .tabs-row .diffstat { display: none; }
+  .topbar { padding: 10px 16px; } .page-body { padding: 16px 12px 80px; } .req-row { padding: 6px 12px; flex-wrap: wrap; }
+  .guide-pane, .code-pane, .workspace.both > .code-pane { --pad: 12px; }
+  .file-head { position: static; } .tabs-row .diffstat { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } .gr-flash { animation-duration: 0.01s; } .presence.working .presence-dot { animation: none; } }
 
@@ -388,15 +431,9 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .menu-item input[type="checkbox"] { margin: 0; } label.menu-item { cursor: pointer; }
 .viewed-box.off { opacity: 0.55; cursor: default; }
 .commit-link { font-weight: 600; color: var(--text); } .commit-link:hover { color: var(--accent-ink); }
-.files-layout { grid-template-columns: var(--tree-w, 300px) minmax(0, 1fr); }
-.tree-panel { padding-right: 10px; }
 .resize-handle { position: absolute; top: 0; right: 0; bottom: 0; width: 6px; cursor: col-resize; border-right: 2px solid transparent; touch-action: none; }
 .resize-handle:hover, .resize-handle:focus-visible, .resize-handle:active { border-right-color: var(--accent); outline: 0; }
 .st-approved { color: var(--ok); } .st-stale { color: var(--warn); }
-@media (max-width: 760px) { .files-layout { grid-template-columns: minmax(0, 1fr); } .resize-handle { display: none; } .tree-panel { padding-right: 8px; } }
-.tree-panel { overflow: visible; max-height: none; display: flex; flex-direction: column; }
-.tree-panel > .tree { overflow: auto; max-height: calc(100vh - var(--strip-h, 0px) - 124px); }
-@media (max-width: 760px) { .tree-panel > .tree { max-height: 34vh; } }
 
 /* two-way threads */
 .thread-main.reply.pending { background: color-mix(in srgb, var(--warn-soft) 55%, var(--panel)); }
@@ -422,38 +459,37 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 /* sections reviewed, in the toolbar: the way into going through the walkthrough in order */
 .sec-progress { color: var(--text-2); } .sec-progress strong { color: var(--text); } .sec-progress.done .ico { color: var(--ok); }
 .sec-all-done { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; font-weight: 600; color: var(--ok); }
-/* where the reviewer is: the row of the file under the top of the window, or of the
+/* where the reviewer is: the row of the file under the top of the Code pane, or of the
    folded folder that holds it (in its section's colour, where it has one) */
 .tree-row.here { background: color-mix(in srgb, var(--sec, var(--accent)) 16%, transparent); box-shadow: inset 3px 0 0 var(--sec, var(--accent)); border-radius: 0 var(--radius) var(--radius) 0; font-weight: 600; }
 .tree-row.here:hover { background: color-mix(in srgb, var(--sec, var(--accent)) 26%, transparent); }
 
-/* back to where a link was clicked */
-.backbar { position: fixed; left: 16px; bottom: 16px; z-index: 60; display: flex; align-items: center; gap: 2px; max-width: min(440px, calc(100vw - 32px)); padding: 3px 4px; background: var(--panel); border: 1px solid var(--accent); border-radius: 2em; box-shadow: var(--shadow); }
+/* back to where a pane was before a jump: at the foot of that pane */
+.backbar { position: absolute; left: 16px; bottom: 16px; z-index: 60; display: flex; align-items: center; gap: 2px; max-width: min(440px, calc(100vw - 32px)); padding: 3px 4px; background: var(--panel); border: 1px solid var(--accent); border-radius: 2em; box-shadow: var(--shadow); }
 .backbar-go { display: inline-flex; align-items: center; gap: 6px; min-width: 0; border: 0; background: none; padding: 4px 10px; border-radius: 2em; cursor: pointer; color: var(--accent-ink); white-space: nowrap; }
 .backbar-go:hover { background: var(--bg-sunk); } .backbar-go strong { color: var(--text); }
-@media (max-width: 760px) { .sec-chip { max-width: 100%; } }
 
-/* a walkthrough section beside the code. From 1100px it is a column of its own, so it
-   never covers the diff: beside the tree and the diff from 1600px, in the tree's place
-   below that (FilesTab leaves the tree out while it is open). Narrower still there is no
-   room for two columns: a drawer over the right edge, the whole screen on a phone. */
-.sec-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 50; width: min(440px, 100vw); overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 24px; background: var(--panel); border-left: 1px solid var(--border-strong); border-top: 3px solid var(--sec); box-shadow: var(--shadow); font-size: 13px; }
+/* a walkthrough section beside the code. In a Code pane from 1100px wide it is a column of
+   its own, so it never covers the diff: beside the tree and the diff from 1600px, in the
+   tree's place below that (FilesTab leaves the tree out while it is open). In a narrower
+   pane there is no room for two columns: a drawer over the right edge of the pane, the
+   whole pane on a phone. (sec-col, sec-3: the classes FilesTab puts on a pane that wide.) */
+.sec-panel { position: absolute; top: 0; right: 0; bottom: 0; z-index: 50; width: min(440px, 100%); overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 24px; background: var(--panel); border-left: 1px solid var(--border-strong); border-top: 3px solid var(--sec); box-shadow: var(--shadow); font-size: 13px; }
 .sec-panel-head { display: flex; align-items: center; gap: 6px; position: sticky; top: -12px; margin: -12px -16px 0; padding: 8px 10px 8px 16px; background: var(--panel); border-bottom: 1px solid var(--border); z-index: 1; }
 .sec-panel h3 { font-size: 16px; margin: 0; } .sec-panel .sec-desc { margin: 0; }
 .sec-panel-files { display: flex; flex-direction: column; border-top: 1px solid var(--border); padding-top: 10px; }
 .sec-chip.on { background: color-mix(in srgb, var(--sec) 28%, transparent); border-color: var(--sec); color: var(--text); }
-@media (min-width: 1100px) {
-  .files-layout.with-sec, .files-layout.with-sec.no-panel { grid-template-columns: minmax(0, 1fr) 400px; }
-  .sec-panel { position: sticky; top: calc(var(--strip-h, 0px) + 56px); right: auto; bottom: auto; z-index: 5; width: auto; max-height: calc(100vh - var(--strip-h, 0px) - 72px); border: 1px solid var(--border); border-top: 3px solid var(--sec); border-radius: var(--radius); box-shadow: none; }
-}
-@media (min-width: 1600px) { .files-layout.with-sec:not(.no-panel) { grid-template-columns: var(--tree-w, 300px) minmax(0, 1fr) 400px; } }
+.files-layout.with-sec.sec-col, .files-layout.with-sec.sec-col.no-panel { grid-template-columns: minmax(0, 1fr) 400px; }
+.files-layout.with-sec.sec-col.sec-3:not(.no-panel) { grid-template-columns: var(--tree-w, 300px) minmax(0, 1fr) 400px; }
+.sec-col > .sec-panel { position: static; z-index: auto; width: auto; align-self: start; max-height: calc(100% - 32px); margin: 16px var(--pad) 16px 0; border: 1px solid var(--border); border-top: 3px solid var(--sec); border-radius: var(--radius); box-shadow: none; }
+.sec-col > .code-scroll:not(:last-child) { padding-right: 0; }
 
 /* diffs held back (large, generated) and lines too long to show whole */
 .file-msg.held { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .more-line { display: inline-block; margin-left: 8px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 2em; background: var(--bg); color: var(--accent-ink); font: 500 12px/18px var(--font); white-space: normal; max-width: 100%; user-select: none; cursor: pointer; }
 .more-line:hover { background: var(--bg-sunk); }
 /* a tour's bar sits at the bottom centre: the way back moves above it */
-.tourbar ~ .backbar { bottom: 172px; }
+.backbar.above-tour { bottom: 172px; }
 
 /* question follow-ups */
 .thread.ask .thread-main.reply.failed, .thread.ask .thread-main.reply.cancelled { flex-wrap: wrap; } .thread.ask .thread-main.reply > .btn { margin-left: auto; }
@@ -503,6 +539,8 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .viz-node.deleted .viz-box { fill: var(--bad-soft); stroke: var(--bad); stroke-dasharray: 5 3; }
 .viz-node.none .viz-box { fill: var(--bg-sunk); stroke-dasharray: 3 3; }
 .viz-node.cur .viz-box, .viz-node.pinned .viz-box, .viz-node.link:hover .viz-box { stroke-width: 2.5; }
+/* the pick: the box whose code the Code pane is showing keeps a ring round it */
+.viz-pick { fill: none; stroke: var(--accent); stroke-width: 2; }
 .viz-card { position: fixed; z-index: 45; overflow: hidden; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow); pointer-events: none; font-size: 13px; }
 .viz-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; } .viz-card-head strong { overflow-wrap: anywhere; }
 .viz-card-place { color: var(--text-2); overflow-wrap: anywhere; } .viz-card-sub { color: var(--text-2); }
@@ -553,7 +591,7 @@ li.md-block[data-md-changed]::before { left: -30px; }
 .md-fold:hover { background: var(--hunk-edge); }
 .md-removed { margin: 0 0 10px -16px; padding: 4px 12px 4px 13px; border-left: 3px solid var(--bad); border-radius: 3px; background: color-mix(in srgb, var(--del-bg) 70%, transparent); }
 .md-removed > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--bad); } .md-removed .md { margin-top: 4px; color: var(--text-2); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--bad) 50%, transparent); }
-@media (max-width: 760px) { .md-doc { padding: 10px 40px 12px 22px; } .md-add { right: -32px; } }
+.lt760 .md-doc { padding: 10px 40px 12px 22px; } .lt760 .md-add { right: -32px; }
 .md-removed-src { margin: 4px 0 0; padding: 0; border: 0; background: none; font: 12px/1.5 var(--mono); color: var(--text-2); white-space: pre-wrap; text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--bad) 50%, transparent); }
 /* side by side: before on the left, after on the right */
 .md-doc.split { max-width: none; padding-left: 20px; }
@@ -567,5 +605,5 @@ li.md-block[data-md-changed]::before { left: -30px; }
 .md-sides { display: grid; grid-template-columns: 1fr 1fr; column-gap: 36px; flex-basis: 100%; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 11px; }
 .md-doc.split .md-bar { margin-left: 0; }
 /* the switch takes room in the file's header: on a mid-width window the bar of blocks gives way */
-@media (max-width: 1180px) { .file-head:has(.seg) { flex-wrap: wrap; row-gap: 4px; } .file-head:has(.seg) .grow { flex-basis: 0; } .file-head:has(.seg) .diffstat .blocks { display: none; } }
+.lt1200 .file-head:has(.seg) { flex-wrap: wrap; row-gap: 4px; } .lt1200 .file-head:has(.seg) .grow { flex-basis: 0; } .lt1200 .file-head:has(.seg) .diffstat .blocks { display: none; }
 li.md-removed-item { list-style: none; margin-left: -1.6em; } li.md-removed-item > .md-removed { margin-left: 0; }

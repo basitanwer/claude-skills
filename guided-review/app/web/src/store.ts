@@ -4,19 +4,21 @@ import type {
   RepoState, RequestKind, ReviewRequest, ReviewState, ReviewView, SessionListItem, TourStop, UiAction, ViewMark
 } from '@shared/types'
 import { api, connect } from './api'
-import { errText, isOpen, newId, parseHash, refInput, routeHash, targetLabel, type DiffMode, type Route, type Tab } from './util'
-import { focusAnchor, startTour } from './focus'
+import { errText, guideOf, isOpen, newId, parseHash, refInput, routeHash, targetLabel, type DiffMode, type Guide, type Pane, type Route } from './util'
+import { focusAnchor, holdCodePlace, startTour } from './focus'
 
 /** `key`: a newer toast with the same key takes the place of an older one. */
 export interface Toast { id: string; text: string; kind: 'error' | 'info'; action?: { label: string; run: () => void }; key?: string }
 /** the toast that offers a jump the session asked for while the reviewer was writing */
 const SHOW_KEY = 'session-show'
 /** The reviewer is in the middle of writing: the caret is in a text field, or a comment,
- *  a reply, a question or an answer has text in it that moving the page could discard. */
+ *  a reply, a question or an answer on screen has text in it that moving the page could
+ *  discard. (Text left in a Guide that is not on show is kept with that Guide, and holds
+ *  nothing up.) */
 export function typing(): boolean {
   const el = document.activeElement
   if (el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && (el.type === 'text' || el.type === 'search') && !el.readOnly)) return true
-  return [...document.querySelectorAll<HTMLTextAreaElement | HTMLInputElement>('textarea, input[name="gr-field"]:not([type]):not([readonly]):not(#gr-file-filter)')].some((f) => f.value.trim() !== '')
+  return [...document.querySelectorAll<HTMLTextAreaElement | HTMLInputElement>('textarea, input[name="gr-field"]:not([type]):not([readonly]):not(#gr-file-filter)')].some((f) => f.value.trim() !== '' && f.getClientRects().length > 0)
 }
 export interface Tour {
   stops: TourStop[]; idx: number; loop?: boolean
@@ -64,7 +66,12 @@ interface Store {
   dismissed: string[]
 
   // view state
-  tab: Tab
+  /** the Guide on show in the Guide pane; null: the Guide pane is closed and the Code pane has the window */
+  guide: Guide | null
+  /** the Guide pane has the whole width and the Code pane is folded away, until a jump to code brings it back */
+  guideWide: boolean
+  /** on a window too narrow for two panes side by side: the one on show */
+  front: 'guide' | 'code'
   /** how the open review is being looked at: whitespace hidden, one commit only */
   view: ReviewView
   reveal: Reveal | null
@@ -75,6 +82,8 @@ interface Store {
   /** null = split on wide screens, unified on narrow ones */
   diffView: DiffView | null
   panelOpen: boolean
+  /** the file tree was asked for where it folds by itself (a small Code pane, or a Guide beside the code on a window with no room for three columns) */
+  treeAsked: boolean
   fileQuery: string
   filters: Filters
   treeView: 'tree' | 'list'
@@ -90,20 +99,20 @@ interface Store {
   factsOpen: boolean
   diffMode: DiffMode
   docPath: string | null
-  /** the diagram open in the Visualize tab, by view id (null: the first one) */
+  /** the diagram open in the Visualize Guide, by view id (null: the first one) */
   visualView: string | null
-  /** the box of that diagram the reviewer last picked: it stays marked, so it is found again on the way back from its code */
+  /** the pick in that diagram: the box whose code the Code pane was last taken to. It stays outlined until another is picked */
   visualNode: string | null
   composer: string | null
   tour: Tour | null
-  /** Where the reviewer was before a jump took them to another tab or far down the same
-   *  one: offered back by the "Back to …" bar. `top` is how far down the window the thing the link sat in was
-   *  (restored exactly); `y` is the page's scroll position, used if that thing is gone. */
-  returnTo: { tab: Tab; y: number; top: number | null; label: string; target?: FocusTarget } | null
-  /** the walkthrough section open in the panel beside the code (Files changed), by id */
+  /** Where a pane was before a jump took it far from there: offered back by the "Back to …"
+   *  pill in that pane. `top` is how far down the pane the thing the reviewer was reading was
+   *  (restored exactly); `y` is how far the pane was scrolled, used if that thing is gone. */
+  returnTo: { pane: Pane; y: number; top: number | null; label: string; target?: FocusTarget } | null
+  /** the walkthrough section open in the panel beside the code (in the Code pane), by id */
   sectionPanel: string | null
-  /** the file under the top of the window in Files changed, kept by followFiles: the
-   *  file tree and the section panel mark it as where the reviewer is */
+  /** the file under the top of the Code pane, kept by followFiles: the file tree and the
+   *  section panel mark it as where the reviewer is */
   currentFile: string | null
   status: string | null
   navOpen: boolean
@@ -144,7 +153,10 @@ interface Store {
   retryRequest(id: string): Promise<void>
   dismissRequest(id: string): void
 
-  setTab(tab: Tab): void
+  /** Show a Guide in the Guide pane (opening the pane), or close the pane with null. */
+  showGuide(guide: Guide | null): void
+  /** Make sure the Code pane is on screen: a jump to code is about to land in it. The Guide stays as it is. */
+  revealCode(): void
   /** Change the view (hide whitespace / one commit) and reload under it. */
   setView(patch: ReviewView): Promise<void>
   revealLine(file: string, side: 'old' | 'new', line: number, end?: number): void
@@ -156,7 +168,7 @@ interface Store {
   setFileLoaded(path: string): void
   setMdSource(path: string, source: boolean): void
   setSectionOpen(id: string, open: boolean): void
-  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'visualNode' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'fileQuery'>>): void
+  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'visualNode' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'treeAsked' | 'fileQuery' | 'guideWide' | 'front'>>): void
   applyAction(action: UiAction): void
 
   onStreamOpen(): void
@@ -315,13 +327,16 @@ export const useStore = create<Store>((set, get) => {
     visualView: null,
     visualNode: null,
     composer: null,
-    tab: 'files',
+    guide: null,
+    guideWide: false,
+    front: 'code',
     view: {},
     reveal: null,
     treeWidth: storedTreeWidth(),
     wsOnly: [],
     diffView: pref('gr-diff-view', ['split', 'unified'] as const, null),
     panelOpen: typeof window === 'undefined' || window.innerWidth >= 760,   // the tree starts folded on a phone-width screen
+    treeAsked: false,
     fileQuery: '',
     filters: { hideViewed: false, onlyCommented: false, bySection: pref('gr-by-section', ['1'] as const, null) === '1', showExcluded: false },
     treeView: pref('gr-files-view', ['tree', 'list'] as const, 'tree') ?? 'tree',
@@ -359,12 +374,16 @@ export const useStore = create<Store>((set, get) => {
       if (route.name === 'review' && route.session != null && route.session === get().sessionId && get().loaded) {
         const next = viewOfRoute(route)
         const cur = get().view
-        set({ route, tab: route.tab ?? 'files' })
+        set({ route })
+        const guide = guideOf(route.tab)
+        if (guide !== get().guide) get().showGuide(guide)
         if (Boolean(next.ignoreWhitespace) !== Boolean(cur.ignoreWhitespace) || (next.commit ?? '') !== (cur.commit ?? '')) { set({ view: next }); await get().reload() }
         if (route.focus) { try { const t = JSON.parse(route.focus); window.setTimeout(() => focusAnchor(t, { nav: true }), 60) } catch { /* ignore */ } }
         return
       }
-      set({ route, navOpen: false, tab: route.name === 'review' ? route.tab ?? 'files' : 'files', view: viewOfRoute(route), reveal: null })
+      // a review opens with the Guide pane closed unless the address names a Guide
+      const guide = route.name === 'review' ? guideOf(route.tab) : null
+      set({ route, navOpen: false, guide, guideWide: false, front: guide ? 'guide' : 'code', view: viewOfRoute(route), reveal: null })
       if (route.name === 'dashboard') {
         connect(null)
         set({ loaded: null, sessionId: null, preview: null, hub: null, ...leftReview() })
@@ -460,7 +479,7 @@ export const useStore = create<Store>((set, get) => {
           )
           const real = await openSession(sessionId)
           set({
-            sessionId, loaded: real, preview: null, route: routeWithView({ name: 'review', session: sessionId, tab: get().tab }, get().view),
+            sessionId, loaded: real, preview: null, route: routeWithView({ name: 'review', session: sessionId, tab: get().guide ?? undefined }, get().view),
             viewedAt: real.state.viewedAt, reviewedSections: real.state.reviewedSections
           })
           syncHash(get().route)
@@ -657,16 +676,24 @@ export const useStore = create<Store>((set, get) => {
       set({ dismissed: [...get().dismissed, requestId] })
     },
 
-    setTab(tab) {
-      if (get().tab === tab) return
+    showGuide(guide) {
+      const cur = get()
+      if (cur.guide === guide && cur.front === (guide ? 'guide' : 'code')) return
+      // the Code pane changes width under what is being read in it: hold it on that line
+      const hold = holdCodePlace()
+      // (nothing is discarded: the Guide left behind is kept as it is, and so is a comment being written beside the code)
+      set({ guide, front: guide ? 'guide' : 'code', ...(guide ? {} : { guideWide: false }) })
       const route = get().route
-      set({ tab, composer: null })
-      if (route.name === 'review') {
-        const next = { ...route, tab, focus: undefined }
+      if (route.name === 'review' && guideOf(route.tab) !== guide) {
+        const next = { ...route, tab: guide ?? undefined, focus: undefined }
         set({ route: next })
         syncHash(next)
       }
-      window.scrollTo({ top: 0 })
+      hold.settle()
+    },
+    revealCode() {
+      const { front, guideWide } = get()
+      if (front !== 'code' || guideWide) set({ front: 'code', guideWide: false })
     },
     async setView(patch) {
       const view: ReviewView = { ...get().view, ...patch }

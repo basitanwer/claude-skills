@@ -101,6 +101,7 @@ const PATHS: Record<string, string> = {
   book: 'M2 2.75h5a1.5 1.5 0 011.5 1.5v9A1.5 1.5 0 007 11.75H2zM14 2.75H9.5A1.5 1.5 0 008 4.25v9a1.5 1.5 0 011.5-1.5H14z',
   arrowUp: 'M8 13V3M4 7l4-4 4 4', arrowDown: 'M8 3v10M4 9l4 4 4-4', unfold: 'M8 2v4M5.5 4L8 1.5 10.5 4M8 14v-4M5.5 12L8 14.5l2.5-2.5M2 8h12',
   graph: 'M2.5 2.5h4v3h-4zM9.5 10.5h4v3h-4zM2.5 10.5h4v3h-4zM4.5 5.5v5M6.5 4h5v6.5',
+  expand: 'M9.5 2.5h4v4M13.5 2.5L9 7M6.5 13.5h-4v-4M2.5 13.5L7 9', columns: 'M1.75 2.75h12.5v10.5H1.75zM8 2.75v10.5',
   arrowLeft: 'M13 8H3M7 4L3 8l4 4', repo: 'M3 1.75h10v12.5H3zM3 11h10M6 4.5h4', circle: 'M8 2.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11z',
   pr: 'M4 5v6M4 3.5a1 1 0 100-2 1 1 0 000 2zM4 14.5a1 1 0 100-2 1 1 0 000 2zM12 14.5a1 1 0 100-2 1 1 0 000 2zM12 12.5V7a2 2 0 00-2-2H8M9.5 3L7.5 5l2 2'
 }
@@ -353,13 +354,15 @@ export function TourBar() {
   )
 }
 
-/** After a link took the reviewer to another tab: one click back to where they were. */
-export function BackBar() {
+/** After a jump took a pane far from what the reviewer was reading in it: one click back
+ *  to where it was. Drawn in the pane it is about (`pane`: the Guide pane or the Code pane). */
+export function BackBar({ pane }: { pane: 'guide' | 'code' }) {
   const back = useStore((s) => s.returnTo)
+  const tour = useStore((s) => s.tour != null)
   const set = useStore((s) => s.set)
-  if (!back) return null
+  if (!back || (back.pane === 'code') !== (pane === 'code')) return null
   return (
-    <div className="backbar" data-gr="back">
+    <div className={'backbar' + (tour ? ' above-tour' : '')} data-gr="back">
       <button className="backbar-go" title="Return to where you were before the jump" onClick={goBack}><Icon name="arrowLeft" size={14} />Back to <strong className="clip">{back.label}</strong></button>
       <button className="icon-btn" aria-label="Dismiss" onClick={() => set({ returnTo: null })}>×</button>
     </div>

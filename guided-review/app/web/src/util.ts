@@ -6,6 +6,12 @@ import type {
 // ── routing ───────────────────────────────────────────────────
 export type Tab = 'conversation' | 'commits' | 'spec' | 'visual' | 'files'
 const TABS: Tab[] = ['conversation', 'commits', 'spec', 'visual', 'files']
+/** One of the things the reviewer reasons from, shown in the Guide pane beside the code.
+ *  The address names it as `tab=`; `tab=files`, or none, is the Guide pane closed. */
+export type Guide = Exclude<Tab, 'files'>
+export const guideOf = (tab: Tab | undefined): Guide | null => (tab && tab !== 'files' ? tab : null)
+/** A pane of the workspace that scrolls by itself: the Code pane, or one Guide in the Guide pane. */
+export type Pane = 'code' | Guide
 export type Route =
   | { name: 'dashboard' }
   | { name: 'hub'; path: string }
