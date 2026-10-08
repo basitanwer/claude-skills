@@ -488,7 +488,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .viz-swatch.deleted { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); border-style: dashed; }
 .viz-swatch.none { border-style: dashed; background: var(--bg-sunk); }
 .viz-line { display: inline-block; width: 20px; border-top: 2px solid var(--ok); } .viz-line.removed { border-top: 2px dashed var(--bad); }
-.viz-canvas { overflow-x: auto; padding: 8px; } .viz-canvas svg { display: block; margin: 0 auto; font-family: var(--font); }
+.viz-canvas { overflow: hidden; padding: 8px; } .viz-canvas svg { display: block; margin: 0 auto; font-family: var(--font); }
 .viz-edge path { fill: none; stroke: var(--muted); stroke-width: 1.5; } .viz-edge polygon { fill: var(--muted); }
 .viz-edge.new path { stroke: var(--ok); stroke-width: 2; } .viz-edge.new polygon { fill: var(--ok); }
 .viz-edge.removed path { stroke: var(--bad); stroke-dasharray: 5 4; } .viz-edge.removed polygon { fill: var(--bad); }
@@ -503,13 +503,19 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .viz-node.deleted .viz-box { fill: var(--bad-soft); stroke: var(--bad); stroke-dasharray: 5 3; }
 .viz-node.none .viz-box { fill: var(--bg-sunk); stroke-dasharray: 3 3; }
 .viz-node.cur .viz-box, .viz-node.pinned .viz-box, .viz-node.link:hover .viz-box { stroke-width: 2.5; }
+.viz-card { position: fixed; z-index: 45; overflow: hidden; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow); pointer-events: none; font-size: 13px; }
+.viz-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; } .viz-card-head strong { overflow-wrap: anywhere; }
+.viz-card-place { color: var(--text-2); overflow-wrap: anywhere; } .viz-card-sub { color: var(--text-2); }
+.viz-card-note > :first-child { margin-top: 0; } .viz-card-note > :last-child { margin-bottom: 0; }
+.viz-card-links { list-style: none; margin: 0; padding: 0; }
+.viz-card-code { margin: 0; padding: 6px 8px; background: var(--bg-sunk); border-radius: 4px; font: 11px/16px var(--mono); white-space: pre; overflow: hidden; }
+.viz-card-code .add { color: var(--ok); } .viz-card-code .del { color: var(--bad); } .viz-card-code .more { color: var(--muted); }
 .viz-node:focus-visible .viz-box { stroke: var(--accent); stroke-width: 3; }
 .viz-group { fill: var(--sec, transparent); }
 .viz-label { font-size: 13px; font-weight: 600; fill: var(--text); } .viz-sub { font-size: 11px; fill: var(--text-2); }
 .viz-node.deleted .viz-label { text-decoration: line-through; } .viz-node.unchanged .viz-label, .viz-node.none .viz-label { fill: var(--text-2); }
 .viz-mark { font-size: 13px; font-weight: 700; }
 .viz-node.new .viz-mark { fill: var(--ok); } .viz-node.changed .viz-mark { fill: var(--warn); } .viz-node.deleted .viz-mark { fill: var(--bad); }
-.viz-detail { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; min-height: 45px; padding: 8px 12px; border-top: 1px solid var(--border); }
 .viz-status.new { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
 .viz-status.changed { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
 .viz-status.deleted { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }

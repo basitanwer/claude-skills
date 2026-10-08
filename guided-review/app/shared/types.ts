@@ -184,6 +184,8 @@ export interface VisualNode {
   id: string
   label: string
   sub?: string
+  /** what it does and what this change does to it, in a few plain sentences: shown when the reviewer points at the box */
+  note?: string
   /** a path of the repository, checked against the compare side */
   file?: string
   /** with `file`: the first line of the code the node stands for, and its last (new side) */
@@ -527,7 +529,9 @@ export interface Api {
   messagePost(sessionId: number, input: { text: string; requestId?: string; actions?: UiAction[] }): Promise<Message>
   /** Store a walkthrough; it is reconciled against the live diff. A `factCheck` in it is
    *  stored as `factCheck` below is. `model`: the model that wrote it. */
-  annotate(sessionId: number, walkthrough: unknown, requestId?: string | null, opts?: { model?: string }): Promise<{ sections: number; warnings: string[]; factCheck?: { rows: number; notes: number } }>
+  annotate(sessionId: number, walkthrough: unknown, requestId?: string | null, opts?: { model?: string }): Promise<{ sections: number; warnings: string[]
+    /** texts that run long, for whoever wrote it to shorten; nothing was cut */
+    advice: string[]; factCheck?: { rows: number; notes: number } }>
   /** Store the fact check on its own: its rows are checked against git, and every row this
    *  change made false gets a note beside the line that contradicts it. */
   factCheck(sessionId: number, factCheck: unknown, opts?: { model?: string }): Promise<{ rows: number; notes: number; warnings: string[] }>

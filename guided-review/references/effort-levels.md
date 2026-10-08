@@ -52,8 +52,11 @@ and git log for the range. Write the walkthrough JSON [with "factCheck" in it] t
 store it: gr annotate --file <json> --model "<the model you run on>" [--request rID]
 --model is your own model as your system prompt names it; if it names no version, pass
 "Sonnet (version unknown)", do not guess.
+Keep the walkthrough short and plain, as "Writing a good one" in walkthrough-schema.md says: a
+two- or three-sentence summary, and per section three to six short bullets in everyday words.
 If gr prints "corrected against git", read what it corrected; fix and store again only if a
-correction changed what the walkthrough or the fact check says.
+correction changed what the walkthrough or the fact check says. If gr prints "too long", shorten
+those texts and store the walkthrough again.
 
 Rules: you only read. Do not edit any file of the repository, and do not run anything that executes
 or loads its code or configuration (no tests, scripts, builds, type checker, linter, installs).
@@ -69,7 +72,7 @@ passed as --model, and anything gr refused.
 
 ## read: the walkthrough
 
-What changed and why, grouped by purpose: `title`, `summary`, `sections` with narration (`what`), small diagrams and per-file notes. [walkthrough-schema.md](walkthrough-schema.md) has the JSON and how to write a good one.
+What changed and why, grouped by purpose: `title`, `summary`, `sections` with narration (`what`), small diagrams and per-file notes. [walkthrough-schema.md](walkthrough-schema.md) has the JSON and how to write a good one: short, in bullets, in plain words. `gr annotate` says which texts run too long; shorten them and store it again.
 
 At `read`, leave out everything that reads like a finding: no comments beside the code, no `questions` for the author, no `planMap` (the check against a spec or plan). A level that has not checked anything has not earned them. The cost is that nothing points at the risky parts; that is what the higher levels are for.
 

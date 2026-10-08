@@ -5,6 +5,7 @@
 //   3. an edge that crosses layers is routed through a point in each layer it crosses
 //   4. layers are ordered to reduce crossings (barycentre sweeps, the best one kept)
 //   5. nodes are moved sideways towards what they connect to, without overlapping
+// A layer wider than the page is broken into rows first, so the drawing grows downwards and never sideways.
 import type { VisualEdge } from '@shared/types'
 
 export interface Box { id: string; x: number; y: number; w: number; h: number }
@@ -32,8 +33,9 @@ const LABEL_H = 16
 interface Vertex { id: string | null; w: number; h: number; rank: number; cx: number; up: number[]; down: number[] }
 
 /** `labelWidth`: how wide an edge's label is drawn (0: it has none), so that labels can be
- *  kept off each other. */
-export function layout(sizes: { id: string; w: number; h: number }[], edges: VisualEdge[], gapY = 56, labelWidth: (e: VisualEdge) => number = () => 0): Layout {
+ *  kept off each other. `maxWidth`: how wide a layer of boxes may get before it is broken
+ *  into rows (0: any width). */
+export function layout(sizes: { id: string; w: number; h: number }[], edges: VisualEdge[], gapY = 56, labelWidth: (e: VisualEdge) => number = () => 0, maxWidth = 0): Layout {
   const index = new Map(sizes.map((s, i) => [s.id, i]))
   const n = sizes.length
   const es = edges.filter((e) => index.has(e.from) && index.has(e.to) && e.from !== e.to)
@@ -80,6 +82,23 @@ export function layout(sizes: { id: string; w: number; h: number }[], edges: Vis
       if (w > 0 && w + s.w > ROW) { r++; w = 0 }
       rank[u] = r; w += s.w + GAP_X
     })
+  }
+
+  // a layer wider than the page becomes several rows, and every layer under it moves down.
+  // Boxes of one layer have no edges between them, so a row is a layer like any other.
+  if (maxWidth > 0) {
+    const was = [...rank]
+    const ranks = [...new Set(was)].sort((a, b) => a - b)
+    let shift = 0
+    for (const r of ranks) {
+      let row = 0; let w = 0
+      sizes.forEach((s, u) => {
+        if (was[u] !== r) return
+        if (w > 0 && w + s.w > maxWidth) { row++; w = 0 }
+        rank[u] = r + shift + row; w += s.w + GAP_X
+      })
+      shift += row
+    }
   }
 
   // 3. vertices: the nodes, and a routing point wherever an edge crosses a layer
@@ -142,6 +161,18 @@ export function layout(sizes: { id: string; w: number; h: number }[], edges: Vis
     for (let i = 1; i < l.length; i++) left[i] = Math.max(left[i], left[i - 1] + half(l[i - 1]) + gap(l[i - 1], l[i]) + half(l[i]))
     for (let i = l.length - 2; i >= 0; i--) right[i] = Math.min(right[i], right[i + 1] - half(l[i + 1]) - gap(l[i], l[i + 1]) - half(l[i]))
     l.forEach((v, i) => { vs[v].cx = (left[i] + right[i]) / 2 })
+    hold(l)
+  }
+  // Pulling boxes towards their neighbours must not push the drawing wider than the page:
+  // each box is held between the leftmost and the rightmost place its layer leaves it within
+  // `maxWidth`. A layer that cannot fit at all (its boxes and gaps are wider) is left packed.
+  const hold = (l: number[]): void => {
+    if (!(maxWidth > 0) || !l.length) return
+    const lo: number[] = []; const hi: number[] = new Array<number>(l.length)
+    l.forEach((v, i) => { lo.push(i ? lo[i - 1] + half(l[i - 1]) + gap(l[i - 1], v) + half(v) : -maxWidth / 2 + half(v)) })
+    for (let i = l.length - 1; i >= 0; i--) hi[i] = i === l.length - 1 ? maxWidth / 2 - half(l[i]) : hi[i + 1] - half(l[i + 1]) - gap(l[i], l[i + 1]) - half(l[i])
+    if (lo[l.length - 1] > hi[l.length - 1]) { const mid = (lo[0] + lo[l.length - 1]) / 2; l.forEach((v, i) => { vs[v].cx = lo[i] - mid }); return }
+    l.forEach((v, i) => { vs[v].cx = Math.min(hi[i], Math.max(lo[i], vs[v].cx)) })
   }
   for (let it = 0; it < 8; it++) {
     for (let r = 1; r < depth; r++) pull(layers[r], (v) => v.up)

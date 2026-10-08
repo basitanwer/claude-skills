@@ -25,8 +25,10 @@
       "kind": "calls",
       "title": "Function calls",
       "nodes": [
-        { "id": "retry", "label": "withRetry()", "at": "src/retry.ts:12-48" },
-        { "id": "budget", "label": "RetryBudget.take()", "at": "src/budget.ts:5-19", "sub": "caps total attempts" }
+        { "id": "retry", "label": "withRetry()", "at": "src/retry.ts:12-48", "sub": "tries again when a call fails",
+          "note": "Calls the function up to 3 times. New here: it asks the budget before each retry, so one slow service cannot use up every attempt." },
+        { "id": "budget", "label": "RetryBudget.take()", "at": "src/budget.ts:5-19", "sub": "caps total attempts",
+          "note": "Hands out retries from a shared allowance and says no when it is used up." }
       ],
       "edges": [{ "from": "retry", "to": "budget", "kind": "new" }]
     }
@@ -38,9 +40,10 @@
 
 - `views`: 1–6 diagrams. `kind` is `architecture` (the parts involved and how they depend on each other), `flow` (how data or control moves through the change, in order) or `calls` (which function calls which). Draw the ones that help this change; three views are not required.
 - `nodes`: 2–40 per view. `label` is required (up to 60 characters; the box shows as much as fits). `id` is what edges refer to (up to 80 characters); a node without one is given `n1`, `n2`, ….
-- Text is cut to its limit without a note: `title` 120 characters, `summary` 1200, a view's `title` 80 and `caption` 600, `sub` 90, `group` 40, an edge `label` 40.
+- Text is cut to its limit without a warning: `title` 120 characters, `summary` 1200, a view's `title` 80 and `caption` 600, `sub` 90, `note` 500, `group` 40, an edge `label` 40.
 - **Where a node's code is**: `at: "path:start-end"`, or `file`, `line`, `end` apart. Give a function its whole range, not only its first line. A path may be a file or a directory (`"app/server/"`), written from the repository root exactly as `gr diff --stat` and git spell it (no `./`, no `..`, the same letter case). Omit it for something that is not code in this repository (a browser, a database, a person).
-- `sub`: one short line under the label (up to 90 characters). Without it the box shows the file name and lines.
+- `sub`: what the box is, in a few plain words (up to 90 characters; the box shows two lines of it). Without it the box shows the file name and lines.
+- `note`: what the box does and what this change does to it, in one to three plain sentences (up to 500 characters, Markdown). The reviewer sees it, with the box's code, when they point at the box. **Give every box a note:** the box holds a name, and the note is what makes the diagram explain something.
 - `group`: the part of the system a node belongs to. Nodes of one group share a colour, and the diagram has a legend for them.
 - `edges`: `{ "from", "to", "label", "kind" }`, or the short form `["from", "to", "label", "kind"]`. `label` is optional and short (up to 40 characters). `kind` is `"new"` (this change adds the connection), `"removed"` (it removes it) or omitted. Up to 80 per view. The arrow points from `from` to `to`; cycles are fine.
 
@@ -64,9 +67,14 @@ Edge `kind` is the one thing the server cannot check. The page labels such edges
 
 ## Drawing a good one
 
-- Read the code before drawing: the changed files in full, their callers and what they call. A connection you did not see in the code does not go in the diagram.
-- One idea per view. A view that needs more than about 15 boxes is two views.
-- Include the unchanged neighbours that make the change understandable (the caller of a changed function, the store a new module writes to). The reviewer sees at a glance which boxes are changed and which are context.
+The reviewer opens a diagram to understand the change faster than by reading it. A diagram of names joined by arrows does not do that: they learn that the parts exist, not what they do.
+
+- **Each view answers one question, and its title is that question** in the reviewer's words: "What happens to one product?", "Who calls the paid API?", "What did this change add?". Not "Architecture".
+- **Lead with what changed.** The first view shows the change itself: the new or changed pieces, and only the unchanged neighbours needed to place them. A map of the whole system comes second, if at all.
+- **Follow one real example through a `flow` view.** Take one concrete input (one product, one request) and show what happens to it step by step, with real values on the edges: "25 answers", "top 3 categories". Steps read as sentences: "Ask the 24 top-level categories", not "L0 request".
+- **Plain words in the box, the code's name in the `note` or the place.** `label` says what the step or part does; the function or file it lives in is in `at`, where the page shows it. In a `calls` view the label is the function's name, since that view is about functions.
+- **A `note` on every box**: what it does, and what this change does to it. This is what the reviewer reads when they point at the box, next to the code.
+- **Small.** 5 to 9 boxes per view is easy to read; more than about 12 is two views. A layer wider than the page is broken into rows, which is harder to follow than a narrower diagram.
+- **Only what you read.** Read the changed files in full, their callers and what they call, before drawing. A connection you did not see in the code does not go in the diagram.
 - `architecture`: boxes are modules, directories, processes or outside systems, not functions. `flow`: boxes are steps, in the order data moves; label the edges with what is passed. `calls`: boxes are functions with their line ranges; an edge means "calls".
-- Label a box with the name the code uses (`reconcile()`, `RetryBudget`), so the reviewer can search for it.
 - If the reviewer gave a steer with the request, draw that first.

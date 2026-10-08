@@ -5,13 +5,13 @@
 ```json
 {
   "title": "One line describing the whole change",
-  "summary": "2–4 sentences to read before anything else. Markdown allowed.",
+  "summary": "Two or three plain sentences to read before anything else. Markdown allowed.",
   "sections": [
     {
       "id": "retry-policy",
       "name": "Retry policy",
       "desc": "One sentence: why this section matters to the reviewer.",
-      "what": "Plain-language explanation of what changed and why. Markdown allowed. This is the narration.",
+      "what": "- Three to six short bullets in plain words: what this part does, what is different now, what to look at first.\n- Markdown. This is the narration.",
       "files": ["src/retry.ts", "tests/retry.test.ts"],
       "order": 1,
       "diagram": [
@@ -65,8 +65,22 @@ Storing a walkthrough records the current compare commit as the "reviewed" state
 
 ## Writing a good one
 
-- Group by purpose, not by directory. 2–8 sections.
-- Order by where attention pays off: core behaviour first, tests and config later.
-- `what` explains behaviour and reasoning, not a restatement of the diff. Say what a caller now observes.
-- Be specific to this codebase: name the functions, the callers you checked, and the tests that cover the change.
+Write for a reviewer who has not read the code and has five minutes. A walkthrough that reads like the code in prose is not read.
+
+- **Short.** `summary`: two or three sentences (under 450 characters): what the change is for, and the one thing to know before reading. `desc`: one short sentence. `what`: three to six bullets (under 700 characters), each one or two lines. No paragraph per file.
+- **Bullets, not blocks.** `what` is a Markdown list. One bullet per thing the reviewer should know: what this part does, what is different now, what to look at first.
+- **Plain words first.** Say what happens, as you would to a colleague from another team: "asks the top-level categories first, then only the children of what was picked". Name a function, flag or file only when the reviewer needs the name to find something, and then one or two per section, not all of them.
+- **Leave out** what the reviewer can read in the code: every helper, every option, constants, retry and error-handling mechanics, how a value is passed along. If it is worth knowing about one file, it goes in that file's `plainNotes` (one or two sentences, shown on the file), not in `what`.
+- **Group by purpose, not by directory.** 2–8 sections, ordered by where attention pays off: core behaviour first, tests and config later.
 - From effort level `check` up, when a spec/plan exists, judge the implementation against it criterion by criterion (`planMap`) and call out divergences. At `read` the walkthrough explains and judges nothing: no `planMap`, no `questions`, no verdicts in `what`.
+
+A `what` of the right size:
+
+```markdown
+- Runs a sample of products through the model, one level of the category tree at a time.
+- Asks the 24 top-level categories first, keeps at most 3, then asks only about their children.
+- Saves every raw answer, so the picking rule can be changed later without paying for new calls.
+- Start with `run-jev.mjs`; the other three files are what it calls.
+```
+
+`gr annotate` says "too long" for a summary, a narration or a file note over its limit. Nothing is cut: shorten those texts and store the walkthrough again.

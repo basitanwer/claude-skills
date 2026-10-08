@@ -448,8 +448,19 @@ export function reconcile(files, raw) {
     steps: (Array.isArray(pm.steps) ? pm.steps : []).map((/** @type {any} */ st, /** @type {number} */ i) => ({ n: Number(st?.n) || i + 1, text: str(st?.text), sectionId: sid(st?.sectionId), status: ['done', 'changed', 'missing'].includes(st?.status) ? st.status : 'missing' })).filter((/** @type {any} */ st) => st.text),
     deviations: (Array.isArray(pm.deviations) ? pm.deviations : []).map((/** @type {any} */ d) => ({ text: str(d?.text), sectionId: sid(d?.sectionId) })).filter((/** @type {any} */ d) => d.text)
   } : undefined
-  return { walkthrough: { title: str(raw.title).trim(), summary: str(raw.summary), sections, questions, ...(planMap ? { planMap } : {}) }, warnings }
+  // A walkthrough is read in minutes or not at all. Nothing is cut here: whoever wrote it is
+  // told which texts run long, and shortens them.
+  const advice = []
+  const long = (/** @type {string} */ what, /** @type {string} */ text, /** @type {number} */ max, /** @type {string} */ how) => { if (text.length > max) advice.push(`${what} is ${text.length} characters; keep it under ${max}: ${how}`) }
+  long('the summary', str(raw.summary), WALK_MAX.summary, 'two or three plain sentences')
+  for (const s of sections) {
+    long(`the narration of section "${s.name}"`, s.what, WALK_MAX.what, 'three to six short bullets in plain words; detail about one file goes in its plainNotes')
+    for (const [p, n] of Object.entries(s.plainNotes ?? {})) long(`the note on ${p}`, n, WALK_MAX.note, 'one or two sentences')
+  }
+  return { walkthrough: { title: str(raw.title).trim(), summary: str(raw.summary), sections, questions, ...(planMap ? { planMap } : {}) }, warnings, advice }
 }
+/** How long the texts of a walkthrough may run before its writer is asked to shorten them. */
+export const WALK_MAX = { summary: 450, what: 700, note: 300 }
 
 // ── visual: the whole change as diagrams ─────────────────────
 /** How much one visual holds. More than this cannot be read as a picture. */
@@ -600,7 +611,8 @@ export async function reconcileVisual(repo, loaded, raw, read) {
       if (taken.has(id)) { warn(`view "${title}": two nodes have the id ${JSON.stringify(id)} — the second was dropped`); continue }
       taken.add(id)
       const sub = cut(n?.sub, 90); const group = cut(n?.group, 40)
-      nodes.push({ id, label, ...(sub ? { sub } : {}), ...(group ? { group } : {}), ...(await place(`view "${title}": node "${label}"`, n)) })
+      const note = str(n?.note).trim().slice(0, 500)
+      nodes.push({ id, label, ...(sub ? { sub } : {}), ...(note ? { note } : {}), ...(group ? { group } : {}), ...(await place(`view "${title}": node "${label}"`, n)) })
     }
     if (nodes.length < 2) { warn(`view "${title}" has fewer than two nodes — dropped`); continue }
     /** @type {import('../shared/types.ts').VisualEdge[]} */

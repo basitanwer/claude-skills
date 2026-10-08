@@ -51,7 +51,7 @@ test('the request reaches the session with the command that completes it, and on
     views: [
       { kind: 'calls', title: 'Calls', caption: 'Who calls what.', nodes: [
         // every status below is claimed wrongly on purpose: git decides
-        { id: 'a', label: 'a()', at: 'src/a.ts:1-3', status: 'new', group: 'core' },
+        { id: 'a', label: 'a()', at: 'src/a.ts:1-3', status: 'new', group: 'core', note: `Returns **2** now.  ${'x'.repeat(600)}` },
         { id: 'k', label: 'K', at: 'src/a.ts:4', status: 'new' },
         { id: 'b', label: 'b()', file: 'src/b.ts', line: 1, end: 3, status: 'unchanged' },
         { id: 'old', label: 'gone', file: 'src/old.ts', line: 1, status: 'changed' },
@@ -71,7 +71,11 @@ test('the request reaches the session with the command that completes it, and on
   const v = await visual()
   const st = (id) => node(v, 'calls', id).status
   assert.deepEqual(['a', 'k', 'b', 'old', 'spec', 'mv', 'user'].map(st), ['changed', 'unchanged', 'new', 'deleted', 'unchanged', 'changed', 'none'])
-  assert.deepEqual(node(v, 'calls', 'a'), { id: 'a', label: 'a()', group: 'core', file: 'src/a.ts', inDiff: true, line: 1, end: 3, status: 'changed' })
+  // a note is what the reviewer reads when they point at the box: kept as written, up to its limit
+  const { note, ...a } = node(v, 'calls', 'a')
+  assert.deepEqual(a, { id: 'a', label: 'a()', group: 'core', file: 'src/a.ts', inDiff: true, line: 1, end: 3, status: 'changed' })
+  assert.deepEqual([note.startsWith('Returns **2** now.  x'), note.length], [true, 500])
+  assert.equal('note' in node(v, 'calls', 'k'), false, 'a box without one has none')
   assert.deepEqual(node(v, 'calls', 'spec'), { id: 'spec', label: 'spec', file: 'specs/rate-limit/spec.md', line: 3, status: 'unchanged' }, 'a file outside the diff: known to exist, not something the page can go to')
   assert.equal(node(v, 'calls', 'mv').file, 'src/moved.ts', 'a renamed file is named by its new path')
   assert.equal('line' in node(v, 'calls', 'old'), false, 'a deleted file has no lines on the compare side')

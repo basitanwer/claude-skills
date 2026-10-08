@@ -678,7 +678,7 @@ const api = {
     if (r?.kind === 'visualize') throw new Error(`request ${r.id} asks for a visual, not for a walkthrough: complete it with gr visualize`)
     const loaded = await load(s)
     if (loaded.refMissing) throw new Error('a side of this comparison no longer resolves')
-    const { walkthrough, warnings } = reconcile(loaded.files, raw)
+    const { walkthrough, warnings, advice } = reconcile(loaded.files, raw)
     // a fact check that came with it is checked before anything is stored: a refused one leaves the review as it was
     // (one that answers a request to update the walkthrough adds to what was found before, unless it says otherwise)
     const facts = raw.factCheck == null ? null : await reconcileFactCheck(s.repo, loaded, raw.factCheck, sideReader(s.repo, loaded), { update: Boolean(r?.update) })
@@ -705,7 +705,7 @@ const api = {
     if (r) finish(s, r, 'done')
     save(s); changed(id); refreshPresence(id)
     notify(id, 'Walkthrough ready', `${walkthrough.sections.length} sections — ${walkthrough.title}`)
-    return { sections: walkthrough.sections.length, warnings, ...(stored ? { factCheck: { rows: stored.rows, notes: stored.notes } } : {}) }
+    return { sections: walkthrough.sections.length, warnings, advice, ...(stored ? { factCheck: { rows: stored.rows, notes: stored.notes } } : {}) }
   }),
   factCheck: (/** @type {number} */ id, /** @type {any} */ raw, /** @type {any} */ opts) => locked(id, async () => {
     const s = store.get(id)

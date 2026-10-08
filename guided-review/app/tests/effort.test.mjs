@@ -113,6 +113,20 @@ test('at read the request asks for the walkthrough only; at bugs the session doe
   b.gr(fx.dir, 'effort', 'check', ...S())
 })
 
+test('a walkthrough that runs long is stored, and its writer is told which texts to shorten', async () => {
+  const short = annotate({}, '--model', 'Sonnet 5.5')
+  assert.doesNotMatch(short.out, /too long/)
+  const res = annotate({ summary: 'S'.repeat(451), sections: [{ ...WALK.sections[0], what: 'w'.repeat(701), plainNotes: [{ file: 'src/a.ts', note: 'n'.repeat(301) }, { file: 'src/b.ts', note: 'fine' }] }] }, '--model', 'Sonnet 5.5')
+  assert.equal(res.code, 0, res.err)
+  assert.match(res.out, /too long: the summary is 451 characters; keep it under 450: two or three plain sentences/)
+  assert.match(res.out, /too long: the narration of section "Core" is 701 characters; keep it under 700: three to six short bullets in plain words/)
+  assert.match(res.out, /too long: the note on src\/a\.ts is 301 characters; keep it under 300/)
+  assert.doesNotMatch(res.out, /src\/b\.ts is/)
+  assert.match(res.out, /shorten those texts and store the walkthrough again/)
+  assert.equal((await state()).walkthrough.summary.length, 451, 'nothing is cut')
+  assert.equal(annotate({}, '--model', 'Sonnet 5.5').code, 0)
+})
+
 test('a fact check is checked against git, and a statement this change made false gets a note beside the code', async () => {
   // plan.md is a file git has that this change does not touch and that is not attached
   b.gr(fx.dir, 'artifact', 'remove', 'specs/rate-limit/plan.md', ...S())

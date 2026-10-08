@@ -789,7 +789,9 @@ const builders = {
     return {
       channel: 'annotate', args: [o.walkthrough, o.request ? String(o.request) : null, { model: o.model == null ? '' : String(o.model) }], ...(o.request ? { request: String(o.request) } : {}),
       lines: (res) => [`walkthrough stored: ${res.sections} section(s)${o.request ? ` (request ${o.request} done)` : ''}`,
-        ...(res.factCheck ? [factLine(res.factCheck)] : []), ...res.warnings.map((w) => `corrected against git: ${w}`), ...(o.model || !hasEffort() ? [] : [NO_MODEL])]
+        ...(res.factCheck ? [factLine(res.factCheck)] : []), ...res.warnings.map((w) => `corrected against git: ${w}`),
+        ...(res.advice?.length ? [...res.advice.map((a) => `too long: ${a}`), 'the reviewer reads this in the page: shorten those texts and store the walkthrough again'] : []),
+        ...(o.model || !hasEffort() ? [] : [NO_MODEL])]
     }
   },
   factcheck(o) {
