@@ -4,24 +4,30 @@ import type {
 } from '@shared/types'
 
 // ── routing ───────────────────────────────────────────────────
-export type Tab = 'conversation' | 'commits' | 'spec' | 'visual' | 'files'
-const TABS: Tab[] = ['conversation', 'commits', 'spec', 'visual', 'files']
-/** One of the things the reviewer reasons from, shown in the Guide pane beside the code.
- *  The address names it as `tab=`; `tab=files`, or none, is the Guide pane closed. */
-export type Guide = Exclude<Tab, 'files'>
-const GUIDES: Guide[] = ['conversation', 'commits', 'spec', 'visual']
+/** What the tabs of the page were called, which an address from before the workspace still names (`tab=`). */
+type Tab = 'conversation' | 'commits' | 'spec' | 'visual' | 'files'
+/** One of the things the reviewer reasons from, shown in the Guide pane beside the code:
+ *  the Walkthrough, Visualize, the Conversation, Spec & plan (and, until it goes, Commits).
+ *  The address names it as `guide=`. */
+export type Guide = 'walkthrough' | 'visual' | 'conversation' | 'spec' | 'commits'
+export const GUIDES: Guide[] = ['walkthrough', 'visual', 'conversation', 'spec', 'commits']
 /** A pick: the item chosen in a Guide, which the Code pane is narrowed to. It is small
  *  enough for the address to carry, and says where its code is, not what the code was: a
- *  box of a diagram (by diagram and box, so a redrawn diagram is asked again), a folder,
- *  or a file with, perhaps, lines of it. */
+ *  box of a diagram (by diagram and box, so a redrawn diagram is asked again), a section of
+ *  the walkthrough (with, perhaps, the one of its files to go to), a folder, or a file
+ *  with, perhaps, lines of it. */
 export type CodePick =
   | { box: [view: string, node: string] }
+  | { section: string; file?: string }
   | { dir: string }
   | { file: string; side?: 'old' | 'new'; line?: number; end?: number }
+/** The Guide a pick is of, where its shape says so: a box is the diagram's, a section the walkthrough's. */
+export const guideOfPick = (p: CodePick | null): Guide | null => (!p ? null : 'box' in p ? 'visual' : 'section' in p ? 'walkthrough' : null)
 /** A pick as text, the same text for the same pick ('' for none): what the address carries. */
 export function pickKey(p: CodePick | null): string {
   if (!p) return ''
   if ('box' in p) return JSON.stringify({ box: [p.box[0], p.box[1]] })
+  if ('section' in p) return JSON.stringify({ section: p.section, ...(p.file ? { file: p.file } : {}) })
   if ('dir' in p) return JSON.stringify({ dir: p.dir })
   return JSON.stringify({ file: p.file, ...(p.side === 'old' ? { side: 'old' } : {}), ...(p.line != null ? { line: p.line } : {}), ...(p.line != null && p.end != null && p.end > p.line ? { end: p.end } : {}) })
 }
@@ -31,6 +37,7 @@ export function parsePick(json: string | undefined): CodePick | null {
   try {
     const p = JSON.parse(json) as Record<string, unknown>
     if (Array.isArray(p.box) && typeof p.box[0] === 'string' && typeof p.box[1] === 'string') return { box: [p.box[0], p.box[1]] }
+    if (typeof p.section === 'string' && p.section) return { section: p.section, ...(typeof p.file === 'string' && p.file ? { file: p.file } : {}) }
     if (typeof p.dir === 'string' && p.dir) return { dir: p.dir }
     if (typeof p.file === 'string' && p.file) {
       const n = (v: unknown): number | undefined => (typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : undefined)
@@ -40,13 +47,25 @@ export function parsePick(json: string | undefined): CodePick | null {
   return null
 }
 /** What a pick narrows the Code pane to: the files on show, the place in them to go to, and words for it. */
-export interface Narrowing { files: string[]; file?: string; side?: 'old' | 'new'; line?: number; end?: number; label: string }
+export interface Narrowing { files: string[]; file?: string; side?: 'old' | 'new'; line?: number; end?: number; label: string
+  /** the files are shown in this order, not the tree's (a section's files, in the walkthrough's order) */
+  ordered?: boolean }
 /** A pick's code in the comparison as the page has it, or null: there is no pick, it has
  *  no code (a box that is not code, or that this change does not touch), or what it named
- *  is gone (a diagram drawn anew, a file that left the comparison). */
+ *  is gone (a diagram drawn anew, a walkthrough written anew, a file that left the
+ *  comparison). A section's files are in the walkthrough's order; the place to go to is
+ *  the file named with it, else the first of its files not yet viewed. */
 export function narrowingOf(pick: CodePick | null, loaded: LoadedReview | null): Narrowing | null {
   if (!pick || !loaded) return null
   const files = loaded.files.filter((f) => !f.excluded)
+  if ('section' in pick) {
+    const section = loaded.state.walkthrough?.sections.find((s) => s.id === pick.section)
+    if (!section) return null
+    // (a file the walkthrough names can have left the comparison since it was written)
+    const its = section.files.flatMap((p) => files.find((f) => f.path === p || f.oldPath === p) ?? [])
+    const at = its.find((f) => f.path === pick.file) ?? its.find((f) => f.viewed !== 'viewed') ?? its[0]
+    return { files: its.map((f) => f.path), file: at?.path, label: `“${section.name}” (${plural(its.length, 'file')})`, ordered: true }
+  }
   const under = (dir: string): Narrowing | null => {
     const d = dir.endsWith('/') ? dir : `${dir}/`
     const inside = files.filter((f) => f.path.startsWith(d)).map((f) => f.path)
@@ -76,8 +95,13 @@ export type Route =
   | { name: 'review'; session?: number; repo?: string; base?: string; compare?: string; fresh?: boolean; direct?: boolean; focus?: string
       /** the Guide on show in the Guide pane (none: the pane is closed) */
       guide?: Guide
-      /** the pick, as JSON (see CodePick) */
+      /** the pick the Code pane follows (the most recent one), as JSON (see CodePick) */
       pick?: string
+      /** beside a Guide: all the files are on show, not only the pick's (or the list of files) */
+      all?: boolean
+      /** the address itself says where to be (a Guide, a pick, a focus): it is followed,
+       *  and the review is not reopened where it was left. Not part of the address. */
+      here?: boolean
       /** hide whitespace-only changes */
       w?: boolean
       /** show only this commit of the range */
@@ -93,18 +117,19 @@ export function parseHash(hash: string): Route {
     const session = Number(sp.get('session'))
     const focus = sp.get('focus') ?? undefined
     // `guide=` names the Guide; an address from before the workspace names it as `tab=`
-    // (`tab=files`: the Guide pane closed). The walkthrough is in the Conversation for now.
-    const named = sp.get('guide') === 'walkthrough' ? 'conversation' : sp.get('guide')
-    const tab = TABS.find((t) => t === sp.get('tab'))
-    const guide = GUIDES.find((g) => g === named) ?? GUIDES.find((g) => g === tab)
+    // (`tab=files`: the Guide pane closed). Anything else either says is not followed.
+    const tab = sp.get('tab') as Tab | null
+    const guide = GUIDES.find((g) => g === sp.get('guide')) ?? GUIDES.find((g) => g === tab)
     const pick = pickKey(parsePick(sp.get('pick') ?? undefined)) || undefined
+    const all = guide && sp.get('all') === '1' ? true : undefined
+    const here = Boolean(guide || pick || focus || tab === 'files') || undefined
     const w = sp.get('w') === '1' ? true : undefined
     const commit = sp.get('commit') || undefined
-    if (sp.get('session') && Number.isFinite(session)) return { name: 'review', session, focus, guide, pick, w, commit }
+    if (sp.get('session') && Number.isFinite(session)) return { name: 'review', session, focus, guide, pick, all, here, w, commit }
     if (sp.get('repo')) {
       return {
         name: 'review', repo: sp.get('repo')!, base: sp.get('base') ?? undefined, compare: sp.get('compare') ?? undefined,
-        fresh: sp.get('fresh') === '1', direct: sp.get('direct') === '1', focus, guide, pick, w, commit
+        fresh: sp.get('fresh') === '1', direct: sp.get('direct') === '1', focus, guide, pick, all, here, w, commit
       }
     }
   }
@@ -125,6 +150,7 @@ export function routeHash(r: Route): string {
     }
     if (r.guide) sp.set('guide', r.guide)
     if (r.pick) sp.set('pick', r.pick)
+    if (r.all && r.guide) sp.set('all', '1')
     if (r.w) sp.set('w', '1')
     if (r.commit) sp.set('commit', r.commit)
     if (r.focus) sp.set('focus', r.focus)

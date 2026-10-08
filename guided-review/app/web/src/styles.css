@@ -275,7 +275,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .viewed-progress { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-2); white-space: nowrap; }
 .legend { display: inline-flex; align-items: center; gap: 4px; } .swatch { width: 3px; height: 12px; display: inline-block; margin-left: 6px; }
 .swatch.staged { background: var(--staged); } .swatch.unstaged { background: var(--unstaged); }
-.files-layout { flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); column-gap: 24px; padding-left: var(--pad); }
+.files-layout { position: relative; flex: 1 1 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); column-gap: 24px; padding-left: var(--pad); }
 /* the path bar, and what the pane is showing: the line between the toolbar and the code */
 .code-where { flex: none; display: flex; align-items: center; gap: 2px 16px; flex-wrap: wrap; min-height: 30px; padding: 3px var(--pad); border-bottom: 1px solid var(--border); background: var(--bg-soft); font-size: 12px; }
 .path-bar { flex: 1 1 auto; display: flex; align-items: center; gap: 2px; min-width: 0; min-height: 22px; overflow: hidden; white-space: nowrap; font-family: var(--mono); }
@@ -291,8 +291,20 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 /* the tree panel: the far right of the workspace, a column of its own or, where it has none, over the Code pane */
 .tree-panel { position: relative; min-height: 0; display: flex; flex-direction: column; padding-right: 10px; }
 .tree-panel > .tree { min-height: 0; overflow: auto; padding-bottom: 16px; }
-.workspace > .tree-panel { flex: none; width: calc(var(--tree-w, 300px) + 26px); max-width: 100%; padding: 8px 16px 0 10px; border-left: 1px solid var(--border); background: var(--bg); }
-.workspace > .tree-panel.over { position: absolute; top: 0; right: 0; bottom: 0; z-index: 55; border-left-color: var(--border-strong); box-shadow: var(--shadow); }
+.workspace > .tree-panel, .tree-panel.over { flex: none; width: calc(var(--tree-w, 300px) + 26px); max-width: 100%; padding: 8px 16px 0 10px; border-left: 1px solid var(--border); background: var(--bg); }
+/* (over the files only: the toolbar, the path bar and what the pane says it shows stay in reach above it) */
+.tree-panel.over { position: absolute; top: 0; right: 0; bottom: 0; z-index: 55; border-left-color: var(--border-strong); box-shadow: var(--shadow); }
+/* the pane the keys go to (`w` moves them): a quiet line along its top */
+[data-gr-scroll]:focus { outline: 0; box-shadow: inset 0 2px 0 var(--accent); }
+/* files on show in another order than the list's (a section's, in the walkthrough's order) are placed by `order` */
+.file-group { display: flex; flex-direction: column; }
+/* the Walkthrough Guide: the summary, then the sections as rows; one is open in place */
+.walk { display: flex; flex-direction: column; gap: 12px; } .walk > .flash-banner { margin: 0; } .walk .effort-line { margin: 0; }
+.walk-by { display: flex; align-items: center; gap: 6px; }
+.walk-count { display: flex; align-items: baseline; gap: 8px; margin-bottom: -6px; } .walk-count .side-title { margin: 0; } .walk-count .sec-progress { display: inline-flex; align-items: center; gap: 4px; }
+.sec-toggle { flex-wrap: wrap; } .sec-toggle > strong { white-space: nowrap; }
+.sec-item.open > .sec-item-head { background: color-mix(in srgb, var(--sec, var(--accent)) 8%, transparent); } .sec-toggle .sec-dot { align-self: center; }
+.sec-panel-files .tree-row { padding-top: 3px; padding-bottom: 3px; }
 .tree-toggle .ico { transform: scaleX(-1); }
 /* the files of the pick, in the tree; and a link in a Guide that is the pick */
 .tree-row.picked { outline: 1px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: -1px; }
@@ -486,23 +498,9 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .backbar-go { display: inline-flex; align-items: center; gap: 6px; min-width: 0; border: 0; background: none; padding: 4px 10px; border-radius: 2em; cursor: pointer; color: var(--accent-ink); white-space: nowrap; }
 .backbar-go:hover { background: var(--bg-sunk); } .backbar-go strong { color: var(--text); }
 
-/* a walkthrough section beside the code. In a Code pane from 1100px wide it is a column of
-   its own, so it never covers the diff: beside the tree and the diff from 1600px, in the
-   tree's place below that (FilesTab leaves the tree out while it is open). In a narrower
-   pane there is no room for two columns: a drawer over the right edge of the pane, the
-   whole pane on a phone. (sec-col: the class FilesTab puts on a pane that wide.) */
-.sec-panel { position: absolute; top: 0; right: 0; bottom: 0; z-index: 50; width: min(440px, 100%); overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 24px; background: var(--panel); border-left: 1px solid var(--border-strong); border-top: 3px solid var(--sec); box-shadow: var(--shadow); font-size: 13px; }
-.sec-panel-head { display: flex; align-items: center; gap: 6px; position: sticky; top: -12px; margin: -12px -16px 0; padding: 8px 10px 8px 16px; background: var(--panel); border-bottom: 1px solid var(--border); z-index: 1; }
-.sec-panel h3 { font-size: 16px; margin: 0; } .sec-panel .sec-desc { margin: 0; }
+/* the open section of the walkthrough: its files, and the chip of a file whose section is open */
 .sec-panel-files { display: flex; flex-direction: column; border-top: 1px solid var(--border); padding-top: 10px; }
 .sec-chip.on { background: color-mix(in srgb, var(--sec) 28%, transparent); border-color: var(--sec); color: var(--text); }
-.files-layout.with-sec.sec-col { grid-template-columns: minmax(0, 1fr) 400px; }
-.sec-col > .sec-panel { position: static; z-index: auto; width: auto; align-self: start; max-height: calc(100% - 32px); margin: 16px var(--pad) 16px 0; border: 1px solid var(--border); border-top: 3px solid var(--sec); border-radius: var(--radius); box-shadow: none; }
-.sec-col > .code-scroll:not(:last-child) { padding-right: 0; }
-/* beside a Guide, in a pane with no room for that column or for a drawer: on top of the files, which keep the pane's width */
-.files-layout.with-sec.sec-top { grid-template-rows: auto minmax(0, 1fr); }
-.sec-top > .sec-panel { position: static; z-index: auto; width: auto; grid-row: 1; max-height: 38vh; margin: 12px var(--pad) 0 0; border: 1px solid var(--border); border-top: 3px solid var(--sec); border-radius: var(--radius); box-shadow: none; }
-.sec-top > .code-scroll { grid-row: 2; }
 
 /* diffs held back (large, generated) and lines too long to show whole */
 .file-msg.held { display: flex; flex-direction: column; align-items: center; gap: 6px; }

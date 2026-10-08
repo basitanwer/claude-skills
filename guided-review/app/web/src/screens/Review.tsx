@@ -3,7 +3,7 @@ import type {
   AnchorInput, Artifact, Comment, FactRow, FileDiff, FocusTarget, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, TREE_BESIDE_GUIDE, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, focusQuestion, followFiles, goToSection, holdCodePlace, holdPlaces, showIfOut, showPick, showSection, showSectionHeader, startTour, unparkCodePlace } from '../focus'
+import { focusAnchor, focusQuestion, followFiles, holdCodePlace, holdPlaces, openSection, showIfOut, showPick, showSectionHeader, startTour, unparkCodePlace } from '../focus'
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, narrowingOf, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
@@ -244,8 +244,8 @@ function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
 // ── the Guide row ─────────────────────────────────────────────
 const generalComment = (c: Comment): boolean => ['summary', 'title', 'section', 'plan-step', 'acceptance', 'deviation'].includes(c.anchor.kind)
 
-/** The row that names the Guides and switches between them: the row of tabs, as it was,
- *  less "Files changed" (the code is always there, in the Code pane). It sits on top of
+/** The row that names the Guides and switches between them: Walkthrough, Visualize,
+ *  Conversation, Spec & plan (and Commits, until it goes). It sits on top of
  *  the Guide pane; while that pane is closed it sits on top of the Code pane, where it is
  *  the way to open one. Clicking the name of the Guide on show closes the Guide pane.
  *  `onePane`: the window fits one pane at a time. */
@@ -259,10 +259,11 @@ function GuideRow({ loaded, onePane }: { loaded: LoadedReview; onePane: boolean 
   const conv = loaded.state.messages.length + loaded.state.comments.filter(generalComment).length
   const hasSpec = loaded.artifacts.length > 0 || Boolean(loaded.state.walkthrough?.planMap)
   const items: { id: Guide; label: string; icon: string; n: number }[] = [
+    { id: 'walkthrough', label: 'Walkthrough', icon: 'list', n: loaded.state.walkthrough?.sections.length ?? 0 },
+    { id: 'visual', label: 'Visualize', icon: 'graph', n: loaded.state.visual?.views.length ?? 0 },
     { id: 'conversation', label: 'Conversation', icon: 'comment', n: conv },
-    { id: 'commits', label: 'Commits', icon: 'commit', n: loaded.commits.length },
     ...(hasSpec ? [{ id: 'spec' as Guide, label: 'Spec & plan', icon: 'book', n: loaded.artifacts.length }] : []),
-    { id: 'visual', label: 'Visualize', icon: 'graph', n: loaded.state.visual?.views.length ?? 0 }
+    { id: 'commits', label: 'Commits', icon: 'commit', n: loaded.commits.length }
   ]
   // in a window that fits one pane, a Guide can be open behind the code: its name brings it back
   const behind = onePane && front === 'code'
@@ -399,15 +400,11 @@ function CommentsMenu({ loaded }: { loaded: LoadedReview }) {
 }
 
 // ── the Code pane (Files changed) ─────────────────────────────
-/** The narrowest Code pane in which a diff stays split while a section is docked in the
- *  tree's place: its column is then as wide (about 730px) as the narrowest one that is
- *  split by default with the tree showing. */
-const SPLIT_BESIDE_SECTION = 1200
 /** What the tree panel takes of the workspace beside its own width: its padding (px). */
 const TREE_PAD = 26
 /** The widths of the Code pane at which what it holds changes: a file's header on one line
- *  (520), the narrow layout of a diff (760), the section as a column (1100). */
-const CODE_STEPS = [520, 760, 1100, SPLIT_BESIDE_SECTION] as const
+ *  (520), the narrow layout of a diff (760), a Markdown file's header on one line (1200). */
+const CODE_STEPS = [520, 760, 1200] as const
 /** Beside a Guide a diff is split by the room its own column has: never split under 700px,
  *  split unless the reviewer chose otherwise from 900px. */
 const FILES_STEPS = [700, 900] as const
@@ -523,6 +520,8 @@ function SectionHeader({ section, files, no }: { section: Section; files: FileDi
   const reviewed = useStore((s) => s.reviewedSections.includes(section.id))
   const toggle = useStore((s) => s.toggleSectionReviewed)
   const k = anchorKey({ kind: 'section', sectionId: section.id })
+  // while the Walkthrough is on show the section's thread is written and read there: one place for it, not two
+  const inGuide = useStore((s) => s.guide === 'walkthrough')
   return (
     <div className="sec-head" style={secStyle(no)} data-gr-section={section.id} data-gr-reviewed={reviewed ? 'true' : 'false'}>
       <div className="sec-title-row">
@@ -530,100 +529,14 @@ function SectionHeader({ section, files, no }: { section: Section; files: FileDi
         <h3>{section.name}</h3>
         <span className="muted small">{plural(files.length, 'file')}</span>
         <span className="grow" />
-        <CommentButton k={k} title="Comment on this section" />
+        {inGuide ? <button className="link small" title="Open this section in the Walkthrough" onClick={() => openSection(section.id)}>In the Walkthrough</button> : <CommentButton k={k} title="Comment on this section" />}
         <label className={'viewed-box' + (reviewed ? ' on' : '')}><input type="checkbox" name="gr-field" checked={reviewed} onChange={() => void toggle(section.id)} data-gr="section-reviewed" /> Reviewed</label>
       </div>
       {section.desc && <div className="sec-desc">{section.desc}</div>}
       {section.what && <Md text={section.what} />}
       <Diagram section={section} />
-      <CommentSlot anchor={{ kind: 'section', sectionId: section.id }} k={k} />
+      {!inGuide && <CommentSlot anchor={{ kind: 'section', sectionId: section.id }} k={k} />}
     </div>
-  )
-}
-/** A walkthrough section beside the code: what it says, its files, and the same
- *  Reviewed mark and comment thread it has in the Conversation. Opened from a file's
- *  section chip, so reading about a group of files never means leaving them. It is also
- *  how the walkthrough is gone through in order: its arrows and "Reviewed, next" open
- *  another section and bring the code to it (goToSection). */
-function SectionPanel({ sections }: { sections: Section[] }) {
-  const id = useStore((s) => s.sectionPanel)
-  const done = useStore((s) => s.reviewedSections)
-  const toggle = useStore((s) => s.toggleSectionReviewed)
-  const files = useStore((s) => s.loaded?.files)
-  const set = useStore((s) => s.set)
-  const no = sections.findIndex((s) => s.id === id)
-  const section = sections[no]
-  // the file being read, when it is one of this section's
-  const here = useStore((s) => (s.currentFile && section?.files.includes(s.currentFile) ? s.currentFile : null))
-  const stepped = useRef(0)
-  useEffect(() => {
-    if (!section) return
-    const onKey = (e: KeyboardEvent): void => {
-      const typing = e.target instanceof Element && e.target.closest('input, textarea, [role="menu"]')
-      if (e.key === 'Escape' && !typing) showSection(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [section, set])
-  if (!section) return null
-  const k = anchorKey({ kind: 'section', sectionId: section.id })
-  const reviewed = done.includes(section.id)
-  const step = (d: number): void => goToSection(sections[(no + d + sections.length) % sections.length].id)
-  // the next section still to review: after this one, then round to the earliest (the list
-  // of reviewed ids can hold sections of an earlier walkthrough, so it is never counted)
-  const next = [...sections.slice(no + 1), ...sections.slice(0, no)].find((s) => !done.includes(s.id))
-  const allDone = sections.every((s) => done.includes(s.id))
-  const reviewedNext = (): void => {
-    // the second click of a double click would tick the section just arrived at, unread
-    if (Date.now() - stepped.current < 500) return
-    // never a toggle: on a section already ticked it only moves on
-    void (reviewed ? Promise.resolve() : toggle(section.id)).then(() => {
-      // (they may have moved on by hand while the tick was being saved)
-      if (!next || useStore.getState().sectionPanel !== section.id) return
-      stepped.current = Date.now()
-      goToSection(next.id)
-    })
-  }
-  return (
-    <aside className="sec-panel" style={secStyle(no)} aria-label="Walkthrough section" data-gr="section-panel" data-gr-section-panel={section.id} data-gr-reviewed={reviewed ? 'true' : 'false'}>
-      <div className="sec-panel-head">
-        <span className="sec-dot" /><span className="muted small">Section {no + 1} of {sections.length}</span>
-        {reviewed && <span className="sec-tick" role="img" aria-label="Reviewed" title="You marked this section reviewed" data-gr="section-tick"><Icon name="check" size={14} /></span>}
-        <span className="grow" />
-        {sections.length > 1 && <button className="icon-btn" title="Previous section, and its code" aria-label="Previous section" data-gr="section-prev" onClick={() => step(-1)}><Icon name="chevUp" /></button>}
-        {sections.length > 1 && <button className="icon-btn" title="Next section, and its code" aria-label="Next section" data-gr="section-next" onClick={() => step(1)}><Icon name="chevDown" /></button>}
-        <button className="icon-btn" title="Close (Esc)" aria-label="Close section" data-gr="section-panel-close" onClick={() => showSection(null)}><Icon name="x" /></button>
-      </div>
-      <h3>{section.name}</h3>
-      {section.desc && <div className="sec-desc">{section.desc}</div>}
-      <div className="row gap wrap">
-        {allDone
-          ? <span className="sec-all-done" data-gr="sections-done"><Icon name="check" size={14} />{sections.length === 1 ? 'The section is reviewed' : `All ${sections.length} sections reviewed`}</span>
-          : (
-            <button className="btn sm primary" data-gr="section-reviewed-next" title={reviewed ? `Go to the next section you have not reviewed: “${next?.name}”` : next ? `Mark this section reviewed and go to the next one you have not reviewed: “${next.name}”` : 'Mark this section reviewed — it is the last one left'} onClick={reviewedNext}>
-              <Icon name={reviewed ? 'arrowDown' : 'check'} size={14} />{reviewed ? 'Next unreviewed' : next ? 'Reviewed, next' : 'Reviewed, finish'}
-            </button>
-          )}
-        <label className={'viewed-box' + (reviewed ? ' on' : '')}><input type="checkbox" name="gr-field" checked={reviewed} onChange={() => void toggle(section.id)} data-gr="section-reviewed" /> Reviewed</label>
-        <button className="btn sm" data-gr="section-comment" onClick={() => set({ composer: k })}><Icon name="comment" size={14} /> Comment</button>
-      </div>
-      <CommentSlot anchor={{ kind: 'section', sectionId: section.id }} k={k} />
-      {section.what && <Md text={section.what} />}
-      <Diagram section={section} />
-      <div className="sec-panel-files">
-        <div className="side-title">{plural(section.files.length, 'file')}</div>
-        {section.files.map((p) => {
-          const f = files?.find((x) => x.path === p)
-          return (
-            <button key={p} className={'tree-row leaf' + (p === here ? ' here' : '') + (f ? '' : ' gone')} disabled={!f} aria-current={p === here ? 'true' : undefined} title={f ? p : `${p} — no longer part of this comparison`} data-gr-panel-file={p} onClick={() => focusAnchor({ kind: 'file', file: p }, { nav: true, top: true })}>
-              <FileIcon path={p} /><span className="tree-name">{baseName(p)}</span>
-              {f?.viewed === 'viewed' && <Icon name="check" size={12} className="tree-viewed" />}
-              {f && <DiffStat add={f.add} del={f.del} />}
-            </button>
-          )
-        })}
-      </div>
-    </aside>
   )
 }
 function Diagram({ section }: { section: Section }) {
@@ -697,22 +610,17 @@ function useFiles(loaded: LoadedReview) {
 /** Where the tree panel is. It is the bird's-eye view of the change, on the far right:
  *  a column of its own wherever it has room (always while the code has the window to
  *  itself; beside a Guide on a wide window, or when the reviewer pinned it), and otherwise
- *  folded, to be opened over the Code pane when it is asked for. `forSection`: with the
- *  Guide pane closed, an open walkthrough section sits in its place on a window that has
- *  no room for code, section and tree (as it did while the tree was beside the code). */
-function useTreePlace(): { room: boolean; column: boolean; over: boolean; forSection: boolean; canPin: boolean } {
+ *  folded, to be opened over the files when it is asked for. */
+function useTreePlace(): { room: boolean; column: boolean; over: boolean; canPin: boolean } {
   const guide = useStore((s) => s.guide != null)
   const panelOpen = useStore((s) => s.panelOpen)
   const pinned = useStore((s) => s.treePinned)
   const treeOver = useStore((s) => s.treeOver)
-  const section = useStore((s) => Boolean(s.sectionPanel && s.loaded?.state.walkthrough?.sections.some((x) => x.id === s.sectionPanel)))
   const medium = useWide(760)
   const big = useWide(TREE_BESIDE_GUIDE)
-  const widest = useWide(1600)
-  const forSection = section && !guide && medium && !widest
   const room = medium && (!guide || big || pinned)
-  const column = panelOpen && room && !forSection
-  return { room, column, over: treeOver && !column, forSection, canPin: guide && medium && !big }
+  const column = panelOpen && room
+  return { room, column, over: treeOver && !column, canPin: guide && medium && !big }
 }
 
 /** the last "open the tree at this folder" that the tree panel carried out */
@@ -720,8 +628,8 @@ let shownAt = 0
 /** The tree panel: the changed files as a tree (or a list, or grouped by walkthrough
  *  section), with the filter. It marks the file under the reviewer's eyes and the files of
  *  the pick. A click on a file shows it among all the files. `over`: it has no column of
- *  its own and lies over the Code pane until a file is clicked in it, a pick is made, Esc,
- *  or a click elsewhere. */
+ *  its own and lies over the files (under the Code pane's toolbar and path bar, which stay
+ *  in reach) until a file is clicked in it, a pick is made, Esc, or a click elsewhere. */
 function TreePanel({ loaded, over }: { loaded: LoadedReview; over: boolean }) {
   const F = useFiles(loaded)
   const filters = useStore((s) => s.filters)
@@ -900,9 +808,8 @@ function FileList({ files, counts }: { files: FileDiff[]; counts: Map<string, nu
 }
 
 /** What the Code pane holds: the diff. On top its toolbar, then the path bar with what is
- *  being shown; under them the files, and (on a wide pane) an open walkthrough section
- *  beside them. The column of files is the Code pane's scroller: every jump to code moves
- *  it, and nothing else.
+ *  being shown; under them the files. The column of files is the Code pane's scroller:
+ *  every jump to code moves it, and nothing else.
  *  Beside a Guide the pane is narrowed: to the pick's code, or, while nothing is picked, to
  *  the list of changed files; "Show all files", a click in the tree or a jump elsewhere
  *  leaves the narrowing. With the Guide pane closed it shows all the files. A file's diff
@@ -928,7 +835,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   const place = useTreePlace()
   // With the Guide pane closed the code and the tree have the window, and what fits is
   // decided by the window, as it was. Beside a Guide it is decided by the pane's own width.
-  const win = { medium: useWide(760), roomy: useWide(900), wide: useWide(1100), fits: useWide(SPLIT_BESIDE_SECTION) }
+  const win = { roomy: useWide(900), wide: useWide(1100) }
   const root = useRef<HTMLDivElement>(null)
   const width = usePaneWidth(root, CODE_STEPS)
   const scroll = useKeptScroll<HTMLDivElement>(shown)
@@ -940,27 +847,16 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   const since = loaded.since
   useEffect(() => { if (eff !== mode) set({ diffMode: eff }) }, [eff, mode, set])
 
-  const secPanelId = useStore((s) => s.sectionPanel)
   const reviewed = useStore((s) => s.reviewedSections)
-  const secPanel = Boolean(secPanelId && wt?.sections.some((s) => s.id === secPanelId))
-  // An open section is a column beside the files where there is room for it: a window
-  // from 1100px with the Guide pane closed (up to 1600px it then takes the tree's place),
-  // a Code pane from 1100px beside a Guide. Below that it is a drawer over the code with
-  // the Guide pane closed; beside a Guide, where a drawer would leave a strip of the code
-  // the section is about, it sits on top of the files.
-  const secCol = guideBeside ? width >= 1100 : win.wide
-  const secOnTop = secPanel && guideBeside && !secCol
   const toggleTree = (): void => {
     const hold = holdPlaces()
-    if (place.forSection) { showSection(null); set({ panelOpen: true }) }
-    else if (place.room) set({ panelOpen: !panelOpen, treeOver: false })
+    if (place.room) set({ panelOpen: !panelOpen, treeOver: false })
     else set({ treeOver: !treeOver })
     hold.settle()
   }
-  /** the tree, on show: its column where it has room, else over the code (an open section in its place gives way) */
+  /** the tree, on show: its column where it has room, else over the files */
   const openTree = (): void => {
     const hold = holdPlaces()
-    if (place.forSection) showSection(null)
     useStore.getState().openTree()
     hold.settle()
   }
@@ -978,7 +874,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
     return () => document.removeEventListener('keydown', onKey)
   })
   const treeShown = place.column || place.over
-  const canSplit = guideBeside ? column >= 700 : win.roomy && !(place.forSection && !win.fits)
+  const canSplit = guideBeside ? column >= 700 : win.roomy
   const split = canSplit && (diffView ?? ((guideBeside ? column >= 900 : win.wide) ? 'split' : 'unified')) === 'split'
 
   // What the pane shows: all the files; the pick's only; or the list of changed files.
@@ -1040,8 +936,8 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
         {secNext && (
           <button
             className={'btn sm sec-progress' + (secDone === secCount ? ' done' : '')} style={secStyle(sectionNo(secNext))} data-gr="sections-progress" data-gr-reviewed={secDone} data-gr-sections={secCount}
-            title={`Guided review: go through the walkthrough section by section, marking each Reviewed.\n${secDone === secCount ? `All ${plural(secCount, 'section')} reviewed — opens the first one` : `Opens the first section you have not reviewed, “${secNext.name}”,`} beside the code and takes you to its first file not yet viewed.`}
-            onClick={() => goToSection(secNext.id)}
+            title={`Guided review: go through the walkthrough section by section, marking each Reviewed.\n${secDone === secCount ? `All ${plural(secCount, 'section')} reviewed — opens the first one` : `Opens the first section you have not reviewed, “${secNext.name}”,`} in the Walkthrough and shows its files, at the first one not yet viewed.`}
+            onClick={() => openSection(secNext.id)}
           >
             {secDone === secCount ? <Icon name="check" size={14} /> : <span className="sec-dot" />}<span><strong>{secDone}</strong> / {plural(secCount, 'section')}</span>
           </button>
@@ -1050,7 +946,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
           {(close) => (
             <>
               <div className="pop-head">Diff view</div>
-              <MenuItem checked={split} disabled={!canSplit} title={canSplit ? undefined : guideBeside ? 'Not enough room beside the Guide — drag the divider, or close the Guide pane, to split the diff' : win.roomy ? 'Not enough room beside the section — close it to split the diff' : undefined} onClick={() => { const hold = holdCodePlace(); setDiffView('split'); hold.settle(); close() }}>Split</MenuItem>
+              <MenuItem checked={split} disabled={!canSplit} title={canSplit || !guideBeside ? undefined : 'Not enough room beside the Guide — drag the divider, or close the Guide pane, to split the diff'} onClick={() => { const hold = holdCodePlace(); setDiffView('split'); hold.settle(); close() }}>Split</MenuItem>
               <MenuItem checked={!split} onClick={() => { if (canSplit) { const hold = holdCodePlace(); setDiffView('unified'); hold.settle() } close() }}>Unified</MenuItem>
               <label className="menu-item" title="Leave out changes that only alter whitespace"><span className="menu-check"><input type="checkbox" name="gr-field" data-gr="hide-whitespace" checked={Boolean(view.ignoreWhitespace)} onChange={(e) => { void setView({ ignoreWhitespace: e.target.checked }); close() }} /></span>Hide whitespace</label>
               <div className="pop-head">Tree panel</div>
@@ -1062,10 +958,10 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
             </>
           )}
         </Menu>
-        <button className="btn sm icon tree-toggle" title={treeShown ? 'Hide the tree panel' : place.forSection ? 'Show the tree panel (closes the section beside the code)' : place.room ? 'Show the tree panel' : 'Show the tree panel, over the code'} aria-label="Toggle the tree panel" aria-pressed={treeShown} data-gr="tree-toggle" onClick={toggleTree}><Icon name="sidebar" /></button>
+        <button className="btn sm icon tree-toggle" title={treeShown ? 'Hide the tree panel' : place.room ? 'Show the tree panel' : 'Show the tree panel, over the files'} aria-label="Toggle the tree panel" aria-pressed={treeShown} data-gr="tree-toggle" onClick={toggleTree}><Icon name="sidebar" /></button>
       </div>
       <div className="code-where" data-gr="code-where">
-        <PathBar sections={sections} onDir={(dir) => { if (place.forSection) showSection(null); useStore.getState().revealDir(dir) }} />
+        <PathBar sections={sections} onDir={(dir) => useStore.getState().revealDir(dir)} />
         {show === 'all' && !commitView && visible.length < kept.length && (
           <span className="narrowing" data-gr="filter-note">
             <span className="muted">Filtered: {visible.length} of {plural(kept.length, 'file')}</span>
@@ -1081,18 +977,19 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
           <button className="btn sm" onClick={() => void setView({ commit: undefined })}>Show all changes</button>
         </div>
       )}
-      <div className={'files-layout' + (secPanel ? ' with-sec' : '') + (secCol ? ' sec-col' : secOnTop ? ' sec-top' : '')}>
-        <div className="code-scroll" data-gr-scroll="code" data-gr-show={show} ref={scroll.ref} onScroll={scroll.onScroll}>
+      <div className="files-layout">
+        <div className="code-scroll" data-gr-scroll="code" data-gr-show={show} tabIndex={-1} ref={scroll.ref} onScroll={scroll.onScroll}>
         {show === 'list' && <FileList files={F.groups.flatMap((g) => g.files)} counts={F.counts} />}
         <div className="files-list" ref={list} hidden={show === 'list'}>
           {show === 'all' && kept.length === 0 && <div className="blankslate"><h3>No changes</h3><p className="muted">The two sides of this comparison are identical.</p></div>}
           {show === 'all' && kept.length > 0 && visible.length === 0 && <div className="blankslate"><h3>No files match</h3><p className="muted">Change the filter or the “{modeLabel}” view.</p></div>}
+          {show === 'pick' && to?.files.length === 0 && <div className="blankslate"><h3>No code to show</h3><p className="muted">None of the files of {to.label.replace(/ \(.*$/, '')} are part of this comparison any more.</p></div>}
           {groups.map((g) => (
             <div key={g.section?.id ?? '-'} className={'file-group' + (bySection && g.section ? ' sec' : '')} style={bySection && g.section ? secStyle(sectionNo(g.section)) : undefined} hidden={!g.files.some(on)}>
               {bySection && (g.section
                 ? <SectionHeader section={g.section} files={g.files} no={sectionNo(g.section)} />
                 : <div className="sec-head plain" id="gr-loose"><h3>Not in the walkthrough</h3><span className="muted small">{plural(g.files.length, 'file')}</span></div>)}
-              {g.files.map((f) => (drawn.current.has(f.path) ? <FileBox key={f.path} file={f} split={split} hidden={!on(f)} whitespaceOnly={F.wsPaths.has(f.path)} section={sectionOf.get(f.path)} sectionNo={sections.get(f.path)?.no} grouped={bySection} note={sectionOf.get(f.path)?.plainNotes?.[f.path]} /> : null))}
+              {g.files.map((f) => (drawn.current.has(f.path) ? <FileBox key={f.path} file={f} split={split} hidden={!on(f)} order={show === 'pick' && to?.ordered ? to.files.indexOf(f.path) : undefined} whitespaceOnly={F.wsPaths.has(f.path)} section={sectionOf.get(f.path)} sectionNo={sections.get(f.path)?.no} grouped={bySection} note={sectionOf.get(f.path)?.plainNotes?.[f.path]} /> : null))}
             </div>
           ))}
           {show === 'all' && filters.showExcluded && excluded.length > 0 && (
@@ -1109,7 +1006,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
           </div>
         )}
         </div>
-        {secPanel && <SectionPanel sections={wt?.sections ?? []} />}
+        {place.over && <TreePanel loaded={loaded} over />}
       </div>
     </div>
   )
@@ -1118,7 +1015,8 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
 /** A link to code, as a chip. In a Guide it is a pick: the Code pane is narrowed to it, and the chip is marked while it is the pick. */
 function CodeChip({ target, children, title, hook, disabled }: { target: FocusTarget | null; children: ReactNode; title?: string; hook?: string; disabled?: boolean }) {
   const link = usePickLink(target)
-  return <button className={'ref-chip mono link-chip' + (link.picked ? ' picked' : '')} data-gr={hook} title={title} disabled={disabled || !target} aria-pressed={link.from ? link.picked : undefined} onClick={() => target && focusAnchor(target, { from: link.from })}>{children}</button>
+  const code = target != null && (target.kind === 'file' || target.kind === 'diff')
+  return <button className={'ref-chip mono link-chip' + (link.picked ? ' picked' : '')} data-gr={hook} title={title} disabled={disabled || !target} aria-pressed={link.from ? link.picked : undefined} data-gr-pickable={link.from && link.from !== 'walkthrough' && code && !disabled ? '' : undefined} onClick={() => target && focusAnchor(target, { from: link.from })}>{children}</button>
 }
 
 // ── Conversation ──────────────────────────────────────────────
@@ -1340,63 +1238,141 @@ function FactList({ loaded }: { loaded: LoadedReview }) {
   )
 }
 
-function Description({ loaded }: { loaded: LoadedReview }) {
+/** The Walkthrough Guide: what Claude Code says this change is, as one list. On top the
+ *  summary, with the effort line and the fact check; then every section as a row, in its
+ *  colour, with its files and its Reviewed tick. A section is opened in place, under its
+ *  row, and the one that was open closes: the open section is this Guide's pick, and the
+ *  Code pane is narrowed to its files. "Reviewed, next" ticks it and opens the next one
+ *  not yet reviewed, so the whole walkthrough can be gone through from here. */
+function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
   const wt = loaded.state.walkthrough
-  const sectionOpen = useStore((s) => s.sectionOpen)
   const reviewed = useStore((s) => s.reviewedSections)
-  const { request, setSectionOpen, showGuide, toggleSectionReviewed } = useStore.getState()
+  const openId = useStore((s) => { const p = s.picks.walkthrough; return p && 'section' in p ? p.section : null })
+  const pickedFile = useStore((s) => { const p = s.picks.walkthrough; return p && 'section' in p ? p.file ?? null : null })
+  const here = useStore((s) => s.currentFile)
+  const { request, showGuide, toggleSectionReviewed, set } = useStore.getState()
   const [steer, setSteer] = useState('')
+  const stepped = useRef(0)
+  const list = useRef<HTMLDivElement>(null)
   const asking = loaded.state.requests.some((r) => r.kind === 'walkthrough' && isOpen(r))
   const it = loaded.state.iterations.at(-1)
   const ask = (update: boolean): void => { void request({ kind: 'walkthrough', text: steer.trim() || undefined, update }).then((r) => { if (r) setSteer('') }) }
+  // a section opened from elsewhere (its chip on a file, a link, the session) is brought into view
+  useEffect(() => {
+    if (!openId) return
+    const frame = window.requestAnimationFrame(() => { const row = list.current?.querySelector(`[data-gr-section="${cssq(openId)}"] .sec-item-head`); if (row) showIfOut(row) })
+    return () => window.cancelAnimationFrame(frame)
+  }, [openId])
   if (!wt) {
     return (
-      <Box author="agent" label="has not written a walkthrough yet" cls="description">
+      <div className="walk" data-gr="walkthrough">
+        <div className="walk-by muted small"><span className="avatar agent sm" aria-hidden="true">C</span> Claude has not written a walkthrough yet</div>
         <div data-gr="summary" className="muted">The diff in the Code pane comes straight from git.</div>
         <div className="row gap wrap ask-row">
           <input name="gr-field" className="grow" value={steer} placeholder="What should it focus on? (optional)" onChange={(e) => setSteer(e.target.value)} aria-label="Steer" />
           <button className="btn sm primary" data-gr="generate" disabled={asking || Boolean(loaded.refMissing)} onClick={() => ask(false)}>Ask Claude Code for a walkthrough</button>
         </div>
         <AwayHint />
+        <EffortLine loaded={loaded} />
         <FactList loaded={loaded} />
         <CommentSlot anchor={{ kind: 'summary' }} k="summary" />
-      </Box>
+      </div>
     )
   }
+  const sections = wt.sections
+  const done = sections.filter((s) => reviewed.includes(s.id)).length
+  const allDone = done === sections.length
+  const topOf = (row: Element): number => { const sc = row.closest('[data-gr-scroll]'); return sc ? row.getBoundingClientRect().top - sc.getBoundingClientRect().top : 0 }
+  /** Open a section in place (null: close the open one, which leaves the pick), keeping the
+   *  row `id` at `top` px below the top of the pane: the section that was open above it
+   *  closes, and the row would move under the reviewer's pointer otherwise. */
+  const open = (id: string | null, keep: string, top: number, file?: string): void => {
+    if (id == null) useStore.getState().clearPick('walkthrough')
+    else openSection(id, { file })
+    const put = (): void => {
+      const row = list.current?.querySelector(`[data-gr-section="${cssq(keep)}"]`)
+      const sc = row?.closest('[data-gr-scroll]')
+      if (row && sc) sc.scrollBy({ top: topOf(row) - top })
+    }
+    window.requestAnimationFrame(put)
+    window.setTimeout(put, 120)       // once more, after late layout
+  }
   return (
-    <Box author="agent" label={`wrote the walkthrough${loaded.state.effortDone?.read ? ` on ${loaded.state.effortDone.read.model || 'a model that was not recorded'}` : ''}`} at={it?.at} cls="description">
+    <div className="walk" data-gr="walkthrough">
       {loaded.walkthroughStale && (
         <div className="flash-banner warn" data-gr="stale">
           <span className="grow">The code changed since this walkthrough.</span>
           <button className="btn sm" data-gr="update" disabled={asking} onClick={() => ask(true)}>Ask Claude Code to update it</button>
         </div>
       )}
+      <div className="walk-by muted small"><span className="avatar agent sm" aria-hidden="true">C</span> Claude wrote the walkthrough{loaded.state.effortDone?.read ? ` on ${loaded.state.effortDone.read.model || 'a model that was not recorded'}` : ''}{it?.at ? ` · ${ago(it.at)}` : ''}</div>
       <div data-gr="summary" className="summary-wrap"><Md text={wt.summary || '_No summary._'} /><CommentButton k="summary" title="Comment on the summary" /></div>
       <CommentSlot anchor={{ kind: 'summary' }} k="summary" />
-      <div className="sec-list">
-        {wt.sections.map((s) => {
-          const open = sectionOpen[s.id] ?? false
+      <EffortLine loaded={loaded} />
+      <FactList loaded={loaded} />
+      <div className="walk-count">
+        <span className="side-title">{plural(sections.length, 'section')}</span>
+        <span className={'sec-progress small' + (allDone ? ' done' : '')} data-gr="sections-count" data-gr-reviewed={done} data-gr-sections={sections.length}>{allDone && <Icon name="check" size={14} />}<strong>{done}</strong> / {sections.length} reviewed</span>
+      </div>
+      <div className="sec-list" ref={list}>
+        {sections.map((s, no) => {
+          const isOpen = s.id === openId
+          const ticked = reviewed.includes(s.id)
           const k = anchorKey({ kind: 'section', sectionId: s.id })
-          const done = reviewed.includes(s.id)
+          // the next section still to review: after this one, then round to the earliest (the list
+          // of reviewed ids can hold sections of an earlier walkthrough, so it is never counted)
+          const next = [...sections.slice(no + 1), ...sections.slice(0, no)].find((x) => !reviewed.includes(x.id))
+          const reviewedNext = (row: Element | null): void => {
+            // the second click of a double click would tick the section just arrived at, unread
+            if (Date.now() - stepped.current < 500) return
+            // the next row opens where this one's head was, when that was in view; else at the top of the pane
+            const head = row ? topOf(row) : 8
+            const sc = row?.closest('[data-gr-scroll]')
+            const at = sc && head >= 0 && head < sc.clientHeight - 120 ? head : 8
+            // never a toggle: on a section already ticked it only moves on
+            void (ticked ? Promise.resolve() : toggleSectionReviewed(s.id)).then(() => {
+              // (they may have moved on by hand while the tick was being saved)
+              const now = useStore.getState().picks.walkthrough
+              if (!next || !now || !('section' in now) || now.section !== s.id) return
+              stepped.current = Date.now()
+              open(next.id, next.id, at)
+            })
+          }
           return (
-            <div key={s.id} className={'sec-item' + (open ? ' open' : '')} style={secStyle(wt.sections.indexOf(s))} data-gr-section={s.id} data-gr-reviewed={done ? 'true' : 'false'}>
+            <div key={s.id} className={'sec-item' + (isOpen ? ' open' : '')} style={secStyle(no)} data-gr-section={s.id} data-gr-reviewed={ticked ? 'true' : 'false'} data-gr-open={isOpen ? 'true' : undefined}>
               <div className="sec-item-head">
-                <button className="sec-toggle" aria-expanded={open} onClick={() => setSectionOpen(s.id, !open)}>
-                  <Icon name={open ? 'chevDown' : 'chevRight'} size={12} /><strong>{s.name}</strong>{s.desc && <span className="muted"> — {s.desc}</span>}
+                <button className="sec-toggle" aria-expanded={isOpen} data-gr-pickable="" title={isOpen ? 'Close this section (the code shows all files again)' : 'Open this section: the code shows its files'} onClick={(e) => { const row = e.currentTarget.closest('.sec-item'); open(isOpen ? null : s.id, s.id, row ? topOf(row) : 0) }}>
+                  <Icon name={isOpen ? 'chevDown' : 'chevRight'} size={12} /><span className="sec-dot" /><strong>{s.name}</strong>{s.desc && <span className="muted"> — {s.desc}</span>}
                 </button>
                 <span className="muted small nowrap">{plural(s.files.length, 'file')}</span>
-                {done && <Icon name="check" size={14} className="tree-viewed" />}
+                {ticked && <span className="sec-tick" role="img" aria-label="Reviewed" title="You marked this section reviewed" data-gr="section-tick"><Icon name="check" size={14} /></span>}
               </div>
-              {open && (
-                <div className="sec-item-body">
+              {isOpen && (
+                <div className="sec-item-body" data-gr="section-panel" data-gr-section-panel={s.id} data-gr-reviewed={ticked ? 'true' : 'false'}>
                   {s.what && <Md text={s.what} />}
                   <Diagram section={s} />
-                  <div className="row gap wrap">
-                    {s.files.map((p) => <CodeChip key={p} target={{ kind: 'file', file: p }}>{p}</CodeChip>)}
+                  <div className="sec-panel-files">
+                    {s.files.map((path) => {
+                      const f = loaded.files.find((x) => x.path === path)
+                      return (
+                        <button key={path} className={'tree-row leaf' + (path === here ? ' here' : '') + (path === pickedFile ? ' picked' : '') + (f ? '' : ' gone')} disabled={!f} aria-current={path === here ? 'true' : undefined} title={f ? `Show ${path}` : `${path} — no longer part of this comparison`} data-gr-panel-file={path} onClick={() => openSection(s.id, { file: path })}>
+                          <FileIcon path={path} /><span className="tree-name">{baseName(path)}{path.includes('/') && <span className="muted small"> {path.slice(0, path.lastIndexOf('/'))}</span>}</span>
+                          {f?.viewed === 'viewed' && <Icon name="check" size={12} className="tree-viewed" />}
+                          {f && <DiffStat add={f.add} del={f.del} />}
+                        </button>
+                      )
+                    })}
                   </div>
-                  <div className="row gap">
-                    <label className={'viewed-box' + (done ? ' on' : '')}><input type="checkbox" name="gr-field" checked={done} onChange={() => void toggleSectionReviewed(s.id)} data-gr="section-reviewed" /> Reviewed</label>
-                    <CommentButton k={k} title="Comment on this section" />
+                  <div className="row gap wrap">
+                    {allDone
+                      ? <span className="sec-all-done" data-gr="sections-done"><Icon name="check" size={14} />{sections.length === 1 ? 'The section is reviewed' : `All ${sections.length} sections reviewed`}</span>
+                      : (
+                        <button className="btn sm primary" data-gr="section-reviewed-next" title={ticked ? `Go to the next section you have not reviewed: “${next?.name}”` : next ? `Mark this section reviewed and open the next one you have not reviewed: “${next.name}”` : 'Mark this section reviewed — it is the last one left'} onClick={(e) => reviewedNext(e.currentTarget.closest('.sec-item'))}>
+                          <Icon name={ticked ? 'arrowDown' : 'check'} size={14} />{ticked ? 'Next unreviewed' : next ? 'Reviewed, next' : 'Reviewed, finish'}
+                        </button>
+                      )}
+                    <label className={'viewed-box' + (ticked ? ' on' : '')}><input type="checkbox" name="gr-field" checked={ticked} onChange={() => void toggleSectionReviewed(s.id)} data-gr="section-reviewed" /> Reviewed</label>
+                    <button className="btn sm" data-gr="section-comment" onClick={() => set({ composer: k })}><Icon name="comment" size={14} /> Comment</button>
                   </div>
                   <CommentSlot anchor={{ kind: 'section', sectionId: s.id }} k={k} />
                 </div>
@@ -1406,14 +1382,13 @@ function Description({ loaded }: { loaded: LoadedReview }) {
         })}
       </div>
       {wt.planMap && planSummary(wt.planMap) && <div className="plan-line"><Icon name="book" size={14} /> <button className="link" onClick={() => showGuide('spec')}>Spec check</button>: {planSummary(wt.planMap)}</div>}
-      <FactList loaded={loaded} />
       <div className="desc-foot muted small">
         Walkthrough #{it?.n ?? 1} · written at <span className="mono">{short(loaded.state.reviewedAtSha)}</span>
         <span className="grow" />
         <input name="gr-field" value={steer} placeholder="Steer (optional)" onChange={(e) => setSteer(e.target.value)} aria-label="Steer" />
         <button className="btn sm" data-gr="generate" disabled={asking} onClick={() => ask(false)}>Ask for a fresh walkthrough</button>
       </div>
-    </Box>
+    </div>
   )
 }
 
@@ -1486,7 +1461,6 @@ function ConversationTab({ loaded }: { loaded: LoadedReview }) {
   return (
     <div className="conv">
       <div className="timeline">
-        <Description loaded={loaded} />
         <Decisions loaded={loaded} />
         {entries.map((e) => <div key={e.key}>{e.node}</div>)}
         <div className="tl-item user compose">
@@ -1692,7 +1666,11 @@ function SpecTab({ loaded }: { loaded: LoadedReview }) {
 
 // ── the workspace ─────────────────────────────────────────────
 /** How much of the workspace's width a Guide starts with, in percent: a diagram needs more room than text. */
-const GUIDE_START: Record<Guide, number> = { visual: 56, conversation: 40, commits: 40, spec: 40 }
+const GUIDE_START: Record<Guide, number> = { walkthrough: 40, visual: 56, conversation: 40, commits: 40, spec: 40 }
+/** The window width from which the Guide's share is reckoned of what the tree panel would
+ *  leave, whether the tree is on show or folded: showing it then takes room from the code
+ *  only, and a diagram is not laid out anew for it. */
+const TREE_RESERVED = 1500
 /** Neither pane is made narrower than this beside the other (px); `bar` is the divider between them. */
 const PANE_MIN = { guide: 320, code: 420, bar: 6 }
 /** the widths at which what a Guide holds is laid out for a narrower pane */
@@ -1710,7 +1688,7 @@ function GuideBody({ id, shown, children }: { id: Guide; shown: boolean; childre
     return () => window.cancelAnimationFrame(frame)
   }, [])       // eslint-disable-line react-hooks/exhaustive-deps
   // (what is drawn in here knows it is in a Guide: a jump to code from it is a pick)
-  return <div className="guide-scroll" role="tabpanel" data-gr-scroll={id} data-gr-guide={id} hidden={!shown} ref={scroll.ref} onScroll={scroll.onScroll}><GuideCtx.Provider value={id}>{children}</GuideCtx.Provider></div>
+  return <div className="guide-scroll" role="tabpanel" data-gr-scroll={id} data-gr-guide={id} hidden={!shown} tabIndex={-1} ref={scroll.ref} onScroll={scroll.onScroll}><GuideCtx.Provider value={id}>{children}</GuideCtx.Provider></div>
 }
 
 /** The divider between the Guide pane and the Code pane: drag it (or use the arrow keys)
@@ -1784,8 +1762,11 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
   // Guides are mounted when first shown, and kept
   const [seen, setSeen] = useState<Guide[]>(guide ? [guide] : [])
   if (guide && !seen.includes(guide)) setSeen([...seen, guide])
-  // where the reviewer dragged the divider to, as the Guide pane's share of the room; until then each Guide starts at its own width
-  const [dragged, setDragged] = useState<number | null>(null)
+  // where the reviewer dragged the divider to with this Guide on show, as the Guide pane's
+  // share of the room (kept for all reviews); until then each Guide starts at its own width
+  const widths = useStore((s) => s.guideWidths)
+  const reserved = useWide(TREE_RESERVED)
+  const pinned = useStore((s) => s.treePinned)
   const place = useTreePlace()
   const treeWidth = useStore((s) => s.treeWidth)
   const guideShown = guide != null && (twoFit || front === 'guide')
@@ -1797,9 +1778,9 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
   // (Its share is taken of what the tree leaves at its usual width: resizing the tree
   // trades room with the code, as hiding it does. Only the least the code is left with
   // counts the tree as wide as it is.)
-  const tree = both && place.room ? treeWidthLimits.def + TREE_PAD : 0
+  const tree = both && (reserved || pinned) ? treeWidthLimits.def + TREE_PAD : 0
   const treeNow = both && place.column ? treeWidth + TREE_PAD : 0
-  const pct = dragged ?? GUIDE_START[guide ?? 'conversation']
+  const pct = (guide && widths[guide]) ?? GUIDE_START[guide ?? 'conversation']
   const row = <GuideRow loaded={loaded} onePane={!twoFit} />
   return (
     <main className={'workspace' + (both ? ' both' : '')} ref={frame} style={{ '--guide-w': pct, '--tree-room': `${tree}px`, '--tree-now': `${treeNow}px` } as React.CSSProperties} data-gr="workspace">
@@ -1807,18 +1788,18 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
         {guideShown && row}
         {seen.map((g) => (
           <GuideBody key={g} id={g} shown={guideShown && g === guide}>
-            {g === 'conversation' ? <ConversationTab loaded={loaded} /> : g === 'commits' ? <CommitsTab loaded={loaded} /> : g === 'spec' ? <SpecTab loaded={loaded} /> : <VisualTab loaded={loaded} />}
+            {g === 'walkthrough' ? <WalkthroughGuide loaded={loaded} /> : g === 'conversation' ? <ConversationTab loaded={loaded} /> : g === 'commits' ? <CommitsTab loaded={loaded} /> : g === 'spec' ? <SpecTab loaded={loaded} /> : <VisualTab loaded={loaded} />}
           </GuideBody>
         ))}
         <BackBar pane="guide" />
       </section>
-      {both && <PaneDivider frame={frame} pct={pct} tree={tree} treeNow={treeNow} onChange={setDragged} />}
+      {both && <PaneDivider frame={frame} pct={pct} tree={tree} treeNow={treeNow} onChange={(v) => { if (guide) useStore.getState().setGuideWidth(guide, v) }} />}
       <section className="code-pane" hidden={!codeShown} aria-label="Code" data-gr-pane="code">
         {!guideShown && row}
         <FilesTab loaded={loaded} shown={codeShown} />
         <BackBar pane="code" />
       </section>
-      {codeShown && (place.column || place.over) && <TreePanel loaded={loaded} over={!place.column} />}
+      {codeShown && place.column && <TreePanel loaded={loaded} over={false} />}
     </main>
   )
 }
@@ -1839,7 +1820,38 @@ export function Review() {
       if (e.key === 'c' && hoveredLine()) {
         e.preventDefault()
         st.set({ composer: hoveredLine() })
-      } else if (e.key === 'Escape' && st.composer) st.set({ composer: null })
+      } else if (e.key === 'w') {
+        // the keys move to the other pane: its scroller takes the focus, so the arrow keys,
+        // Page Down and Space scroll it. From nowhere they go to the Guide, when one is open.
+        e.preventDefault()
+        const inGuide = document.activeElement?.closest('[data-gr-pane="guide"]') != null
+        const toCode = st.guide == null || inGuide
+        if (toCode) st.revealCode()
+        else st.set({ front: 'guide' })
+        window.setTimeout(() => document.querySelector<HTMLElement>(toCode ? '[data-gr-scroll="code"]' : `[data-gr-scroll="${st.guide}"]`)?.focus({ preventScroll: true }), 40)
+      } else if ((e.key === 'j' || e.key === 'k') && st.guide) {
+        // the next (j) or the previous (k) thing to pick in the Guide on show: a box of the
+        // diagram with code, in reading order; a section; a link to code in a thread
+        const sc = document.querySelector<HTMLElement>(`[data-gr-scroll="${st.guide}"]`)
+        const drawn = [...(sc?.querySelectorAll<HTMLElement>('[data-gr-pickable]') ?? [])].filter((el) => el.getClientRects().length > 0)
+        if (!drawn.length) return
+        e.preventDefault()
+        const place = (el: Element): [number, number] => { const r = el.getBoundingClientRect(); return [Math.round(r.top / 24), r.left] }
+        const els = st.guide === 'visual' ? drawn.sort((a, b) => place(a)[0] - place(b)[0] || place(a)[1] - place(b)[1]) : drawn
+        const picked = els.map((el, i) => (el.matches('[data-gr-pick], .picked, [aria-expanded="true"]') ? i : -1)).filter((i) => i >= 0)
+        const from = e.key === 'j' ? (picked.length ? picked[picked.length - 1] : -1) : (picked.length ? picked[0] : els.length)
+        const next = els[from + (e.key === 'j' ? 1 : -1)]
+        if (!next) return
+        next.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        // (a pick made with the keys is brought into view: there is no pointer on it)
+        window.setTimeout(() => showIfOut(next), 160)
+      } else if (e.key === 'Escape') {
+        // what is open closes first: a comment being written, the tree over the files, a menu
+        // or a card (which close themselves); with nothing open, the Guide's pick is cleared
+        if (st.composer) st.set({ composer: null })
+        else if (st.treeOver) st.set({ treeOver: false })
+        else if (!document.querySelector('.menu-pop:not([hidden]), [data-gr="visual-card"]') && st.guide && st.picks[st.guide]) { e.preventDefault(); st.clearPick(st.guide) }
+      }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)

@@ -17,8 +17,10 @@ export const GuideCtx = createContext<Guide | null>(null)
 export function usePickLink(t: FocusTarget | null): { from: Guide | null; picked: boolean } {
   const from = useContext(GuideCtx)
   const picked = useStore((s) => {
-    const p = s.pick
-    if (!from || !t || !p || !('file' in p) || (t.kind !== 'file' && t.kind !== 'diff') || p.file !== t.file) return false
+    // (each Guide keeps its own pick outlined, whatever was picked elsewhere since)
+    // (in the Walkthrough, whose own pick is the open section, a link is marked while the code follows it)
+    const p = from === 'walkthrough' ? s.pick ?? undefined : from ? s.picks[from] : undefined
+    if (!from || !t || !p || !('file' in p) || 'section' in p || (t.kind !== 'file' && t.kind !== 'diff') || p.file !== t.file) return false
     return t.kind === 'file' ? p.line == null : p.line === t.line && (p.side ?? 'new') === t.side
   })
   return { from, picked }
@@ -117,6 +119,7 @@ const PATHS: Record<string, string> = {
   book: 'M2 2.75h5a1.5 1.5 0 011.5 1.5v9A1.5 1.5 0 007 11.75H2zM14 2.75H9.5A1.5 1.5 0 008 4.25v9a1.5 1.5 0 011.5-1.5H14z',
   arrowUp: 'M8 13V3M4 7l4-4 4 4', arrowDown: 'M8 3v10M4 9l4 4 4-4', unfold: 'M8 2v4M5.5 4L8 1.5 10.5 4M8 14v-4M5.5 12L8 14.5l2.5-2.5M2 8h12',
   graph: 'M2.5 2.5h4v3h-4zM9.5 10.5h4v3h-4zM2.5 10.5h4v3h-4zM4.5 5.5v5M6.5 4h5v6.5',
+  list: 'M5.5 4h8M5.5 8h8M5.5 12h8M2.5 4h.01M2.5 8h.01M2.5 12h.01',
   expand: 'M9.5 2.5h4v4M13.5 2.5L9 7M6.5 13.5h-4v-4M2.5 13.5L7 9', columns: 'M1.75 2.75h12.5v10.5H1.75zM8 2.75v10.5',
   pin: 'M9.5 1.75l4.75 4.75-2.25.75-2.5 2.5.25 3-1.25 1.25-3-3-3.25 3.25M5.5 10.5l-3-3L3.75 6.25l3 .25 2.5-2.5z',
   arrowLeft: 'M13 8H3M7 4L3 8l4 4', repo: 'M3 1.75h10v12.5H3zM3 11h10M6 4.5h4', circle: 'M8 2.5a5.5 5.5 0 100 11 5.5 5.5 0 000-11z',

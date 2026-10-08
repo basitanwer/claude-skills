@@ -1,5 +1,5 @@
 import type { ChangedRange, FocusTarget, TourStop } from '@shared/types'
-import { typing, useStore } from './store'
+import { typing, useStore, type How } from './store'
 import { baseName, cssq, narrowingOf, type CodePick, type Guide, type Pane } from './util'
 
 // ── the panes ─────────────────────────────────────────────────
@@ -64,7 +64,7 @@ function find(sels: string[], within: ParentNode = document): HTMLElement | null
   return null
 }
 
-const PANE_NAMES: Record<Pane, string> = { code: 'the code', conversation: 'Conversation', commits: 'Commits', spec: 'Spec & plan', visual: 'Visualize' }
+const PANE_NAMES: Record<Pane, string> = { code: 'the code', walkthrough: 'Walkthrough', conversation: 'Conversation', commits: 'Commits', spec: 'Spec & plan', visual: 'Visualize' }
 type Spot = NonNullable<ReturnType<typeof useStore.getState>['returnTo']>
 /** The reviewer's place in a pane: how far it is scrolled and, in the Code pane, the file
  *  under the top of the pane with how far down the pane it starts. Null when the pane is
@@ -111,11 +111,9 @@ function flash(el: HTMLElement): void {
   window.setTimeout(() => el.classList.remove('gr-flash'), 1000)
 }
 
-/** The pane a target is shown in. Code is in the Code pane; the summary and the sections
- *  are in the Conversation. A section asked for while the Guide pane is closed is shown
- *  beside the code instead (see jump). */
+/** The pane a target is shown in. Code is in the Code pane; the summary and the sections are in the Walkthrough. */
 function paneOf(t: FocusTarget): Pane {
-  return t.kind === 'file' || t.kind === 'diff' || (t.kind === 'section' && useStore.getState().guide == null) ? 'code' : 'conversation'
+  return t.kind === 'file' || t.kind === 'diff' ? 'code' : 'walkthrough'
 }
 /** How a jump to code treats the narrowing of the Code pane. */
 interface JumpOpts {
@@ -131,10 +129,13 @@ interface JumpOpts {
   all?: boolean
   /** the target is the pick's own code: the narrowing is set already, and stays */
   picked?: boolean
+  /** the session asked for it, not the reviewer: a Guide it brings on show is not a step of the trail */
+  session?: boolean
 }
 /** Take one pane to a target and flash it: a jump. Code is shown in the Code pane and the
  *  Guide beside it does not move; the summary and the sections are shown in the
- *  Conversation, which becomes the Guide on show. Whatever would hide the target gives
+ *  Walkthrough, which becomes the Guide on show (a section is opened there, and is then
+ *  that Guide's pick). Whatever would hide the target gives
  *  way first: a Code pane folded away comes back, a narrowing the target is not part of is
  *  left for all the files, filters that hide the file are lifted, a collapsed file is
  *  opened, and a diff held back as large or generated is loaded.
@@ -144,20 +145,22 @@ export function focusAnchor(t: FocusTarget, opts: JumpOpts = {}): void {
   const st = useStore.getState()
   // from a Guide to code: a pick
   if (opts.from && (t.kind === 'file' || t.kind === 'diff')) {
-    showPick(t.kind === 'file' ? { file: t.file } : { file: t.file, side: t.side, line: t.line, end: opts.end })
+    showPick(t.kind === 'file' ? { file: t.file } : { file: t.file, side: t.side, line: t.line, end: opts.end }, { from: opts.from })
     return
   }
   // during a tour the way back leads to where the tour started, from whichever stop
   jump(t, opts.nav ? null : st.tour?.origin ?? whereAmI(paneOf(t)), opts)
 }
 /** Make something the pick and show its code: the Code pane is narrowed to it, taken to its
- *  lines and flashes them, and the Guide it was picked in does not move. A step of the trail
- *  (`silent`: the address is being followed, as on Back or when a review opens). A pick is
- *  the reviewer's own aim, so it leaves no "Back to …" pill. Returns false when it has no
- *  code to show (a box that is not code, something that is gone): nothing changes then,
- *  except that an address naming such a pick is followed to no pick. */
-export function showPick(pick: CodePick | null, opts: { silent?: boolean } = {}): boolean {
+ *  lines and flashes them, and the Guide it was picked in (`from`; a box and a section say
+ *  theirs) does not move and keeps it outlined. A step of the trail unless `how` says
+ *  otherwise (see How). A pick is the reviewer's own aim, so it leaves no "Back to …" pill.
+ *  Returns false when it has no code to show (a box that is not code, something that is
+ *  gone): nothing changes then, except that an address naming such a pick is followed to
+ *  no pick. */
+export function showPick(pick: CodePick | null, opts: { from?: Guide | null; how?: How } = {}): boolean {
   const st = useStore.getState()
+  const how = opts.how ?? 'step'
   if (!pick) { st.pickCode(null, opts); return false }
   // While the Code pane shows one commit only, the page has that commit's files, not the
   // comparison's. An address that names both is followed as it is: the commit is shown,
@@ -166,17 +169,34 @@ export function showPick(pick: CodePick | null, opts: { silent?: boolean } = {})
   // shown, then the comparison is loaded and the pick found in it.
   if (st.view.commit) {
     st.pickCode(pick, opts)
-    if (!opts.silent) void st.setView({ commit: undefined }).then(() => { if (!useStore.getState().view.commit) showPick(pick, { silent: true }) })
+    if (how === 'step') void st.setView({ commit: undefined }).then(() => { if (!useStore.getState().view.commit) showPick(pick, { ...opts, how: 'replace' }) })
     return true
   }
   const to = narrowingOf(pick, st.loaded)
-  if (!to) { if (opts.silent) st.pickCode(null, opts); return false }
+  if (!to) { if (how !== 'step') st.pickCode(null, { how: 'replace' }); return false }
   st.pickCode(pick, opts)
   const file = to.file ?? to.files[0]
+  // (a section none of whose files are part of the comparison any more: it is open in the Walkthrough, with no code to show)
+  if (!file) { st.toast(`None of the files of ${to.label.replace(/ \(.*$/, '')} are part of this comparison any more, so there is no code to show for it.`, 'info', undefined, { key: 'section-gone' }); return true }
   if (to.line != null && to.side === 'new') focusLines(file, to.line, to.end ?? to.line, { nav: true, picked: true })
   else if (to.line != null) focusAnchor({ kind: 'diff', file, side: 'old', line: to.line }, { nav: true, picked: true })
   else focusAnchor({ kind: 'file', file }, { nav: true, top: true, picked: true })
   return true
+}
+/** Open a section of the walkthrough: the Walkthrough becomes the Guide on show with that
+ *  section open in place, and the section is its pick, so the Code pane is narrowed to the
+ *  section's files. `file`: the one of them to go to (else the first not yet viewed).
+ *  `keep`: the reviewer is reading that file already (they asked from its header): the
+ *  code stays on the line it shows. */
+export function openSection(id: string, opts: { file?: string; keep?: boolean; how?: How } = {}): void {
+  const st = useStore.getState()
+  if (!st.loaded?.state.walkthrough?.sections.some((s) => s.id === id)) return
+  const how = opts.how ?? 'step'
+  const hold = opts.keep ? holdCodePlace() : null
+  // (the Guide comes on show and the section is picked in one step of the trail: the pick makes it)
+  st.showGuide('walkthrough', how === 'step' ? 'follow' : how)
+  const pick: CodePick = { section: id, ...(opts.file ? { file: opts.file } : {}) }
+  if (hold) { useStore.getState().pickCode(pick, { how }); hold.settle() } else showPick(pick, { how })
 }
 /** Start a tour at one of its stops, remembering where the reviewer was in the code. */
 export function startTour(stops: TourStop[], loop?: boolean, idx = 0): void {
@@ -191,14 +211,6 @@ function jump(t: FocusTarget, origin: Spot | null, opts: JumpOpts = {}): void {
   const st = useStore.getState()
   const loaded = st.loaded
   if (!loaded) return
-  // A section asked for while the Guide pane is closed opens beside the code instead of
-  // opening the Conversation (grouped by section, its header is already in the Code pane).
-  const beside = t.kind === 'section' && st.guide == null
-  if (beside && !(st.filters.bySection && loaded.state.walkthrough)) {
-    showSection(t.sectionId)
-    whenMounted([`[data-gr-section-panel="${cssq(t.sectionId)}"]`], flash)
-    return
-  }
   const to = paneOf(t)
   // The way back is offered once the jump has landed, if it took its pane far. A place in
   // another pane needs none: that pane has not moved (and a Guide swapped for another is
@@ -207,12 +219,9 @@ function jump(t: FocusTarget, origin: Spot | null, opts: JumpOpts = {}): void {
   st.set({ returnTo: null })
   // a commit view shows another diff: targets belong to the whole comparison
   if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, origin, opts)); return }
-  if (beside) {
-    // nothing to show or open
-  } else if (t.kind === 'summary' || t.kind === 'section') {
-    st.showGuide('conversation')
-    if (t.kind === 'section') st.setSectionOpen(t.sectionId, true)
-  } else {
+  if (t.kind === 'summary') st.showGuide('walkthrough', opts.session ? 'replace' : 'step')
+  else if (t.kind === 'section') openSection(t.sectionId, { how: opts.session ? 'replace' : 'step' })
+  else {
     parked = null                     // the Code pane is about to be somewhere else than it was folded away on
     st.revealCode()
     if (st.treeOver) st.set({ treeOver: false })       // (a tree that lies over the code would cover what is being shown)
@@ -459,19 +468,6 @@ export function holdPlaces(): Hold {
   }, spots.length > 0 || guide != null)
 }
 
-/** Open a walkthrough section beside the code (null closes it). Where the panel is a
- *  column of its own, opening or closing it changes the width of the diff (and may hide
- *  the file tree, or turn a split diff into a unified one) and so the height of
- *  everything above: the line under the top of the pane is put back where it was, so
- *  the reviewer does not lose their place. */
-export function showSection(id: string | null): void {
-  const st = useStore.getState()
-  if (st.sectionPanel === id) return
-  const hold = holdCodePlace()
-  st.set({ sectionPanel: id })
-  hold.settle()
-}
-
 /** Show a section's header among the files (the files grouped by section): all the files, at that header. */
 export function showSectionHeader(id: string): void {
   useStore.getState().showAllFiles(true)
@@ -561,22 +557,6 @@ function flashRange(file: string, r: ChangedRange): void {
   }
 }
 
-/** Take the reviewer to a walkthrough section: it opens beside the code, and the code
- *  moves to the first of its files not yet marked Viewed (the first one, when all are).
- *  This is their own step through the walkthrough, so it leaves no "Back to …" pill, and
- *  unlike showSection it does not hold the Code pane where it was: it is meant to move. */
-export function goToSection(id: string): void {
-  const st = useStore.getState()
-  const section = st.loaded?.state.walkthrough?.sections.find((s) => s.id === id)
-  if (!section) return
-  st.set({ sectionPanel: id })
-  // (a file the walkthrough names can have left the comparison since it was written)
-  const files = section.files.flatMap((p) => st.loaded?.files.find((f) => f.path === p || f.oldPath === p) ?? [])
-  const file = files.find((f) => f.viewed !== 'viewed') ?? files[0]
-  if (file) focusAnchor({ kind: 'file', file: file.path }, { nav: true, top: true })
-  else st.toast(`None of the files of “${section.name}” are part of this comparison any more, so there is no code to show for it.`, 'info', undefined, { key: 'section-gone' })
-}
-
 /** The file the reviewer was just taken to, and where its box then was in the Code pane.
  *  A file is not always under the top of the pane after a jump to it (one near the end
  *  of the list cannot be brought up that far; a line is shown in the middle): until the
@@ -621,8 +601,10 @@ function fileAtTop(boxes: HTMLElement[], sc: HTMLElement): HTMLElement | null {
 export function followFiles(list: HTMLElement): () => void {
   const sc = scrollerOf(list)
   if (!sc) return () => { /* not in a pane: nothing to follow */ }
-  // (a file outside the narrowing is kept, hidden: it has no place, and is not one the reviewer can be at)
-  const collect = (): HTMLElement[] => [...list.querySelectorAll<HTMLElement>('[data-gr-file]:not([hidden])')]
+  // (A file outside the narrowing is kept, hidden: it has no place, and is not one the
+  // reviewer can be at. The boxes are taken in the order they are drawn in, which for a
+  // section's files is the walkthrough's order, not the list's.)
+  const collect = (): HTMLElement[] => [...list.querySelectorAll<HTMLElement>('[data-gr-file]:not([hidden])')].sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)
   let boxes = collect()
   let frame = 0
   const read = (): void => {

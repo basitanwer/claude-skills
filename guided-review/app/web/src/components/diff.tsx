@@ -4,7 +4,7 @@ import { api } from '../api'
 import { highlightLine, langForPath } from '../highlight'
 import { pairHunkLines, wordDiffRanges, type CharRange } from '../worddiff'
 import { useStore } from '../store'
-import { showSection } from '../focus'
+import { openSection } from '../focus'
 import { MdFileBody, isMarkdown } from './mdfile'
 import { errText, hunksForMode, plural, secStyle } from '../util'
 import { CopyButton, DiffStat, Icon, Md, Menu, MenuItem } from './common'
@@ -423,11 +423,13 @@ const GENERATED = /(^|\/)(dist|node_modules|vendor)\/|\.min\.[a-z]+$|\.map$|(^|\
 const sizeText = (chars: number): string => (chars >= 1_000_000 ? `${(chars / 1_000_000).toFixed(1)} MB` : chars >= 1000 ? `${Math.round(chars / 1000)} KB` : `${chars} B`)
 
 /** A changed file, in the shape of a GitHub "Files changed" box. */
-export function FileBox({ file, split, section, sectionNo, grouped, note, whitespaceOnly, hidden: outOfSight }: {
+export function FileBox({ file, split, section, sectionNo, grouped, note, whitespaceOnly, hidden: outOfSight, order }: {
   file: FileDiff; split: boolean; section?: Section; note?: string
   /** kept as it is, out of sight: the Code pane is narrowed to other files. It comes back
    *  as it was (its diff is not drawn or highlighted again) when the narrowing reaches it. */
   hidden?: boolean
+  /** its place among the files on show, where that is not the list's own order (a section's files, in the walkthrough's order) */
+  order?: number
   /** the section's position in the walkthrough: picks its colour */
   sectionNo?: number
   /** the file sits under its section's header, which already says what it belongs to */
@@ -444,7 +446,8 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   const signature = useStore((s) => s.loaded?.signature)
   const commitView = Boolean(view?.commit)
   const [notesOpen, setNotesOpen] = useState(true)
-  const inPanel = useStore((s) => Boolean(section) && s.sectionPanel === section?.id)
+  // its section is the one open in the Walkthrough
+  const inPanel = useStore((s) => { const p = s.picks.walkthrough; return Boolean(section) && s.guide === 'walkthrough' && p != null && 'section' in p && p.section === section?.id })
   const secReviewed = useStore((s) => Boolean(section) && s.reviewedSections.includes(section?.id ?? ''))
   const loadLarge = useStore((s) => Boolean(s.fileLoaded[file.path]))
   const mdChoice = useStore((s) => s.mdSource[file.path])
@@ -536,7 +539,7 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   const body = <DiffBody key={`${signature}|${view?.ignoreWhitespace ? 'w' : ''}`} file={file} hunks={hunks} split={split} placed={placed} outside={outside} composer={commitView ? null : composer} canExpand={canExpand} readOnly={commitView} expandAll={expandAll} />
 
   return (
-    <div className={'file' + (open ? ' open' : '') + (section && !grouped ? ' in-sec' : '')} style={section ? secStyle(sectionNo) : undefined} hidden={outOfSight} data-gr-file={file.path} data-gr-file-section={section?.id} data-gr-viewed={viewed ? 'true' : changed ? 'changed' : 'false'}>
+    <div className={'file' + (open ? ' open' : '') + (section && !grouped ? ' in-sec' : '')} style={{ ...(section ? secStyle(sectionNo) : {}), ...(order != null ? { order } : {}) }} hidden={outOfSight} data-gr-file={file.path} data-gr-file-section={section?.id} data-gr-viewed={viewed ? 'true' : changed ? 'changed' : 'false'}>
       <div className="file-head">
         <button className="icon-btn" aria-expanded={open} aria-label={open ? 'Collapse file' : 'Expand file'} onClick={() => setFileOpen(file.path, !open)}>
           <Icon name={open ? 'chevDown' : 'chevRight'} />
@@ -551,7 +554,7 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
         )}
         {expandable && open && !held && !rendered && <button className="icon-btn" title="Expand all lines" aria-label="Expand all lines" onClick={() => setExpandAll((n) => n + 1)}><Icon name="unfold" /></button>}
         {section && !grouped && (
-          <button className={'sec-chip' + (inPanel ? ' on' : '')} data-gr="section-chip" data-gr-reviewed={secReviewed ? 'true' : 'false'} aria-pressed={inPanel} title={`Part of “${section.name}”${section.desc ? ` — ${section.desc}` : ''}${secReviewed ? '\nYou marked this section reviewed' : ''}\nClick to ${inPanel ? 'close' : 'read'} the section beside the code`} onClick={() => showSection(inPanel ? null : section.id)}>
+          <button className={'sec-chip' + (inPanel ? ' on' : '')} data-gr="section-chip" data-gr-reviewed={secReviewed ? 'true' : 'false'} aria-pressed={inPanel} title={`Part of “${section.name}”${section.desc ? ` — ${section.desc}` : ''}${secReviewed ? '\nYou marked this section reviewed' : ''}\n${inPanel ? 'It is open in the Walkthrough' : 'Click to read the section in the Walkthrough, with this file where it is'}`} onClick={() => openSection(section.id, { file: file.path, keep: true })}>
             <span className="sec-dot" /><span className="clip">{section.name}</span>{secReviewed && <span className="sec-tick" role="img" aria-label="Reviewed"><Icon name="check" size={12} /></span>}
           </button>
         )}

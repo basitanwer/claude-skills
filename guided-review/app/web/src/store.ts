@@ -4,7 +4,7 @@ import type {
   RepoState, RequestKind, ReviewRequest, ReviewState, ReviewView, SessionListItem, TourStop, UiAction, ViewMark
 } from '@shared/types'
 import { api, connect } from './api'
-import { errText, isOpen, narrowingOf, newId, parseHash, parsePick, pickKey, refInput, routeHash, targetLabel, type DiffMode, type Guide, type Pane, type CodePick, type Route } from './util'
+import { errText, GUIDES, guideOfPick, isOpen, narrowingOf, newId, parseHash, parsePick, pickKey, refInput, routeHash, targetLabel, type DiffMode, type Guide, type Pane, type CodePick, type Route } from './util'
 import { focusAnchor, holdCodePlace, noteAllPlace, parkCodePlace, returnToAllPlace, showPick, startTour } from './focus'
 
 /** `key`: a newer toast with the same key takes the place of an older one. */
@@ -40,12 +40,42 @@ function storedTreeWidth(): number {
 }
 export interface Filters { hideViewed: boolean; onlyCommented: boolean; bySection: boolean; showExcluded: boolean }
 /** The window width from which the tree panel keeps its column while a Guide is open:
- *  below it Guide, code and tree do not fit side by side, and the tree folds unless pinned. */
-export const TREE_BESIDE_GUIDE = 1500
+ *  below it Guide, code and tree do not fit side by side with a code column wide enough to
+ *  read, and the tree folds unless pinned. */
+export const TREE_BESIDE_GUIDE = 1900
 /** Whether the tree panel has room as a column of its own, on the far right: always where
  *  the code has the window to itself; beside a Guide on a wide window, or when pinned. */
 export const treeHasRoom = (s: { guide: Guide | null; treePinned: boolean }): boolean =>
   window.innerWidth >= 760 && (s.guide == null || window.innerWidth >= TREE_BESIDE_GUIDE || s.treePinned)
+/** How a change of Guide or of pick reaches the address. `step`: a step of the trail (the
+ *  reviewer did it: the browser's Back returns to what was before). `replace`: the address
+ *  is brought up to date, without a step (the session did it, or it is not a step: showing
+ *  all files). `follow`: the address already says so (it is being followed, as on Back). */
+export type How = 'step' | 'replace' | 'follow'
+/** Where a review was left, kept per review in this browser: reopened with its plain
+ *  address, it comes back so. */
+interface Left { guide: Guide | null; pick: CodePick | null; picks: Partial<Record<Guide, CodePick>>; all: boolean }
+function readLeft(id: number): Left | null {
+  try {
+    const raw = localStorage.getItem(`gr-left-${id}`)
+    if (!raw) return null
+    const v = JSON.parse(raw) as Record<string, unknown>
+    const picks: Partial<Record<Guide, CodePick>> = {}
+    for (const g of GUIDES) {
+      const one = parsePick(JSON.stringify((v.picks as Record<string, unknown> | undefined)?.[g] ?? null))
+      if (one) picks[g] = one
+    }
+    return { guide: GUIDES.find((g) => g === v.guide) ?? null, pick: parsePick(JSON.stringify(v.pick ?? null)), picks, all: v.all === true }
+  } catch { return null }       // storage blocked, or not what was stored: the review opens as a new one
+}
+function storedWidths(): Partial<Record<Guide, number>> {
+  try {
+    const v = JSON.parse(localStorage.getItem('gr-guide-w') ?? '{}') as Record<string, unknown>
+    const out: Partial<Record<Guide, number>> = {}
+    for (const g of GUIDES) { const n = v[g]; if (typeof n === 'number' && n > 0 && n < 100) out[g] = n }
+    return out
+  } catch { return {} }
+}
 
 /** View preferences that outlive the page (best effort: storage may be blocked). */
 function pref<T extends string>(key: string, allowed: readonly T[], fallback: T | null): T | null {
@@ -119,6 +149,13 @@ interface Store {
    *  row's file). Beside a Guide the Code pane is narrowed to its code until another pick or
    *  "Show all files"; it stays outlined in its Guide. The address carries it. */
   pick: CodePick | null
+  /** Each Guide's own pick: the one it keeps outlined (the box, the open section, the
+   *  link), whatever was picked elsewhere since. The Code pane follows the most recent
+   *  pick only (`pick`). */
+  picks: Partial<Record<Guide, CodePick>>
+  /** where the reviewer dragged the divider to with each Guide on show, as the Guide pane's
+   *  share of the room in percent (none: the Guide's starting width). Kept for all reviews. */
+  guideWidths: Partial<Record<Guide, number>>
   /** Beside a Guide: the Code pane shows all the files, not only the pick's (or, with no
    *  pick, the list of changed files). Left by "Show all files", a click in the tree, or a
    *  jump to code outside the pick. */
@@ -129,10 +166,8 @@ interface Store {
    *  pill in that pane. `top` is how far down the pane the thing the reviewer was reading was
    *  (restored exactly); `y` is how far the pane was scrolled, used if that thing is gone. */
   returnTo: { pane: Pane; y: number; top: number | null; label: string; target?: FocusTarget } | null
-  /** the walkthrough section open in the panel beside the code (in the Code pane), by id */
-  sectionPanel: string | null
-  /** the file under the top of the Code pane, kept by followFiles: the file tree and the
-   *  section panel mark it as where the reviewer is */
+  /** the file under the top of the Code pane, kept by followFiles: the path bar, the tree
+   *  and the open section of the walkthrough mark it as where the reviewer is */
   currentFile: string | null
   status: string | null
   navOpen: boolean
@@ -174,11 +209,14 @@ interface Store {
   dismissRequest(id: string): void
 
   /** Show a Guide in the Guide pane (opening the pane), or close the pane with null. A
-   *  change of Guide is a step of the trail: the browser's Back returns to the one before.
-   *  `silent`: the address already says so (it is being followed, not made). */
-  showGuide(guide: Guide | null, opts?: { silent?: boolean }): void
-  /** Make something the pick (null: none). A step of the trail, unless it is the pick already. `silent`: see showGuide. */
-  pickCode(pick: CodePick | null, opts?: { silent?: boolean }): void
+   *  change of Guide is a step of the trail (see How). */
+  showGuide(guide: Guide | null, how?: How): void
+  /** Make something the pick (null: none): the Code pane follows it, and the Guide it was
+   *  made in (`from`; a box and a section say theirs) keeps it outlined. A step of the
+   *  trail, unless it is the pick already (see How). */
+  pickCode(pick: CodePick | null, opts?: { from?: Guide | null; how?: How }): void
+  /** Take a Guide's pick away. If the Code pane was following it, all the files are shown: a step of the trail. */
+  clearPick(guide: Guide): void
   /** Leave the narrowing for all the files, or return to it. */
   showAllFiles(all: boolean): void
   /** Bring the tree panel on show: as its column where it has room, else over the Code pane. */
@@ -186,6 +224,8 @@ interface Store {
   /** Open the tree at a folder: unfolded down to it, with the folder in view. */
   revealDir(dir: string): void
   setTreePinned(pinned: boolean): void
+  /** Remember where the divider was dragged to with this Guide on show (null: back to its starting width). */
+  setGuideWidth(guide: Guide, pct: number | null): void
   /** Make sure the Code pane is on screen: a jump to code is about to land in it. The Guide stays as it is. */
   revealCode(): void
   /** Change the view (hide whitespace / one commit) and reload under it. */
@@ -199,7 +239,7 @@ interface Store {
   setFileLoaded(path: string): void
   setMdSource(path: string, source: boolean): void
   setSectionOpen(id: string, open: boolean): void
-  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'composer' | 'tour' | 'returnTo' | 'sectionPanel' | 'status' | 'navOpen' | 'panelOpen' | 'treeOver' | 'closedDirs' | 'fileQuery' | 'guideWide' | 'front'>>): void
+  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'composer' | 'tour' | 'returnTo' | 'status' | 'navOpen' | 'panelOpen' | 'treeOver' | 'closedDirs' | 'fileQuery' | 'guideWide' | 'front'>>): void
   applyAction(action: UiAction): void
 
   onStreamOpen(): void
@@ -250,7 +290,40 @@ export const useStore = create<Store>((set, get) => {
   const fail = (e: unknown): void => get().toast(errText(e), 'error')
   /** What belongs to the review on screen and must not outlive it: the way back, a tour,
    *  the open section, and toasts that would act on it. */
-  const leftReview = (): Pick<Store, 'returnTo' | 'tour' | 'sectionPanel' | 'toasts'> => ({ returnTo: null, tour: null, sectionPanel: null, toasts: get().toasts.filter((t) => !t.action) })
+  const leftReview = (): Pick<Store, 'returnTo' | 'tour' | 'toasts'> => ({ returnTo: null, tour: null, toasts: get().toasts.filter((t) => !t.action) })
+  /** Bring the address up to date with where the reviewer now is (see How). */
+  const move = (patch: { guide?: Guide; pick?: string; all?: boolean; commit?: string }, how: How): void => {
+    const route = get().route
+    if (route.name !== 'review' || how === 'follow') return
+    const next: Route = { ...route, ...patch, focus: undefined }
+    if (routeHash(next) === routeHash(route)) return
+    set({ route: next })
+    if (how === 'step') pushHash(next)
+    else syncHash(next)
+  }
+  /** Note where this review is being left: the Guide, each Guide's pick, the one the code follows, whether all files show. */
+  const saveLeft = (): void => {
+    const { sessionId, loaded, guide, pick, picks, showAll } = get()
+    if (sessionId == null || !loaded) return
+    try { localStorage.setItem(`gr-left-${sessionId}`, JSON.stringify({ guide, pick, picks, all: showAll })) } catch { /* lasts for this page */ }
+  }
+  /** A saved review has just been loaded: put the workspace where the address says, or,
+   *  with a plain address, where the review was left in this browser. One never opened
+   *  here opens on the Walkthrough when there is one, else with the Guide pane closed. */
+  const arrive = (route: Route, loaded: LoadedReview, sessionId: number): void => {
+    if (route.name !== 'review') return
+    const left = route.here ? null : readLeft(sessionId)
+    const guide = route.here ? route.guide ?? null : left ? left.guide : loaded.state.walkthrough ? 'walkthrough' : null
+    const pick = route.here ? parsePick(route.pick) : left?.pick ?? null
+    const all = guide == null || (route.here ? Boolean(route.all) : Boolean(left?.all))
+    set({ guide, front: guide ? 'guide' : 'code', picks: left?.picks ?? {}, showAll: all })
+    // the address says what is on show from here on (and loses what it named that made no sense)
+    move({ guide: guide ?? undefined, pick: pickKey(pick) || undefined, all: all && guide != null ? true : undefined }, 'replace')
+    if (pick && all) { get().pickCode(pick, { how: 'replace' }); get().showAllFiles(true) }       // outlined, with all the files on show
+    else if (pick) showPick(pick, { how: 'replace' })
+    if (window.location.hash !== routeHash(get().route)) syncHash(get().route)
+    saveLeft()
+  }
 
   const setState = (state: ReviewState): void => {
     const loaded = get().loaded
@@ -335,8 +408,8 @@ export const useStore = create<Store>((set, get) => {
     set({
       loaded, sessionId, preview, loading: false,
       viewedAt: loaded.state.viewedAt, reviewedSections: loaded.state.reviewedSections,
-      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, mdSource: {}, sectionOpen: {}, excludedOpen: false, factsOpen: false, diffMode: 'all', docPath: null, visualView: null, pick: null, showAll: false, closedDirs: [], treeAt: null, treeOver: false,
-      composer: null, tour: null, returnTo: null, sectionPanel: null, fileQuery: '', wsOnly: []
+      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, mdSource: {}, sectionOpen: {}, excludedOpen: false, factsOpen: false, diffMode: 'all', docPath: null, visualView: null, pick: null, picks: {}, showAll: false, closedDirs: [], treeAt: null, treeOver: false,
+      composer: null, tour: null, returnTo: null, fileQuery: '', wsOnly: []
     })
     refreshWsOnly()
   }
@@ -364,6 +437,8 @@ export const useStore = create<Store>((set, get) => {
     docPath: null,
     visualView: null,
     pick: null,
+    picks: {},
+    guideWidths: storedWidths(),
     showAll: false,
     composer: null,
     guide: null,
@@ -374,7 +449,8 @@ export const useStore = create<Store>((set, get) => {
     treeWidth: storedTreeWidth(),
     wsOnly: [],
     diffView: pref('gr-diff-view', ['split', 'unified'] as const, null),
-    panelOpen: typeof window === 'undefined' || window.innerWidth >= 760,   // the tree starts folded on a phone-width screen
+    // the tree as the reviewer last had it; else shown, but folded on a phone-width screen
+    panelOpen: pref('gr-tree-open', ['0', '1'] as const, null) != null ? pref('gr-tree-open', ['0', '1'] as const, null) === '1' : typeof window === 'undefined' || window.innerWidth >= 760,
     treePinned: pref('gr-tree-pin', ['1'] as const, null) === '1',
     treeOver: false,
     closedDirs: [],
@@ -384,7 +460,6 @@ export const useStore = create<Store>((set, get) => {
     treeView: pref('gr-files-view', ['tree', 'list'] as const, 'tree') ?? 'tree',
     tour: null,
     returnTo: null,
-    sectionPanel: null,
     currentFile: null,
     status: null,
     navOpen: false,
@@ -418,12 +493,22 @@ export const useStore = create<Store>((set, get) => {
         const cur = get().view
         set({ route })
         const guide = route.guide ?? null
-        if (guide !== get().guide) get().showGuide(guide, { silent: true })
+        if (guide !== get().guide) get().showGuide(guide, 'follow')
         if (Boolean(next.ignoreWhitespace) !== Boolean(cur.ignoreWhitespace) || (next.commit ?? '') !== (cur.commit ?? '')) { set({ view: next }); await get().reload() }
         if (stale()) return
-        // the pick: the Code pane goes back to it (and is narrowed to it again, if that was left)
+        // The pick the Code pane follows, and whether all the files were on show: the pane
+        // goes back to how it was at this step. (A pick of a Guide's link is that Guide's.)
         const pick = parsePick(route.pick)
-        if (pickKey(pick) !== pickKey(get().pick) || (pick != null && get().showAll && guide != null)) showPick(pick, { silent: true })
+        const from = pick && 'file' in pick && !('section' in pick) && (guide === 'conversation' || guide === 'spec') ? guide : undefined
+        const same = pickKey(pick) === pickKey(get().pick)
+        if (guide == null || route.all) {
+          const hold = holdCodePlace()
+          if (!same) get().pickCode(pick, { from, how: 'follow' })
+          set({ showAll: true })
+          hold.settle()
+        } else if (!same || get().showAll) showPick(pick, { from, how: 'follow' })
+        if (window.location.hash !== routeHash(get().route)) syncHash(get().route)
+        saveLeft()
         if (route.focus) { try { const t = JSON.parse(route.focus); window.setTimeout(() => focusAnchor(t, { nav: true }), 60) } catch { /* ignore */ } }
         return
       }
@@ -448,8 +533,8 @@ export const useStore = create<Store>((set, get) => {
           const loaded = await openSession(route.session)
           if (stale()) return
           showLoaded(loaded, route.session, null)
-          if (get().view.ignoreWhitespace && !route.w) syncHash(routeWithView(route, get().view))
-          if (route.pick) showPick(parsePick(route.pick), { silent: true })
+          if (get().view.ignoreWhitespace && !route.w) { const r = routeWithView(route, get().view); set({ route: r }); syncHash(r) }
+          arrive(route, loaded, route.session)
         } else if (route.repo) {
           const repo = route.repo
           const st = await api.openRepo(repo)           // validates the path and records it under Recent
@@ -462,8 +547,10 @@ export const useStore = create<Store>((set, get) => {
             const loaded = await openSession(match.sessionId)
             if (stale()) return
             showLoaded(loaded, match.sessionId, null)
-            syncHash(routeWithView({ name: 'review', session: match.sessionId, focus: route.focus, guide: route.guide, pick: route.pick }, get().view))
-            if (route.pick) showPick(parsePick(route.pick), { silent: true })
+            const found = routeWithView({ name: 'review', session: match.sessionId, focus: route.focus, guide: route.guide, pick: route.pick, all: route.all, here: route.here }, get().view)
+            set({ route: found })
+            syncHash(found)
+            arrive(found, loaded, match.sessionId)
           } else {
             // a preview: the diff with nothing saved — it is saved on the first write
             connect(null)
@@ -527,7 +614,7 @@ export const useStore = create<Store>((set, get) => {
           )
           const real = await openSession(sessionId)
           set({
-            sessionId, loaded: real, preview: null, route: routeWithView({ name: 'review', session: sessionId, guide: get().guide ?? undefined, pick: pickKey(get().pick) || undefined }, get().view),
+            sessionId, loaded: real, preview: null, route: routeWithView({ name: 'review', session: sessionId, guide: get().guide ?? undefined, pick: pickKey(get().pick) || undefined, all: get().showAll && get().guide != null ? true : undefined }, get().view),
             viewedAt: real.state.viewedAt, reviewedSections: real.state.reviewedSections
           })
           syncHash(get().route)
@@ -724,7 +811,7 @@ export const useStore = create<Store>((set, get) => {
       set({ dismissed: [...get().dismissed, requestId] })
     },
 
-    showGuide(guide, opts) {
+    showGuide(guide, how = 'step') {
       const cur = get()
       if (cur.guide === guide && cur.front === (guide ? 'guide' : 'code')) return
       // the Code pane changes width under what is being read in it, or is folded away: hold it on that line
@@ -732,36 +819,45 @@ export const useStore = create<Store>((set, get) => {
       const hold = holdCodePlace()
       // Opening or closing the Guide pane never changes what the Code pane shows. With the
       // pane closed it shows all the files; opened by the reviewer it goes on showing them,
-      // where they were, until something is picked. (An address that opens on a Guide with
+      // where they were, until something is picked. (A review that opens on a Guide with
       // nothing picked shows the list of changed files.) Closed while the list was showing,
       // it returns to where the files were last read.
       const edge = (cur.guide == null) !== (guide == null)
       const fromList = guide == null && cur.guide != null && !cur.showAll && !cur.view.commit && !narrowingOf(cur.pick, cur.loaded)
       // (nothing is discarded: the Guide left behind is kept as it is, and so is a comment being written beside the code)
-      set({ guide, front: guide ? 'guide' : 'code', treeOver: false, ...(guide ? {} : { guideWide: false }), ...(edge && (guide == null || !opts?.silent) ? { showAll: true } : {}) })
+      set({ guide, front: guide ? 'guide' : 'code', treeOver: false, ...(guide ? {} : { guideWide: false }), ...(edge && (guide == null || how !== 'follow') ? { showAll: true } : {}) })
+      move({ guide: guide ?? undefined, all: guide != null && get().showAll ? true : undefined }, how)
       if (fromList) returnToAllPlace()
-      const route = get().route
-      if (route.name === 'review' && (route.guide ?? null) !== guide) {
-        const next = { ...route, guide: guide ?? undefined, focus: undefined }
-        set({ route: next })
-        if (!opts?.silent) pushHash(next)
-      }
       hold.settle()
+      if (how !== 'follow') saveLeft()
     },
     pickCode(pick, opts) {
-      const key = pickKey(pick)
+      const how = opts?.how ?? 'step'
+      // (In the Walkthrough the Guide's own pick is its open section. A line picked there
+      // from the fact check is followed by the Code pane, and the section stays open.)
+      const made = opts?.from ?? guideOfPick(pick)
+      const from = made === 'walkthrough' && pick && !('section' in pick) ? null : made
       noteAllPlace()                  // (if all the files are on show: where they are, for the way back from the list)
-      // a box is of one diagram: that diagram is the one on show in Visualize
-      set({ pick, showAll: false, treeOver: false, ...(pick && 'box' in pick ? { visualView: pick.box[0] } : {}) })
-      const route = get().route
-      if (route.name === 'review' && (route.pick ?? '') !== key) {
-        // (a pick the reviewer makes while one commit is on show leaves that view: the new step is without it)
-        const next = { ...route, pick: key || undefined, focus: undefined, ...(opts?.silent ? {} : { commit: undefined }) }
-        set({ route: next })
-        // followed from an address that named a pick which is not there any more: the address drops it
-        if (opts?.silent) syncHash(next)
-        else pushHash(next)
-      }
+      // (a box is of one diagram: that diagram is the one on show in Visualize)
+      set({ pick, showAll: false, treeOver: false, ...(pick && from ? { picks: { ...get().picks, [from]: pick } } : {}), ...(pick && 'box' in pick ? { visualView: pick.box[0] } : {}) })
+      // (a pick the reviewer makes while one commit is on show leaves that view: the new step is without it)
+      // (the Guide goes into the same step: a pick that also brought its Guide on show is one step, not two)
+      move({ guide: get().guide ?? undefined, pick: pickKey(pick) || undefined, all: undefined, ...(how === 'step' ? { commit: undefined } : {}) }, how)
+      if (how !== 'follow') saveLeft()
+    },
+    clearPick(guide) {
+      const cur = get()
+      const mine = cur.picks[guide]
+      if (!mine) return
+      const picks = { ...cur.picks }
+      delete picks[guide]
+      // the Code pane was showing this pick's code: it shows all the files, where it is
+      const followed = pickKey(cur.pick) === pickKey(mine)
+      const hold = holdCodePlace()
+      set({ picks, ...(followed ? { pick: null, showAll: true } : {}) })
+      if (followed) move({ pick: undefined, all: cur.guide != null ? true : undefined }, 'step')
+      hold.settle()
+      saveLeft()
     },
     showAllFiles(all) {
       const cur = get()
@@ -770,10 +866,12 @@ export const useStore = create<Store>((set, get) => {
       const fromList = all && cur.guide != null && !narrowingOf(cur.pick, cur.loaded)
       if (!all) noteAllPlace()
       set({ showAll: all })
+      move({ all: all && cur.guide != null ? true : undefined }, 'replace')
       if (fromList) returnToAllPlace()
+      saveLeft()
     },
     openTree() {
-      if (treeHasRoom(get())) set({ panelOpen: true, treeOver: false })
+      if (treeHasRoom(get())) get().set({ panelOpen: true, treeOver: false })
       else set({ treeOver: true })
     },
     revealDir(dir) {
@@ -781,8 +879,16 @@ export const useStore = create<Store>((set, get) => {
       set({ treeAt: { dir, seq: (get().treeAt?.seq ?? 0) + 1 } })
     },
     setTreePinned(pinned) {
-      set({ treePinned: pinned, ...(pinned ? { panelOpen: true, treeOver: false } : {}) })
+      set({ treePinned: pinned, treeOver: false })
+      if (pinned) get().set({ panelOpen: true })
       savePref('gr-tree-pin', pinned ? '1' : null)
+    },
+    setGuideWidth(guide, pct) {
+      const guideWidths = { ...get().guideWidths }
+      if (pct == null) delete guideWidths[guide]
+      else guideWidths[guide] = pct
+      set({ guideWidths })
+      savePref('gr-guide-w', JSON.stringify(guideWidths))
     },
     revealCode() {
       const { front, guideWide } = get()
@@ -827,6 +933,7 @@ export const useStore = create<Store>((set, get) => {
     },
     set(patch) {
       if ('guideWide' in patch || 'front' in patch) parkCodePlace()     // the Code pane may be folded away by this
+      if (patch.panelOpen != null) savePref('gr-tree-open', patch.panelOpen ? '1' : '0')      // the tree, shown or hidden, is kept for all reviews
       set(patch)
       if (patch.status) {
         if (statusTimer != null) window.clearTimeout(statusTimer)
@@ -836,7 +943,7 @@ export const useStore = create<Store>((set, get) => {
 
     applyAction(action) {
       switch (action.kind) {
-        case 'focus': focusAnchor(action.target); break
+        case 'focus': focusAnchor(action.target, { session: true }); break
         case 'tour':
           startTour(action.stops, action.loop)
           break

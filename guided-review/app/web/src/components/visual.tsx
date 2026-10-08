@@ -153,7 +153,8 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
   // stays outlined while the reviewer reads that code, points at other boxes, or looks at
   // another Guide and comes back, until another box is picked. Only outlined: it does not
   // hold the diagram dimmed
-  const pinned = useStore((s) => (s.pick && 'box' in s.pick && s.pick.box[0] === view.id ? s.pick.box[1] : null))
+  // (the diagram's own pick: it stays outlined whatever is picked in another Guide)
+  const pinned = useStore((s) => { const p = s.picks.visual; return p && 'box' in p && p.box[0] === view.id ? p.box[1] : null })
   const root = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLDivElement>(null)
   // how wide the drawing may be (the Guide pane's width): the layout breaks a wider layer into rows
@@ -211,8 +212,10 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
   useEffect(() => {
     if (!hover) return
     const off = (e: Event): void => { if (e.target instanceof Node && e.target.contains(root.current)) setHover(null) }
+    const key = (e: KeyboardEvent): void => { if (e.key === 'Escape') setHover(null) }
     window.addEventListener('scroll', off, { passive: true, capture: true })
-    return () => window.removeEventListener('scroll', off, { capture: true })
+    document.addEventListener('keydown', key)
+    return () => { window.removeEventListener('scroll', off, { capture: true }); document.removeEventListener('keydown', key) }
   }, [hover])
   const touches = (e: VisualEdge): boolean => Boolean(cur) && (e.from === cur?.id || e.to === cur?.id)
   // a pick: the Code pane is narrowed to the box's code and flashes its lines, the box is
@@ -274,7 +277,7 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
                   key={n.id} className={`viz-node ${n.status}` + (link ? ' link' : '') + (near ? (near.has(n.id) ? (n.id === cur?.id ? ' cur' : '') : ' dim') : '') + (pinned === n.id ? ' pinned' : '')}
                   transform={`translate(${b.x},${b.y})`} style={secStyle(gi)} tabIndex={0} role="button" aria-label={`${said(n)}${link ? '. Show the code' : ''}`}
                   aria-describedby={cur?.id === n.id ? 'gr-viz-card' : undefined} aria-pressed={link ? pinned === n.id : undefined}
-                  data-gr-node={n.id} data-gr-node-status={n.status} data-gr-pick={pinned === n.id ? 'true' : undefined}
+                  data-gr-node={n.id} data-gr-node-status={n.status} data-gr-pick={pinned === n.id ? 'true' : undefined} data-gr-pickable={link ? '' : undefined}
                   onMouseEnter={(e) => point(n, e.currentTarget)} onMouseLeave={() => setHover(null)}
                   onFocus={(e) => point(n, e.currentTarget)} onBlur={() => setHover(null)}
                   onClick={() => act(n)} onKeyDown={(e) => onKey(e, n)}

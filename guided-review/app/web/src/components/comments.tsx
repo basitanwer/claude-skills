@@ -230,7 +230,7 @@ function CommentThread({ c, showAnchor }: { c: Comment; showAnchor?: boolean }) 
           {earlier && <span className="label warn" data-gr="earlier-state" title={`Found at ${short(c.foundAt?.sha)}. The code has changed since, and this was not checked again: it may no longer apply.`}>found at <span className="mono">{short(c.foundAt?.sha)}</span>, an earlier state</span>}
           {showAnchor && (
             target && !c.lineGone && c.status !== 'outdated'
-              ? <button className={'link mono small' + (link.picked ? ' picked' : '')} aria-pressed={link.from ? link.picked : undefined} onClick={() => focusAnchor(target, { from: link.from })}>{anchorLabel(c.anchor)}</button>
+              ? <button className={'link mono small' + (link.picked ? ' picked' : '')} aria-pressed={link.from ? link.picked : undefined} data-gr-pickable={link.from && (target.kind === 'file' || target.kind === 'diff') ? '' : undefined} onClick={() => focusAnchor(target, { from: link.from })}>{anchorLabel(c.anchor)}</button>
               : <span className="mono muted small">{anchorLabel(c.anchor)}</span>
           )}
           <span className="grow" />
