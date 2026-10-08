@@ -129,8 +129,6 @@ interface JumpOpts {
   all?: boolean
   /** the target is the pick's own code: the narrowing is set already, and stays */
   picked?: boolean
-  /** the session asked for it, not the reviewer: a Guide it brings on show is not a step of the trail */
-  session?: boolean
 }
 /** Take one pane to a target and flash it: a jump. Code is shown in the Code pane and the
  *  Guide beside it does not move; the summary and the sections are shown in the
@@ -158,9 +156,18 @@ export function focusAnchor(t: FocusTarget, opts: JumpOpts = {}): void {
  *  Returns false when it has no code to show (a box that is not code, something that is
  *  gone): nothing changes then, except that an address naming such a pick is followed to
  *  no pick. */
-export function showPick(pick: CodePick | null, opts: { from?: Guide | null; how?: How } = {}): boolean {
+export function showPick(pick: CodePick | null, opts: { from?: Guide | null; how?: How; placeOnly?: boolean } = {}): boolean {
   const st = useStore.getState()
   const how = opts.how ?? 'step'
+  // (`placeOnly`: it is the pick already, with all the files on show: the code only goes to its place among them)
+  if (opts.placeOnly) {
+    const at = st.view.commit ? null : narrowingOf(pick, st.loaded)
+    const where = at?.file ?? at?.files[0]
+    if (!at || !where) return false
+    if (at.line != null && at.side === 'new') focusLines(where, at.line, at.end ?? at.line, { nav: true, picked: true })
+    else focusAnchor({ kind: 'file', file: where }, { nav: true, top: true, picked: true })
+    return true
+  }
   if (!pick) { st.pickCode(null, opts); return false }
   // While the Code pane shows one commit only, the page has that commit's files, not the
   // comparison's. An address that names both is followed as it is: the commit is shown,
@@ -219,8 +226,9 @@ function jump(t: FocusTarget, origin: Spot | null, opts: JumpOpts = {}): void {
   st.set({ returnTo: null })
   // a commit view shows another diff: targets belong to the whole comparison
   if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, origin, opts)); return }
-  if (t.kind === 'summary') st.showGuide('walkthrough', opts.session ? 'replace' : 'step')
-  else if (t.kind === 'section') openSection(t.sectionId, { how: opts.session ? 'replace' : 'step' })
+  // (a step of the trail whoever asked, the reviewer or the session: Back returns to where the reviewer was)
+  if (t.kind === 'summary') st.showGuide('walkthrough')
+  else if (t.kind === 'section') openSection(t.sectionId)
   else {
     parked = null                     // the Code pane is about to be somewhere else than it was folded away on
     st.revealCode()

@@ -55,6 +55,16 @@ function usePaneWidth(ref: RefObject<HTMLElement | null>, steps: readonly number
   }, [ref])       // eslint-disable-line react-hooks/exhaustive-deps
   return step
 }
+/** Whether a key press is the reviewer typing, or a shortcut of the browser's: the caret is
+ *  in a text field (a tick box or a button is not one), or Ctrl, Alt or Cmd is held. The
+ *  workspace's keys leave such a press alone. */
+function typingKey(e: KeyboardEvent): boolean {
+  if (e.metaKey || e.ctrlKey || e.altKey) return true
+  const el = e.target as HTMLElement | null
+  if (!el || !el.tagName) return false
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable) return true
+  return el.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|reset|range|color|file)$/.test((el as HTMLInputElement).type)
+}
 /** Class names for a pane narrower than each of these widths (" lt760 lt1000"): the
  *  styles for a narrow pane hang on them, where they used to hang on the window's width. */
 const below = (width: number, marks: number[]): string => marks.filter((m) => width < m).map((m) => ` lt${m}`).join('')
@@ -275,7 +285,7 @@ function GuideRow({ loaded, onePane }: { loaded: LoadedReview; onePane: boolean 
           const on = guide === t.id
           return (
             <button
-              key={t.id} role="tab" aria-selected={on} className={'tab' + (on ? ' on' : '')} data-gr-tab={t.id}
+              key={t.id} role="tab" aria-selected={on} aria-label={`${t.label}, ${t.n}`} className={'tab' + (on ? ' on' : '')} data-gr-tab={t.id}
               title={on ? (behind ? `Back to ${t.label}` : `${t.label} — click again to close the Guide pane`) : `${t.label}, beside the code`}
               onClick={() => showGuide(on && !behind ? null : t.id)}
             >
@@ -695,7 +705,8 @@ function TreePanel({ loaded, over }: { loaded: LoadedReview; over: boolean }) {
       <aside className={'tree-panel' + (over ? ' over' : '')} ref={box} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties} aria-label="Files" data-gr="files-view" data-gr-files-view={F.bySection ? 'sections' : F.treeView} data-gr-tree={over ? 'over' : 'column'}>
         {!over && <ResizeHandle width={treeWidth} onChange={setTreeWidth} />}
         <div className="tree-filter">
-          <span className="filter-input"><Icon name="search" size={14} /><input id="gr-file-filter" name="gr-field" value={query} placeholder="Filter files…" aria-label="Filter files" onChange={(e) => set({ fileQuery: e.target.value })} /></span>
+          <span className="filter-input"><Icon name="search" size={14} /><input id="gr-file-filter" name="gr-field" value={query} placeholder="Filter files…" aria-label="Filter files" onChange={(e) => set({ fileQuery: e.target.value })}
+            onKeyDown={(e) => { if (e.key === 'Escape' && !over) { if (query) set({ fileQuery: '' }); else e.currentTarget.blur() } }} /></span>
           <Menu label={<Icon name="filter" />} className="btn sm icon" align="right" hook="file-filters" title="Filter options">
             {(close) => (
               <>
@@ -863,8 +874,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   // `t`: the tree, with the caret in its filter. The Code pane comes back first if it was folded away.
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      const el = e.target as HTMLElement | null
-      if (e.key !== 't' || e.metaKey || e.ctrlKey || e.altKey || (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return
+      if (e.key !== 't' || typingKey(e)) return
       e.preventDefault()
       useStore.getState().revealCode()
       openTree()
@@ -1804,6 +1814,16 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
   )
 }
 
+/** The boxes of a diagram in reading order: row by row from the top, each row from the left.
+ *  Boxes whose tops are within a few pixels of each other are one row. */
+function readingOrder(els: HTMLElement[]): HTMLElement[] {
+  const at = els.map((el) => { const r = (el.querySelector('.viz-box') ?? el).getBoundingClientRect(); return { el, top: r.top, left: r.left, row: 0 } }).sort((a, b) => a.top - b.top)
+  let row = 0
+  let rowTop = -Infinity
+  for (const x of at) { if (x.top - rowTop > 16) { row++; rowTop = x.top } x.row = row }
+  return at.sort((a, b) => a.row - b.row || a.left - b.left).map((x) => x.el)
+}
+
 // ── page ──────────────────────────────────────────────────────
 export function Review() {
   const loaded = useStore((s) => s.loaded)
@@ -1814,8 +1834,7 @@ export function Review() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      const el = e.target as HTMLElement | null
-      if (e.metaKey || e.ctrlKey || e.altKey || (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return
+      if (typingKey(e)) return
       const st = useStore.getState()
       if (e.key === 'c' && hoveredLine()) {
         e.preventDefault()
@@ -1836,8 +1855,9 @@ export function Review() {
         const drawn = [...(sc?.querySelectorAll<HTMLElement>('[data-gr-pickable]') ?? [])].filter((el) => el.getClientRects().length > 0)
         if (!drawn.length) return
         e.preventDefault()
-        const place = (el: Element): [number, number] => { const r = el.getBoundingClientRect(); return [Math.round(r.top / 24), r.left] }
-        const els = st.guide === 'visual' ? drawn.sort((a, b) => place(a)[0] - place(b)[0] || place(a)[1] - place(b)[1]) : drawn
+        // (A diagram's boxes are read row by row. Their own rectangles say where they are:
+        // the pick's ring makes its group a little larger, and must not change the order.)
+        const els = st.guide === 'visual' ? readingOrder(drawn) : drawn
         const picked = els.map((el, i) => (el.matches('[data-gr-pick], .picked, [aria-expanded="true"]') ? i : -1)).filter((i) => i >= 0)
         const from = e.key === 'j' ? (picked.length ? picked[picked.length - 1] : -1) : (picked.length ? picked[0] : els.length)
         const next = els[from + (e.key === 'j' ? 1 : -1)]
@@ -1850,7 +1870,10 @@ export function Review() {
         // or a card (which close themselves); with nothing open, the Guide's pick is cleared
         if (st.composer) st.set({ composer: null })
         else if (st.treeOver) st.set({ treeOver: false })
-        else if (!document.querySelector('.menu-pop:not([hidden]), [data-gr="visual-card"]') && st.guide && st.picks[st.guide]) { e.preventDefault(); st.clearPick(st.guide) }
+        else if (document.querySelector('.menu-pop:not([hidden]), [data-gr="visual-card"]') || !st.guide) return
+        else if (st.picks[st.guide]) { e.preventDefault(); st.clearPick(st.guide) }
+        // (this Guide has no pick of its own, but the code is narrowed to another's: all the files again; that pick stays where it was made)
+        else if (!st.showAll && st.pick) { const hold = holdCodePlace(); st.showAllFiles(true); hold.settle() }
       }
     }
     document.addEventListener('keydown', onKey)

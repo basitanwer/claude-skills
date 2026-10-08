@@ -122,7 +122,9 @@ export function parseHash(hash: string): Route {
     const guide = GUIDES.find((g) => g === sp.get('guide')) ?? GUIDES.find((g) => g === tab)
     const pick = pickKey(parsePick(sp.get('pick') ?? undefined)) || undefined
     const all = guide && sp.get('all') === '1' ? true : undefined
-    const here = Boolean(guide || pick || focus || tab === 'files') || undefined
+    // (`guide=none`: the Guide pane closed, said outright, so that the address of a review
+    // with the pane closed opens so anywhere, and not where another browser left it)
+    const here = Boolean(guide || pick || focus || tab === 'files' || sp.get('guide') === 'none') || undefined
     const w = sp.get('w') === '1' ? true : undefined
     const commit = sp.get('commit') || undefined
     if (sp.get('session') && Number.isFinite(session)) return { name: 'review', session, focus, guide, pick, all, here, w, commit }
@@ -149,6 +151,7 @@ export function routeHash(r: Route): string {
       if (r.direct) sp.set('direct', '1')
     }
     if (r.guide) sp.set('guide', r.guide)
+    else if (r.here) sp.set('guide', 'none')
     if (r.pick) sp.set('pick', r.pick)
     if (r.all && r.guide) sp.set('all', '1')
     if (r.w) sp.set('w', '1')

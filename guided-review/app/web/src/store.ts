@@ -137,7 +137,6 @@ interface Store {
   /** Markdown files the reviewer (or a jump to an exact line) switched between the
    *  rendered document and the source diff; absent: rendered, once the review is saved */
   mdSource: Record<string, boolean>
-  sectionOpen: Record<string, boolean>
   excludedOpen: boolean
   /** the fact check's "was already false" group is unfolded */
   factsOpen: boolean
@@ -238,7 +237,6 @@ interface Store {
   setFileOpen(path: string, open: boolean): void
   setFileLoaded(path: string): void
   setMdSource(path: string, source: boolean): void
-  setSectionOpen(id: string, open: boolean): void
   set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'composer' | 'tour' | 'returnTo' | 'status' | 'navOpen' | 'panelOpen' | 'treeOver' | 'closedDirs' | 'fileQuery' | 'guideWide' | 'front'>>): void
   applyAction(action: UiAction): void
 
@@ -274,16 +272,29 @@ function primeNotifications(): void {
   } catch { /* unsupported */ }
 }
 
-/** Replace the hash without re-running the route (the review is already on screen). */
-function syncHash(route: Route): void {
-  try { history.replaceState(null, '', routeHash(route)) } catch { /* ignore */ }
+/** What a step of the trail carries beside its address: each Guide's own pick as it was
+ *  at that step. The address names only the pick the Code pane follows; Back and Forward
+ *  (and a reload) bring the other Guides' outlines back from here. */
+interface StepState { picks: Partial<Record<Guide, CodePick>> }
+function stepPicks(): Partial<Record<Guide, CodePick>> | null {
+  try {
+    const kept = (history.state as { picks?: Record<string, unknown> } | null)?.picks
+    if (!kept || typeof kept !== 'object') return null
+    const picks: Partial<Record<Guide, CodePick>> = {}
+    for (const g of GUIDES) { const one = parsePick(JSON.stringify(kept[g] ?? null)); if (one) picks[g] = one }
+    return picks
+  } catch { return null }
+}
+/** Replace the hash without re-running the route (the review is already on screen). `state`: see StepState (none: as it was). */
+function syncHash(route: Route, state?: StepState): void {
+  try { history.replaceState(state ?? (history.state as unknown), '', routeHash(route)) } catch { /* ignore */ }
 }
 /** Add a step to the trail: the browser's history gets the new address, without the route
  *  being run again (pushState sends no hashchange). Back and Forward then arrive as
  *  hashchange, and applyRoute brings both panes back as the address says. */
-function pushHash(route: Route): void {
+function pushHash(route: Route, state: StepState): void {
   const hash = routeHash(route)
-  try { if (window.location.hash !== hash) history.pushState(null, '', hash) } catch { /* ignore */ }
+  try { if (window.location.hash !== hash) history.pushState(state, '', hash); else history.replaceState(state, '', hash) } catch { /* ignore */ }
 }
 
 export const useStore = create<Store>((set, get) => {
@@ -295,11 +306,13 @@ export const useStore = create<Store>((set, get) => {
   const move = (patch: { guide?: Guide; pick?: string; all?: boolean; commit?: string }, how: How): void => {
     const route = get().route
     if (route.name !== 'review' || how === 'follow') return
-    const next: Route = { ...route, ...patch, focus: undefined }
-    if (routeHash(next) === routeHash(route)) return
+    // (from here on the address says where the reviewer is, the Guide pane closed included)
+    const next: Route = { ...route, ...patch, focus: undefined, here: true }
+    const state = { picks: get().picks }
+    if (routeHash(next) === routeHash(route)) { syncHash(route, state); return }
     set({ route: next })
-    if (how === 'step') pushHash(next)
-    else syncHash(next)
+    if (how === 'step') pushHash(next, state)
+    else syncHash(next, state)
   }
   /** Note where this review is being left: the Guide, each Guide's pick, the one the code follows, whether all files show. */
   const saveLeft = (): void => {
@@ -312,15 +325,20 @@ export const useStore = create<Store>((set, get) => {
    *  here opens on the Walkthrough when there is one, else with the Guide pane closed. */
   const arrive = (route: Route, loaded: LoadedReview, sessionId: number): void => {
     if (route.name !== 'review') return
-    const left = route.here ? null : readLeft(sessionId)
+    const left = readLeft(sessionId)
     const guide = route.here ? route.guide ?? null : left ? left.guide : loaded.state.walkthrough ? 'walkthrough' : null
     const pick = route.here ? parsePick(route.pick) : left?.pick ?? null
     const all = guide == null || (route.here ? Boolean(route.all) : Boolean(left?.all))
-    set({ guide, front: guide ? 'guide' : 'code', picks: left?.picks ?? {}, showAll: all })
+    // Each Guide's own pick is not in the address: it comes back from this step of the
+    // trail (a reload) or from where the review was left in this browser, whatever the
+    // address says of the Guide on show and of the pick the code follows.
+    set({ guide, front: guide ? 'guide' : 'code', picks: stepPicks() ?? left?.picks ?? {}, showAll: all })
     // the address says what is on show from here on (and loses what it named that made no sense)
     move({ guide: guide ?? undefined, pick: pickKey(pick) || undefined, all: all && guide != null ? true : undefined }, 'replace')
-    if (pick && all) { get().pickCode(pick, { how: 'replace' }); get().showAllFiles(true) }       // outlined, with all the files on show
-    else if (pick) showPick(pick, { how: 'replace' })
+    const from = pick && 'file' in pick && !('section' in pick) && (guide === 'conversation' || guide === 'spec') ? guide : undefined
+    // (with all the files on show the pick is outlined, and the code is at its place among them)
+    if (pick && all) { get().pickCode(pick, { from, how: 'replace' }); get().showAllFiles(true); showPick(pick, { placeOnly: true }) }
+    else if (pick) showPick(pick, { from, how: 'replace' })
     if (window.location.hash !== routeHash(get().route)) syncHash(get().route)
     saveLeft()
   }
@@ -408,7 +426,7 @@ export const useStore = create<Store>((set, get) => {
     set({
       loaded, sessionId, preview, loading: false,
       viewedAt: loaded.state.viewedAt, reviewedSections: loaded.state.reviewedSections,
-      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, mdSource: {}, sectionOpen: {}, excludedOpen: false, factsOpen: false, diffMode: 'all', docPath: null, visualView: null, pick: null, picks: {}, showAll: false, closedDirs: [], treeAt: null, treeOver: false,
+      drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, mdSource: {}, excludedOpen: false, factsOpen: false, diffMode: 'all', docPath: null, visualView: null, pick: null, picks: {}, showAll: false, closedDirs: [], treeAt: null, treeOver: false,
       composer: null, tour: null, returnTo: null, fileQuery: '', wsOnly: []
     })
     refreshWsOnly()
@@ -430,7 +448,6 @@ export const useStore = create<Store>((set, get) => {
     fileOpen: {},
     fileLoaded: {},
     mdSource: {},
-    sectionOpen: {},
     excludedOpen: false,
     factsOpen: false,
     diffMode: 'all',
@@ -501,6 +518,9 @@ export const useStore = create<Store>((set, get) => {
         const pick = parsePick(route.pick)
         const from = pick && 'file' in pick && !('section' in pick) && (guide === 'conversation' || guide === 'spec') ? guide : undefined
         const same = pickKey(pick) === pickKey(get().pick)
+        // each Guide's own pick as it was at this step: a section opened since is closed again, an outline made since goes
+        const kept = stepPicks()
+        if (kept) set({ picks: kept })
         if (guide == null || route.all) {
           const hold = holdCodePlace()
           if (!same) get().pickCode(pick, { from, how: 'follow' })
@@ -710,10 +730,8 @@ export const useStore = create<Store>((set, get) => {
       if (id == null) return
       const cur = get().reviewedSections
       const next = cur.includes(sectionId) ? cur.filter((s) => s !== sectionId) : [...cur, sectionId]
-      const sectionOpen = { ...get().sectionOpen }
-      delete sectionOpen[sectionId]
       sectionEdits++
-      set({ reviewedSections: next, sectionOpen })
+      set({ reviewedSections: next })
       sectionSaves++
       try { await api.saveUiState(id, { reviewedSections: next }) } catch (e) { fail(e) } finally { sectionSaves-- }
     },
@@ -813,7 +831,11 @@ export const useStore = create<Store>((set, get) => {
 
     showGuide(guide, how = 'step') {
       const cur = get()
-      if (cur.guide === guide && cur.front === (guide ? 'guide' : 'code')) return
+      // (the Guide that is on show already: at most it comes to the front, on a window with room for one pane)
+      if (cur.guide === guide) {
+        if (cur.front !== (guide ? 'guide' : 'code')) { parkCodePlace(); set({ front: guide ? 'guide' : 'code' }) }
+        return
+      }
       // the Code pane changes width under what is being read in it, or is folded away: hold it on that line
       parkCodePlace()
       const hold = holdCodePlace()
@@ -856,6 +878,7 @@ export const useStore = create<Store>((set, get) => {
       const hold = holdCodePlace()
       set({ picks, ...(followed ? { pick: null, showAll: true } : {}) })
       if (followed) move({ pick: undefined, all: cur.guide != null ? true : undefined }, 'step')
+      else syncHash(get().route, { picks })
       hold.settle()
       saveLeft()
     },
@@ -928,9 +951,6 @@ export const useStore = create<Store>((set, get) => {
     setFileLoaded(path) {
       if (!get().fileLoaded[path]) set({ fileLoaded: { ...get().fileLoaded, [path]: true } })
     },
-    setSectionOpen(id, open) {
-      set({ sectionOpen: { ...get().sectionOpen, [id]: open } })
-    },
     set(patch) {
       if ('guideWide' in patch || 'front' in patch) parkCodePlace()     // the Code pane may be folded away by this
       if (patch.panelOpen != null) savePref('gr-tree-open', patch.panelOpen ? '1' : '0')      // the tree, shown or hidden, is kept for all reviews
@@ -943,7 +963,7 @@ export const useStore = create<Store>((set, get) => {
 
     applyAction(action) {
       switch (action.kind) {
-        case 'focus': focusAnchor(action.target, { session: true }); break
+        case 'focus': focusAnchor(action.target); break
         case 'tour':
           startTour(action.stops, action.loop)
           break
