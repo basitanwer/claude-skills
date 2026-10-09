@@ -978,7 +978,8 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
         {dirty && <span className="legend small muted" title="Uncommitted lines carry a stripe in the gutter"><span className="swatch staged" />staged<span className="swatch unstaged" />unstaged</span>}
         <span className="grow" />
         <span className="viewed-progress" data-gr="viewed-progress"><Icon name="circle" size={14} /><strong>{viewed}</strong> / {kept.length} viewed</span>
-        {secNext && (
+        {/* the way into the Walkthrough while the Guide pane is closed; with a Guide open the Walkthrough has its own count */}
+        {secNext && !guideBeside && (
           <button
             className={'btn sm sec-progress' + (secDone === secCount ? ' done' : '')} style={secStyle(sectionNo(secNext))} data-gr="sections-progress" data-gr-reviewed={secDone} data-gr-sections={secCount}
             title={`Guided review: go through the walkthrough section by section, marking each Reviewed.\n${secDone === secCount ? `All ${plural(secCount, 'section')} reviewed — opens the first one` : `Opens the first section you have not reviewed, “${secNext.name}”,`} in the Walkthrough and shows its files, at the first one not yet viewed.`}
@@ -1288,6 +1289,9 @@ function FactList({ loaded }: { loaded: LoadedReview }) {
   )
 }
 
+/** Two presses of "Reviewed, next" closer together than this are a double click: the second is dropped. */
+const DOUBLE_CLICK = 300
+
 /** The Walkthrough Guide: what Claude Code says this change is, as one list. On top the
  *  summary, with the effort line and the fact check; then every section as a row, in its
  *  colour, with its files and its Reviewed tick. A section is opened in place, under its
@@ -1302,7 +1306,7 @@ function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
   const here = useStore((s) => s.currentFile)
   const { request, showGuide, toggleSectionReviewed, set } = useStore.getState()
   const [steer, setSteer] = useState('')
-  const stepped = useRef(0)
+  const pressed = useRef(0)
   const list = useRef<HTMLDivElement>(null)
   const asking = loaded.state.requests.some((r) => r.kind === 'walkthrough' && isOpen(r))
   const it = loaded.state.iterations.at(-1)
@@ -1373,20 +1377,25 @@ function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
           // of reviewed ids can hold sections of an earlier walkthrough, so it is never counted)
           const next = [...sections.slice(no + 1), ...sections.slice(0, no)].find((x) => !reviewed.includes(x.id))
           const reviewedNext = (row: Element | null): void => {
-            // the second click of a double click would tick the section just arrived at, unread
-            if (Date.now() - stepped.current < 500) return
+            // the second click of a double click would tick the section just arrived at, unread.
+            // Counted from the press: the tick's save can wait behind the reloads the tick before
+            // it set off (one for every tab on the review), and must not hold the next press off
+            const now = Date.now()
+            if (now - pressed.current < DOUBLE_CLICK) return
+            pressed.current = now
             // the next row opens where this one's head was, when that was in view; else at the top of the pane
             const head = row ? topOf(row) : 8
             const sc = row?.closest('[data-gr-scroll]')
             const at = sc && head >= 0 && head < sc.clientHeight - 120 ? head : 8
+            const go = (): void => { if (next) open(next.id, next.id, at) }
             // never a toggle: on a section already ticked it only moves on
-            void (ticked ? Promise.resolve() : toggleSectionReviewed(s.id)).then(() => {
-              // (they may have moved on by hand while the tick was being saved)
-              const now = useStore.getState().picks.walkthrough
-              if (!next || !now || !('section' in now) || now.section !== s.id) return
-              stepped.current = Date.now()
-              open(next.id, next.id, at)
-            })
+            if (ticked) return go()
+            // a saved review has the tick in its list at once, and the next section opens with
+            // it; a review not saved yet is saved first (they may move on by hand meanwhile)
+            const saved = useStore.getState().sessionId != null
+            const tick = toggleSectionReviewed(s.id)
+            if (saved) return go()
+            void tick.then(() => { const p = useStore.getState().picks.walkthrough; if (p && 'section' in p && p.section === s.id) go() })
           }
           return (
             <div key={s.id} className={'sec-item' + (isOpen ? ' open' : '')} style={secStyle(no)} data-gr-section={s.id} data-gr-reviewed={ticked ? 'true' : 'false'} data-gr-open={isOpen ? 'true' : undefined}>
@@ -1413,7 +1422,7 @@ function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
                       )
                     })}
                   </div>
-                  <div className="row gap wrap">
+                  <div className="row gap wrap sec-actions" data-gr="section-actions">
                     {allDone
                       ? <span className="sec-all-done" data-gr="sections-done"><Icon name="check" size={14} />{sections.length === 1 ? 'The section is reviewed' : `All ${sections.length} sections reviewed`}</span>
                       : (
@@ -1431,7 +1440,7 @@ function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
           )
         })}
       </div>
-      {wt.planMap && planSummary(wt.planMap) && <div className="plan-line"><Icon name="book" size={14} /> <button className="link" onClick={() => showGuide('spec')}>Spec check</button>: {planSummary(wt.planMap)}</div>}
+      {wt.planMap && planSummary(wt.planMap) && <div className="plan-line"><Icon name="book" size={14} /><span><button className="link" onClick={() => showGuide('spec')}>Spec check</button>: {planSummary(wt.planMap)}</span></div>}
       <div className="desc-foot muted small">
         Walkthrough #{it?.n ?? 1} · written at <span className="mono">{short(loaded.state.reviewedAtSha)}</span>
         <span className="grow" />
@@ -1841,9 +1850,15 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
   // the picks made while the sheet was up; not if the reviewer has scrolled it meanwhile.
   const picked = useStore((s) => pickKey(s.pick))
   const lift = useRef<Lift | null>(null)
+  const parked = useRef(new Map<HTMLElement, Lift>())
   useLayoutEffect(() => {
-    const was = lift.current
-    const sc = sheetUp ? document.querySelector<HTMLElement>(`[data-gr-scroll="${guide}"]`) : null
+    let was = lift.current
+    // a Guide left while it was lifted (another Guide chosen, the pane closed) cannot be put
+    // back while it is hidden: that waits until it is on show again
+    if (was && was.sc.getClientRects().length === 0) { parked.current.set(was.sc, was); was = null }
+    const here = guide ? document.querySelector<HTMLElement>(`[data-gr-scroll="${guide}"]`) : null
+    if (!was && here) { was = parked.current.get(here) ?? null; parked.current.delete(here) }
+    const sc = sheetUp ? here : null
     if (!sc) { lift.current = null; if (was) lowerPick(was); return }
     const from = was && was.sc === sc && liftHolds(was) ? { by: was.by, y: was.y } : { by: 0, y: sc.scrollTop }
     const keep = (): void => { lift.current = liftPick(sc, lift.current, from) }

@@ -283,7 +283,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .sheet-bar > .icon-btn { position: absolute; top: 0; right: 6px; height: 24px; }
 /* (the sheet's toolbar on one line: how many files are viewed is left to the tree) */
 .workspace.sheet .viewed-progress { display: none; }
-.guide-scroll { flex: 1 1 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 0 var(--pad) 80px; }
+.guide-scroll { flex: 1 1 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; --foot: 80px; padding: 0 var(--pad) var(--foot); }
 .guide-scroll > * { max-width: 1280px; margin-left: auto; margin-right: auto; } .guide-scroll > :first-child { margin-top: 16px; }
 .req-row { display: flex; align-items: center; gap: 8px; padding: 6px 24px; font-size: 13px; min-width: 0; }
 .req-row + .req-row { border-top: 1px solid var(--border); } .req-row.failed { color: var(--bad); }
@@ -433,7 +433,12 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .sec-item-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
 .sec-toggle { flex: 1; min-width: 0; display: flex; gap: 6px; align-items: baseline; border: 0; background: none; text-align: left; cursor: pointer; padding: 0; }
 .sec-item-body { padding: 4px 12px 12px 28px; display: flex; flex-direction: column; gap: 8px; }
-.plan-line, .desc-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; } .desc-foot input { width: 180px; padding: 2px 8px; }
+/* the open section's actions stay at the foot of the Guide pane while its text runs on below it
+   (what sticks is measured from inside the pane's padding, hence --foot; not above the raised
+   sheet: the pane is a third of the window there) */
+.sec-actions { position: sticky; bottom: calc(0px - var(--foot, 0px)); z-index: 2; margin: 0 -12px 0 -25px; padding: 8px 12px 8px 25px; background: var(--bg); box-shadow: 0 -1px 0 var(--border); }
+.workspace.sheet.up .sec-actions { position: static; }
+.desc-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; } .plan-line { display: flex; align-items: flex-start; gap: 6px; } .plan-line > .ico { flex: none; margin-top: 3px; } .desc-foot input { width: 180px; padding: 2px 8px; }
 .label.effort, .label.finding { color: var(--accent-ink); border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
 .effort-line { display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; margin: -8px 0 16px; min-width: 0; }
 .effort-part { padding: 0 7px; line-height: 18px; border: 1px solid var(--border); border-radius: 10px; min-width: 0; overflow-wrap: anywhere; color: var(--text-2); }
@@ -500,6 +505,9 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .sec-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--sec, var(--accent)); }
 .sec-chip { display: inline-flex; align-items: center; gap: 6px; flex: 0 30 auto; min-width: 30px; max-width: 240px; margin-left: 4px; padding: 0 8px; font-size: 12px; font-weight: 500; line-height: 18px; border: 1px solid color-mix(in srgb, var(--sec) 45%, transparent); border-radius: 2em; background: color-mix(in srgb, var(--sec) 10%, transparent); color: var(--text-2); cursor: pointer; }
 .sec-chip:hover { background: color-mix(in srgb, var(--sec) 22%, transparent); color: var(--text); }
+/* a Code pane too narrow for path, chip and marks on one line: the chip is its dot (its name is
+   in its title, and the file's edge has the colour). Under 520px the file head wraps and has room. */
+.lt760:not(.lt520) .file-head .sec-chip { flex: none; justify-content: center; min-width: 20px; height: 20px; gap: 3px; padding: 0 5px; } .lt760:not(.lt520) .file-head .sec-chip .clip { display: none; }
 .file.in-sec { border-left: 3px solid var(--sec); }
 .file-group.sec { border-left: 3px solid var(--sec); border-radius: 2px; padding-left: 12px; margin-bottom: 32px; }
 .file-group.sec > .sec-head { border: 1px solid color-mix(in srgb, var(--sec) 30%, var(--border)); background: color-mix(in srgb, var(--sec) 7%, var(--bg)); }

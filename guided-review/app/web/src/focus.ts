@@ -68,7 +68,9 @@ export function liftPick(sc: HTMLElement, was: Lift | null, from: { by: number; 
 export function lowerPick(was: Lift): void {
   const { sc } = was
   if (!liftHolds(was)) return
-  sc.scrollBy({ top: -was.by })
+  // (from where the lift put it, not from where it is: with its whole height back the Guide
+  // cannot be scrolled as far as that, and has been brought up to its end already)
+  sc.scrollTop = was.put - was.by
   if (Math.abs(sc.scrollTop - was.y) < 2) sc.scrollTop = was.y
 }
 /** Bring an element into view in its pane if any of it is out of view; one that is in view stays where it is. */
