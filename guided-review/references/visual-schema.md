@@ -1,6 +1,6 @@
 # Visual JSON (`gr visualize`)
 
-`gr visualize --file visual.json` stores diagrams of the whole change (`--request <id>` when it answers a `visualize` request from the UI). The reviewer reads them in the page's **Visualize** tab. You describe boxes and connections as data; the page lays them out and draws them. You never write markup, coordinates or colours.
+`gr visualize --file visual.json` stores diagrams of the whole change (`--request <id>` when it answers a `visualize` request from the UI). The reviewer reads them in the page's **Visualize** Guide, with the code beside it. You describe boxes and connections as data; the page lays them out and draws them. You never write markup, coordinates or colours.
 
 ```json
 {
@@ -43,7 +43,7 @@
 - Text is cut to its limit without a warning: `title` 120 characters, `summary` 1200, a view's `title` 80 and `caption` 600, `sub` 90, `note` 500, `group` 40, an edge `label` 40.
 - **Where a node's code is**: `at: "path:start-end"`, or `file`, `line`, `end` apart. Give a function its whole range, not only its first line. A path may be a file or a directory (`"app/server/"`), written from the repository root exactly as `gr diff --stat` and git spell it (no `./`, no `..`, the same letter case). Omit it for something that is not code in this repository (a browser, a database, a person).
 - `sub`: what the box is, in a few plain words (up to 90 characters; the box shows two lines of it). Without it the box shows the file name and lines.
-- `note`: what the box does and what this change does to it, in one to three plain sentences (up to 500 characters, Markdown). The reviewer sees it, with the box's code, when they point at the box. **Give every box a note:** the box holds a name, and the note is what makes the diagram explain something.
+- `note`: what the box does and what this change does to it, in one to three plain sentences (up to 500 characters, Markdown). The reviewer sees it when they point at the box; a click shows the box's code in the Code pane beside the diagram. **Give every box a note:** the box holds a name, and the note is what makes the diagram explain something.
 - `group`: the part of the system a node belongs to. Nodes of one group share a colour, and the diagram has a legend for them.
 - `edges`: `{ "from", "to", "label", "kind" }`, or the short form `["from", "to", "label", "kind"]`. `label` is optional and short (up to 40 characters). `kind` is `"new"` (this change adds the connection), `"removed"` (it removes it) or omitted. Up to 80 per view. The arrow points from `from` to `to`; cycles are fine.
 
@@ -73,7 +73,7 @@ The reviewer opens a diagram to understand the change faster than by reading it.
 - **Lead with what changed.** The first view shows the change itself: the new or changed pieces, and only the unchanged neighbours needed to place them. A map of the whole system comes second, if at all.
 - **Follow one real example through a `flow` view.** Take one concrete input (one product, one request) and show what happens to it step by step, with real values on the edges: "25 answers", "top 3 categories". Steps read as sentences: "Ask the 24 top-level categories", not "L0 request".
 - **Plain words in the box, the code's name in the `note` or the place.** `label` says what the step or part does; the function or file it lives in is in `at`, where the page shows it. In a `calls` view the label is the function's name, since that view is about functions.
-- **A `note` on every box**: what it does, and what this change does to it. This is what the reviewer reads when they point at the box, next to the code.
+- **A `note` on every box**: what it does, and what this change does to it. This is what the reviewer reads when they point at the box.
 - **Small.** 5 to 9 boxes per view is easy to read; more than about 12 is two views. A layer wider than the page is broken into rows, which is harder to follow than a narrower diagram.
 - **Only what you read.** Read the changed files in full, their callers and what they call, before drawing. A connection you did not see in the code does not go in the diagram.
 - `architecture`: boxes are modules, directories, processes or outside systems, not functions. `flow`: boxes are steps, in the order data moves; label the edges with what is passed. `calls`: boxes are functions with their line ranges; an edge means "calls".

@@ -166,8 +166,8 @@ When the code changed since the last pass (`gr review` says `NEW SINCE LAST REVI
 
 ## What is recorded and shown
 
-- The level is stored with the review and shown, with what it covers, in the review list and in the header of every tab of the review.
+- The level is stored with the review and shown, with what it covers, in the review list, in the review's Details (opened from the top bar) and on top of its Walkthrough Guide.
 - Each part is recorded when it is stored: the walkthrough by `gr annotate`, the fact check by a `factCheck` (`gr annotate` or `gr factcheck`), the bug hunt by `gr effort --done bugs`. Each record holds the commit, the state of the working tree, the time and the model.
-- In the header of every tab the page shows the level with what it covers, and one chip per part with the model that did it, for example `check` walkthrough + fact check · Walkthrough · Sonnet 5.5 · Fact check · Sonnet 5.5. A part done for an earlier state of the code says so, and so does one that the current level does not update.
+- In Details and on top of the Walkthrough Guide the page shows the level with what it covers, and one chip per part with the model that did it, for example `check` walkthrough + fact check · Walkthrough · Sonnet 5.5 · Fact check · Sonnet 5.5. A part done for an earlier state of the code says so, and so does one that the current level does not update.
 - The Fact check list sits in the walkthrough: "Made false by this change" open, "Was already false" folded. Each row jumps to the line that contradicts it and, when the page can open it, to where the statement stands.
 - A note written by the fact check is labelled "Fact check", a bug finding "Bug". Either says "found at `<commit>`, an earlier state" once the code has changed since.

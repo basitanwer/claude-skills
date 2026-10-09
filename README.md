@@ -4,7 +4,7 @@ Skills for [Claude Code](https://claude.com/claude-code). Each top-level folder 
 
 | Skill | What it does |
 |---|---|
-| [guided-review](guided-review/) | Opens a local, GitHub-style review page for any commit, range, branch or working tree. The Claude Code session writes the walkthrough, comments beside the code, answers questions asked in the page, and applies feedback on request. |
+| [guided-review](guided-review/) | Opens a local review page for any commit, range, branch or working tree. The Claude Code session writes the walkthrough, comments beside the code, answers questions asked in the page, and applies feedback on request. |
 
 ## Install
 
