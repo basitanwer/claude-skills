@@ -26,6 +26,51 @@ export function showInPane(el: HTMLElement, at: 'top' | 'middle' = 'middle'): vo
   sc.scrollBy({ top: at === 'top' || h > sc.clientHeight - 16 ? topIn(el, sc) - 8 : topIn(el, sc) + h / 2 - sc.clientHeight / 2 })
 }
 
+/** Scroll an element's pane by the least that brings the element into view (nothing, when it is). */
+function keepInView(el: Element): void {
+  const sc = scrollerOf(el)
+  if (!sc || !drawn(el)) return
+  const r = el.getBoundingClientRect(); const s = sc.getBoundingClientRect()
+  if (r.bottom > s.bottom - 8) sc.scrollBy({ top: Math.min(r.bottom - s.bottom + 8, r.top - s.top - 8) })
+  else if (r.top < s.top + 8) sc.scrollBy({ top: r.top - s.top - 8 })
+}
+/** A Guide that was scrolled to keep its pick in view while the sheet with the pick's code
+ *  is up (a phone-width window: the sheet leaves the Guide the upper third). `y`: how far
+ *  the Guide was scrolled before the sheet went up, and `by` how far it has been scrolled
+ *  for the sheet since (`carry` of it for earlier picks); `el`: the pick, and `home` how far
+ *  below the top of the Guide it was before it was brought into view; `put`: where the
+ *  Guide was scrolled to. */
+export interface Lift { sc: HTMLElement; el: Element | null; home: number; carry: number; by: number; y: number; put: number }
+/** Whether a Guide is still where it was put for the sheet: the reviewer has not scrolled it since. */
+export function liftHolds(lift: Lift): boolean {
+  const { sc } = lift
+  // (a Guide that got its whole height back cannot be scrolled as far as it was)
+  return drawn(sc) && Math.abs(sc.scrollTop - Math.min(lift.put, sc.scrollHeight - sc.clientHeight)) <= 2
+}
+/** The sheet is up over the Guide on show (`sc`: its scroller): scroll the Guide by the
+ *  least that keeps the pick in view above the sheet. `was`: what an earlier call for the
+ *  same pick handed back (it is called again after late layout); `from`: what the Guide
+ *  had been scrolled by for the sheet already, and from where, when this pick was made. */
+export function liftPick(sc: HTMLElement, was: Lift | null, from: { by: number; y: number }): Lift {
+  const pick = useStore.getState().pick
+  const mine = !pick ? [] : 'box' in pick ? ['[data-gr-pick]'] : 'section' in pick ? ['[data-gr-open="true"] > .sec-item-head'] : ['.link-chip.picked']
+  const el = pick ? find([...mine, '[data-gr-pick], .link-chip.picked'], sc) : null
+  const lift = was && was.el === el ? was : { sc, el, home: el ? topIn(el, sc) : 0, carry: from.by, by: from.by, y: from.y, put: 0 }
+  if (el) {
+    keepInView(el)
+    // (how far the pick now is above where it was: the same however often this is called for it)
+    lift.by = lift.carry + lift.home - topIn(el, sc)
+  }
+  lift.put = sc.scrollTop
+  return lift
+}
+/** The sheet is down again: the Guide goes back to where it was, unless the reviewer has scrolled it since. */
+export function lowerPick(was: Lift): void {
+  const { sc } = was
+  if (!liftHolds(was)) return
+  sc.scrollBy({ top: -was.by })
+  if (Math.abs(sc.scrollTop - was.y) < 2) sc.scrollTop = was.y
+}
 /** Bring an element into view in its pane if any of it is out of view; one that is in view stays where it is. */
 export function showIfOut(el: Element): void {
   const sc = scrollerOf(el)

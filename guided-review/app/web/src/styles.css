@@ -233,8 +233,12 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .state { display: inline-flex; align-items: center; gap: 4px; padding: 5px 12px; border-radius: 2em; font-weight: 500; color: #fff; white-space: nowrap; }
 .state.open { background: var(--accent); } .state.approved { background: #6f42c1; } .state.draft { background: var(--muted); } .state.changed { background: var(--warn); }
 @media (max-width: 1000px) { .topbar.slim .crumb-more { display: none; } .topbar.slim .presence { font-size: 0; gap: 0; padding: 6px; } }
-/* on a phone the bar takes a second line, so that Review stays in reach */
-@media (max-width: 600px) { .topbar.slim { flex-wrap: wrap; row-gap: 6px; } .topbar.slim .crumbs { display: none; } .bar-title { flex: 1 1 140px; } }
+/* on a phone the bar stays on one line, with Review in reach: the path is dropped (the mark leads home), the state is its
+   icon and colour, Details its arrow, and the theme switch is left to the Code pane's view settings */
+@media (max-width: 600px) {
+  .topbar.slim { padding: 6px 12px; gap: 6px; } .topbar.slim .crumbs, .topbar.slim > .icon-btn { display: none; } .bar-title { min-width: 40px; }
+  .topbar.slim .state { font-size: 0; gap: 0; padding: 4px; border-radius: 50%; } .topbar.slim [data-gr="details"] { font-size: 0; gap: 0; padding-left: 6px; padding-right: 6px; }
+}
 /* the Guide row: the row of tabs as it was, on top of the Guide pane (of the Code pane while the Guide pane is closed) */
 .tabs-row { flex: none; display: flex; align-items: flex-end; gap: 6px; padding: 6px var(--pad, 16px) 0; border-bottom: 1px solid var(--border); container-type: inline-size; }
 .tabs { display: flex; gap: 0; overflow-x: auto; scrollbar-width: none; min-width: 0; }
@@ -258,6 +262,27 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .pane-divider { flex: none; width: 6px; cursor: col-resize; touch-action: none; border-left: 1px solid var(--border); }
 .pane-divider:hover, .pane-divider:focus-visible, .workspace[data-dragging] > .pane-divider { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 30%, transparent); outline: 0; }
 .workspace[data-dragging] { cursor: col-resize; user-select: none; }
+/* Small windows. Under 1100px the two panes are stacked (.stack): the Guide on top with
+   --stack-h percent of the height (never under 140px, the code never under 200px), the
+   divider a row between them, the code below. Either can have the whole height: the
+   other is hidden then, and .both is off. */
+.workspace.stack { flex-direction: column; }
+.workspace.stack.both > .guide-pane { width: auto; height: clamp(140px, calc(100% * var(--stack-h, 50) / 100), calc(100% - 206px)); }
+.workspace.stack > .pane-divider { width: auto; height: 6px; cursor: row-resize; border-left: 0; border-top: 1px solid var(--border); }
+.workspace.stack > .pane-divider:hover, .workspace.stack > .pane-divider:focus-visible, .workspace.stack[data-dragging] > .pane-divider { border-top-color: var(--accent); }
+.workspace.stack[data-dragging] { cursor: row-resize; }
+/* Under 760px (.sheet) the Guide has the workspace, and the code is a sheet over its lower
+   two thirds while it is raised (.up): the Guide keeps the third above it, so that all of
+   it can still be scrolled into view there. */
+.workspace.sheet { flex-direction: column; }
+.workspace.sheet > .code-pane { flex: 2 1 0; z-index: 5; background: var(--bg); border-top: 1px solid var(--border-strong); border-radius: 12px 12px 0 0; box-shadow: 0 -6px 18px rgb(0 0 0 / 0.16); animation: sheet-up 0.16s ease-out; }
+@keyframes sheet-up { from { transform: translateY(32px); opacity: 0.4; } }
+.sheet-bar { flex: none; position: relative; display: flex; height: 24px; }
+.sheet-handle { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; border: 0; background: none; padding: 0; cursor: grab; touch-action: none; }
+.sheet-handle > span { width: 44px; height: 4px; border-radius: 2px; background: var(--border-strong); } .sheet-handle:hover > span, .sheet-handle:focus-visible > span { background: var(--muted); }
+.sheet-bar > .icon-btn { position: absolute; top: 0; right: 6px; height: 24px; }
+/* (the sheet's toolbar on one line: how many files are viewed is left to the tree) */
+.workspace.sheet .viewed-progress { display: none; }
 .guide-scroll { flex: 1 1 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 0 var(--pad) 80px; }
 .guide-scroll > * { max-width: 1280px; margin-left: auto; margin-right: auto; } .guide-scroll > :first-child { margin-top: 16px; }
 .req-row { display: flex; align-items: center; gap: 8px; padding: 6px 24px; font-size: 13px; min-width: 0; }
@@ -449,7 +474,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
   .guide-pane, .code-pane, .workspace.both > .code-pane { --pad: 12px; }
   .file-head { position: static; } .tabs-row .diffstat { display: none; }
 }
-@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } .gr-flash { animation-duration: 0.01s; } .presence.working .presence-dot { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .workspace.sheet > .code-pane { animation: none; } .spinner { animation-duration: 3s; } .gr-flash { animation-duration: 0.01s; } .presence.working .presence-dot { animation: none; } }
 
 .tl-event .label { margin-left: 6px; }
 

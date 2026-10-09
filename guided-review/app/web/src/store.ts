@@ -42,7 +42,12 @@ export const TREE_BESIDE_GUIDE = 1900
 /** Whether the tree panel has room as a column of its own, on the far right: always where
  *  the code has the window to itself; beside a Guide on a wide window, or when pinned. */
 export const treeHasRoom = (s: { guide: Guide | null; treePinned: boolean }): boolean =>
-  window.innerWidth >= 760 && (s.guide == null || window.innerWidth >= TREE_BESIDE_GUIDE || s.treePinned)
+  window.innerWidth >= SHEET_BELOW && (s.guide == null || (window.innerWidth >= STACK_BELOW && (window.innerWidth >= TREE_BESIDE_GUIDE || s.treePinned)))
+/** The window width under which the two panes are stacked, the Guide on top and the code
+ *  below it, instead of side by side. */
+export const STACK_BELOW = 1100
+/** The window width under which the code is a sheet that rises over the lower part of the Guide after a pick. */
+export const SHEET_BELOW = 760
 /** How a change of Guide or of pick reaches the address. `step`: a step of the trail (the
  *  reviewer did it: the browser's Back returns to what was before). `replace`: the address
  *  is brought up to date, without a step (the session did it, or it is not a step: showing
@@ -101,10 +106,17 @@ interface Store {
   // view state
   /** the Guide on show in the Guide pane; null: the Guide pane is closed and the Code pane has the window */
   guide: Guide | null
-  /** the Guide pane has the whole width and the Code pane is folded away, until a jump to code brings it back */
+  /** the Guide pane has the whole width (the whole height, where the panes are stacked) and the Code pane is folded away, until a jump to code brings it back */
   guideWide: boolean
-  /** on a window too narrow for two panes side by side: the one on show */
+  /** where the panes are stacked: the Code pane has the whole height and the Guide pane is folded away, until it is asked for again */
+  codeWide: boolean
+  /** On a phone-width window, where the code is a sheet over the lower part of the Guide:
+   *  `code` while the sheet is up. A pick or a jump to code raises it; closing it gives the
+   *  Guide back. (Wider windows keep it up to date and do not read it.) */
   front: 'guide' | 'code'
+  /** where the reviewer dragged the divider to while the panes are stacked, as the Guide's
+   *  share of the height in percent (null: the starting split). Kept apart from the widths. */
+  stackSplit: number | null
   /** Details in the top bar is open (the comparison, the effort, the commits) */
   detailsOpen: boolean
   /** how the open review is being looked at: whitespace hidden, one commit only */
@@ -219,6 +231,8 @@ interface Store {
   setTreePinned(pinned: boolean): void
   /** Remember where the divider was dragged to with this Guide on show (null: back to its starting width). */
   setGuideWidth(guide: Guide, pct: number | null): void
+  /** Remember where the divider was dragged to while the panes are stacked (null: back to the starting split). */
+  setStackSplit(pct: number | null): void
   /** Make sure the Code pane is on screen: a jump to code is about to land in it. The Guide stays as it is. */
   revealCode(): void
   /** Change the view (hide whitespace / one commit) and reload under it. */
@@ -231,7 +245,7 @@ interface Store {
   setFileOpen(path: string, open: boolean): void
   setFileLoaded(path: string): void
   setMdSource(path: string, source: boolean): void
-  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'composer' | 'tour' | 'status' | 'detailsOpen' | 'navOpen' | 'panelOpen' | 'treeOver' | 'closedDirs' | 'fileQuery' | 'guideWide' | 'front'>>): void
+  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'composer' | 'tour' | 'status' | 'detailsOpen' | 'navOpen' | 'panelOpen' | 'treeOver' | 'closedDirs' | 'fileQuery' | 'guideWide' | 'codeWide' | 'front'>>): void
   applyAction(action: UiAction): void
 
   onStreamOpen(): void
@@ -291,6 +305,11 @@ function pushHash(route: Route, state: StepState): void {
   try { if (window.location.hash !== hash) history.pushState(state, '', hash); else history.replaceState(state, '', hash) } catch { /* ignore */ }
 }
 
+/** Whether the sheet a phone-width window shows the code in is up at a step of the trail:
+ *  at one with a pick, down at one without. (A pick made in another Guide than the one on
+ *  show did not raise it: the reviewer changed Guide after it, and got that Guide whole.) */
+const sheetUpAt = (guide: Guide | null, pick: CodePick | null): boolean => guide == null || (pick != null && (guideOfPick(pick) ?? guide) === guide)
+
 export const useStore = create<Store>((set, get) => {
   const fail = (e: unknown): void => get().toast(errText(e), 'error')
   /** What belongs to the review on screen and must not outlive it: a tour, and toasts that would act on it. */
@@ -336,6 +355,7 @@ export const useStore = create<Store>((set, get) => {
     // (with all the files on show the pick is outlined, and the code is at its place among them)
     if (pick && all) { get().pickCode(pick, { from, how: 'replace' }); get().showAllFiles(true); showPick(pick, { placeOnly: true }) }
     else if (pick) showPick(pick, { from, how: 'replace' })
+    if (get().front === 'code' && !sheetUpAt(guide, get().pick)) set({ front: 'guide' })
     if (window.location.hash !== routeHash(get().route)) syncHash(get().route)
     saveLeft()
   }
@@ -457,7 +477,9 @@ export const useStore = create<Store>((set, get) => {
     composer: null,
     guide: null,
     guideWide: false,
+    codeWide: false,
     front: 'code',
+    stackSplit: ((): number | null => { try { const n = Number(localStorage.getItem('gr-stack-h')); return n > 0 && n < 100 ? n : null } catch { return null } })(),
     detailsOpen: false,
     view: {},
     reveal: null,
@@ -525,6 +547,8 @@ export const useStore = create<Store>((set, get) => {
           set({ showAll: true })
           hold.settle()
         } else if (!same || get().showAll) showPick(pick, { from, how: 'follow' })
+        // (the sheet a phone-width window shows the code in follows the trail)
+        if ((get().front === 'code') !== sheetUpAt(guide, get().pick)) { parkCodePlace(); set({ front: sheetUpAt(guide, get().pick) ? 'code' : 'guide' }) }
         if (window.location.hash !== routeHash(get().route)) syncHash(get().route)
         saveLeft()
         if (route.focus) { try { const t = JSON.parse(route.focus); window.setTimeout(() => focusAnchor(t), 60) } catch { /* ignore */ } }
@@ -532,7 +556,7 @@ export const useStore = create<Store>((set, get) => {
       }
       // a review opens with the Guide pane closed unless the address names a Guide
       const guide = route.name === 'review' ? route.guide ?? null : null
-      set({ route, navOpen: false, guide, guideWide: false, front: guide ? 'guide' : 'code', view: viewOfRoute(route), reveal: null })
+      set({ route, navOpen: false, guide, guideWide: false, codeWide: false, front: guide ? 'guide' : 'code', view: viewOfRoute(route), reveal: null })
       if (route.name === 'dashboard') {
         connect(null)
         set({ loaded: null, sessionId: null, preview: null, hub: null, ...leftReview() })
@@ -830,9 +854,10 @@ export const useStore = create<Store>((set, get) => {
 
     showGuide(guide, how = 'step') {
       const cur = get()
-      // (the Guide that is on show already: at most it comes to the front, on a window with room for one pane)
+      // (the Guide that is on show already: at most it comes back on show, where the code had
+      // the whole height, and the sheet over it goes down)
       if (cur.guide === guide) {
-        if (cur.front !== (guide ? 'guide' : 'code')) { parkCodePlace(); set({ front: guide ? 'guide' : 'code' }) }
+        if (cur.front !== (guide ? 'guide' : 'code') || cur.codeWide) { parkCodePlace(); set({ front: guide ? 'guide' : 'code', codeWide: false }) }
         return
       }
       // the Code pane changes width under what is being read in it, or is folded away: hold it on that line
@@ -846,7 +871,7 @@ export const useStore = create<Store>((set, get) => {
       const edge = (cur.guide == null) !== (guide == null)
       const fromList = guide == null && cur.guide != null && !cur.showAll && !cur.view.commit && !narrowingOf(cur.pick, cur.loaded)
       // (nothing is discarded: the Guide left behind is kept as it is, and so is a comment being written beside the code)
-      set({ guide, front: guide ? 'guide' : 'code', treeOver: false, ...(guide ? {} : { guideWide: false }), ...(edge && (guide == null || how !== 'follow') ? { showAll: true } : {}) })
+      set({ guide, front: guide ? 'guide' : 'code', treeOver: false, codeWide: false, ...(guide ? {} : { guideWide: false }), ...(edge && (guide == null || how !== 'follow') ? { showAll: true } : {}) })
       move({ guide: guide ?? undefined, all: guide != null && get().showAll ? true : undefined }, how)
       if (fromList) backToAllPlace()
       hold.settle()
@@ -904,6 +929,10 @@ export const useStore = create<Store>((set, get) => {
       set({ treePinned: pinned, treeOver: false })
       if (pinned) get().set({ panelOpen: true })
       savePref('gr-tree-pin', pinned ? '1' : null)
+    },
+    setStackSplit(pct) {
+      set({ stackSplit: pct })
+      savePref('gr-stack-h', pct == null ? null : String(pct))
     },
     setGuideWidth(guide, pct) {
       const guideWidths = { ...get().guideWidths }

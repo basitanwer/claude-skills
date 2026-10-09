@@ -2,12 +2,12 @@ import { createContext, Fragment, useContext, useEffect, useLayoutEffect, useMem
 import type {
   AnchorInput, Artifact, Comment, FactRow, FileDiff, FocusTarget, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
-import { useStore, TREE_BESIDE_GUIDE, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, focusQuestion, followFiles, holdCodePlace, holdPlaces, openSection, showIfOut, showPick, showSectionHeader, startTour, unparkCodePlace } from '../focus'
+import { useStore, SHEET_BELOW, STACK_BELOW, TREE_BESIDE_GUIDE, treeWidthLimits, type Filters } from '../store'
+import { focusAnchor, focusQuestion, followFiles, holdCodePlace, holdPlaces, liftHolds, liftPick, lowerPick, openSection, showIfOut, showPick, showSectionHeader, startTour, unparkCodePlace, type Lift } from '../focus'
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, narrowingOf, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
-  PANES_SETTLED, sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Guide, type Narrowing
+  PANES_SETTLED, pickKey, sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Guide, type Narrowing
 } from '../util'
 import { AwayHint, CopyButton, DiffStat, FileIcon, GuideCtx, Icon, Md, Menu, MenuItem, PresenceDot, ThemeToggle, currentTheme, setTheme, usePickLink } from '../components/common'
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
@@ -33,6 +33,15 @@ function useWide(px: number): boolean {
     return () => m.removeEventListener('change', on)
   }, [q])
   return wide
+}
+/** How the Guide pane and the Code pane share the window: side by side; stacked, the Guide
+ *  on top and the code below it (a window under 1100px); or, at phone width (under 760px),
+ *  the Guide with the code as a sheet that rises over its lower two thirds after a pick. */
+type Layout = 'side' | 'stack' | 'sheet'
+function useLayout(): Layout {
+  const beside = useWide(STACK_BELOW)
+  const stacked = useWide(SHEET_BELOW)
+  return beside ? 'side' : stacked ? 'stack' : 'sheet'
 }
 /** How wide a pane is, as the widest of `steps` it reaches (0: none of them): what fits in
  *  a pane is decided by the pane's own width, since beside the other pane it has only a
@@ -177,7 +186,7 @@ function ReviewBar({ loaded }: { loaded: LoadedReview }) {
         <span className="muted crumb-sep">/</span>
       </nav>
       <h1 className="bar-title" data-gr="title" title={`${title}${saved ? ` #${loaded.sessionId}` : ''}`}><span className="clip">{title}</span>{saved && <span className="pr-num"> #{loaded.sessionId}</span>}</h1>
-      <span className={'state ' + st.cls} data-gr="state" data-gr-state={st.cls}><Icon name={st.cls === 'approved' ? 'check' : 'pr'} size={14} />{st.text}</span>
+      <span className={'state ' + st.cls} data-gr="state" data-gr-state={st.cls} title={st.text}><Icon name={st.cls === 'approved' ? 'check' : 'pr'} size={14} />{st.text}</span>
       <Details loaded={loaded} title={title} />
       <span className="grow" />
       <PresenceDot presence={loaded.presence} />
@@ -267,11 +276,12 @@ const generalComment = (c: Comment): boolean => ['summary', 'title', 'section', 
  *  Conversation, Spec & plan. It sits on top of
  *  the Guide pane; while that pane is closed it sits on top of the Code pane, where it is
  *  the way to open one. Clicking the name of the Guide on show closes the Guide pane.
- *  `onePane`: the window fits one pane at a time. */
-function GuideRow({ loaded, onePane }: { loaded: LoadedReview; onePane: boolean }) {
+ *  `layout`: how the two panes share the window. */
+function GuideRow({ loaded, layout }: { loaded: LoadedReview; layout: Layout }) {
   const guide = useStore((s) => s.guide)
   const front = useStore((s) => s.front)
   const guideWide = useStore((s) => s.guideWide)
+  const codeWide = useStore((s) => s.codeWide)
   const wsOnly = useStore((s) => s.wsOnly)
   const { showGuide, set } = useStore.getState()
   const files = [...loaded.files, ...wsOnly.filter((f) => !loaded.files.some((x) => x.path === f.path))].filter((f) => !f.excluded)
@@ -283,9 +293,11 @@ function GuideRow({ loaded, onePane }: { loaded: LoadedReview; onePane: boolean 
     { id: 'conversation', label: 'Conversation', icon: 'comment', n: conv },
     ...(hasSpec ? [{ id: 'spec' as Guide, label: 'Spec & plan', icon: 'book', n: loaded.artifacts.length }] : [])
   ]
-  // in a window that fits one pane, a Guide can be open behind the code: its name brings it back
-  const behind = onePane && front === 'code'
-  const widen = (): void => { const hold = holdPlaces(); set({ guideWide: !guideWide }); hold.settle() }
+  // where the panes are stacked the code can have the whole height, the Guide folded away behind it: its name brings it back
+  const stacked = layout === 'stack'
+  const behind = stacked && codeWide
+  const widen = (): void => { const hold = holdPlaces(); set({ guideWide: !guideWide, codeWide: false }); hold.settle() }
+  const whole = stacked ? 'height' : 'width'
   return (
     <div className="tabs-row guide-row" data-gr="guide-row">
       <nav className="tabs" role="tablist" aria-label="Guides">
@@ -304,13 +316,19 @@ function GuideRow({ loaded, onePane }: { loaded: LoadedReview; onePane: boolean 
       </nav>
       <span className="grow" />
       {guide == null && <DiffStat add={files.reduce((a, f) => a + f.add, 0)} del={files.reduce((a, f) => a + f.del, 0)} />}
-      {guide != null && !behind && (onePane
-        ? <button className="btn sm" data-gr="guide-to-code" title="Show the code (the Guide stays as it is)" onClick={() => set({ front: 'code' })}><Icon name="file" size={14} />Code</button>
-        : (
-          <button className="icon-btn" aria-pressed={guideWide} data-gr="guide-wide" title={guideWide ? 'Show the code beside this again' : 'Give this the whole width (the code comes back with a jump to it)'} aria-label={guideWide ? 'Show the Code pane again' : 'Give the Guide pane the whole width'} onClick={widen}>
-            <Icon name={guideWide ? 'columns' : 'expand'} />
-          </button>
-        ))}
+      {/* the way to the code, or back to both panes: on a phone-width window the code is a sheet, raised from here while nothing is picked;
+          a pane that has the whole height of a stacked window names the one to bring back */}
+      {guide != null && (layout === 'sheet'
+        ? front !== 'code' && <button className="btn sm" data-gr="guide-to-code" title="Show the code, in a sheet over the lower part of this (the Guide stays as it is)" onClick={() => set({ front: 'code' })}><Icon name="file" size={14} />Code</button>
+        : behind
+          ? <button className="btn sm" data-gr="guide-back" title="Show the Guide above the code again" onClick={() => showGuide(guide)}><Icon name={items.find((t) => t.id === guide)?.icon ?? 'list'} size={14} />Guide</button>
+          : stacked && guideWide
+            ? <button className="btn sm" aria-pressed data-gr="guide-wide" title="Show the code below this again" onClick={widen}><Icon name="file" size={14} />Code</button>
+            : (
+              <button className="icon-btn" aria-pressed={guideWide} data-gr="guide-wide" title={guideWide ? 'Show the code beside this again' : `Give this the whole ${whole} (the code comes back with a jump to it)`} aria-label={guideWide ? 'Show the Code pane again' : `Give the Guide pane the whole ${whole}`} onClick={widen}>
+                <Icon name={guideWide ? 'columns' : 'expand'} />
+              </button>
+            ))}
       {guide != null && <button className="icon-btn" data-gr="guide-close" data-gr-tab="files" title="Close the Guide pane: the code alone" aria-label="Close the Guide pane" onClick={() => showGuide(null)}><Icon name="x" /></button>}
     </div>
   )
@@ -629,16 +647,20 @@ function useFiles(loaded: LoadedReview) {
  *  a column of its own wherever it has room (always while the code has the window to
  *  itself; beside a Guide on a wide window, or when the reviewer pinned it), and otherwise
  *  folded, to be opened over the files when it is asked for. */
-function useTreePlace(): { room: boolean; column: boolean; over: boolean; canPin: boolean } {
+function useTreePlace(): { room: boolean; column: boolean; over: boolean; all: boolean; canPin: boolean } {
   const guide = useStore((s) => s.guide != null)
   const panelOpen = useStore((s) => s.panelOpen)
   const pinned = useStore((s) => s.treePinned)
   const treeOver = useStore((s) => s.treeOver)
-  const medium = useWide(760)
+  const medium = useWide(SHEET_BELOW)
+  const beside = useWide(STACK_BELOW)
   const big = useWide(TREE_BESIDE_GUIDE)
-  const room = medium && (!guide || big || pinned)
+  // (the same rule as the store's `treeHasRoom`: no column beside panes that are stacked, pinned or not)
+  const room = medium && (!guide || (beside && (big || pinned)))
   const column = panelOpen && room
-  return { room, column, over: treeOver && !column, canPin: guide && medium && !big }
+  // `all`: with no column of its own it lies over the whole workspace (stacked panes, or
+  // the Guide and the sheet), not over the files only
+  return { room, column, over: treeOver && !column, all: guide && !beside, canPin: guide && beside && !big }
 }
 
 /** the last "open the tree at this folder" that the tree panel carried out */
@@ -647,7 +669,8 @@ let shownAt = 0
  *  section), with the filter. It marks the file under the reviewer's eyes and the files of
  *  the pick. A click on a file shows it among all the files. `over`: it has no column of
  *  its own and lies over the files (under the Code pane's toolbar and path bar, which stay
- *  in reach) until a file is clicked in it, a pick is made, Esc, or a click elsewhere. */
+ *  in reach; over both panes where they are stacked, and over the Guide and the sheet)
+ *  until a file is clicked in it, a pick is made, Esc, or a click elsewhere. */
 function TreePanel({ loaded, over }: { loaded: LoadedReview; over: boolean }) {
   const F = useFiles(loaded)
   const filters = useStore((s) => s.filters)
@@ -844,6 +867,8 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   const panelOpen = useStore((s) => s.panelOpen)
   const treeOver = useStore((s) => s.treeOver)
   const guideBeside = useStore((s) => s.guide != null)
+  const codeWide = useStore((s) => s.codeWide)
+  const layout = useLayout()
   const pick = useStore((s) => s.pick)
   const showAll = useStore((s) => s.showAll)
   const diffView = useStore((s) => s.diffView)
@@ -879,12 +904,13 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
     useStore.getState().openTree()
     hold.settle()
   }
-  // `t`: the tree, with the caret in its filter. The Code pane comes back first if it was folded away.
+  // `t`: the tree, with the caret in its filter. The Code pane comes back first if it was
+  // folded away (not where the tree lies over the whole workspace: it needs no Code pane to lie over).
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key !== 't' || typingKey(e)) return
       e.preventDefault()
-      useStore.getState().revealCode()
+      if (!place.all) useStore.getState().revealCode()
       openTree()
       window.setTimeout(() => document.getElementById('gr-file-filter')?.focus({ preventScroll: true }), 60)
     }
@@ -892,7 +918,8 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
     return () => document.removeEventListener('keydown', onKey)
   })
   const treeShown = place.column || place.over
-  const canSplit = guideBeside ? column >= 700 : win.roomy
+  // (under a Guide, on a stacked window, the diff is unified, however wide the pane is)
+  const canSplit = guideBeside ? layout === 'side' && column >= 700 : win.roomy
   const split = canSplit && (diffView ?? ((guideBeside ? column >= 900 : win.wide) ? 'split' : 'unified')) === 'split'
 
   // What the pane shows: all the files; the pick's only; or the list of changed files.
@@ -964,7 +991,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
           {(close) => (
             <>
               <div className="pop-head">Diff view</div>
-              <MenuItem checked={split} disabled={!canSplit} title={canSplit || !guideBeside ? undefined : 'Not enough room beside the Guide — drag the divider, or close the Guide pane, to split the diff'} onClick={() => { const hold = holdCodePlace(); setDiffView('split'); hold.settle(); close() }}>Split</MenuItem>
+              <MenuItem checked={split} disabled={!canSplit} title={canSplit || !guideBeside ? undefined : layout === 'side' ? 'Not enough room beside the Guide — drag the divider, or close the Guide pane, to split the diff' : 'Under a Guide the diff is unified — close the Guide pane to split it'} onClick={() => { const hold = holdCodePlace(); setDiffView('split'); hold.settle(); close() }}>Split</MenuItem>
               <MenuItem checked={!split} onClick={() => { if (canSplit) { const hold = holdCodePlace(); setDiffView('unified'); hold.settle() } close() }}>Unified</MenuItem>
               <label className="menu-item" title="Leave out changes that only alter whitespace"><span className="menu-check"><input type="checkbox" name="gr-field" data-gr="hide-whitespace" checked={Boolean(view.ignoreWhitespace)} onChange={(e) => { void setView({ ignoreWhitespace: e.target.checked }); close() }} /></span>Hide whitespace</label>
               <div className="pop-head">Tree panel</div>
@@ -976,6 +1003,11 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
             </>
           )}
         </Menu>
+        {guideBeside && layout === 'stack' && (
+          <button className={'btn sm icon' + (codeWide ? ' selected' : '')} aria-pressed={codeWide} data-gr="code-wide" title={codeWide ? 'Show the Guide above the code again' : 'Give the code the whole height (the Guide comes back from its row)'} aria-label={codeWide ? 'Show the Guide pane again' : 'Give the Code pane the whole height'} onClick={() => set({ codeWide: !codeWide, guideWide: false })}>
+            <Icon name={codeWide ? 'columns' : 'expand'} />
+          </button>
+        )}
         <button className="btn sm icon tree-toggle" title={treeShown ? 'Hide the tree panel' : place.room ? 'Show the tree panel' : 'Show the tree panel, over the files'} aria-label="Toggle the tree panel" aria-pressed={treeShown} data-gr="tree-toggle" onClick={toggleTree}><Icon name="sidebar" /></button>
       </div>
       <div className="code-where" data-gr="code-where">
@@ -1024,7 +1056,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
           </div>
         )}
         </div>
-        {place.over && <TreePanel loaded={loaded} over />}
+        {place.over && !place.all && <TreePanel loaded={loaded} over />}
       </div>
     </div>
   )
@@ -1665,6 +1697,9 @@ const GUIDE_START: Record<Guide, number> = { walkthrough: 40, visual: 56, conver
 const TREE_RESERVED = 1500
 /** Neither pane is made narrower than this beside the other (px); `bar` is the divider between them. */
 const PANE_MIN = { guide: 320, code: 420, bar: 6 }
+/** Stacked, the Guide starts with this share of the height (percent), and neither pane is made shorter than this (px). */
+const STACK_START = 50
+const STACK_MIN = { guide: 140, code: 200 }
 /** the widths at which what a Guide holds is laid out for a narrower pane */
 const GUIDE_STEPS = [520, 760, 1000, 1200] as const
 
@@ -1689,12 +1724,19 @@ function GuideBody({ id, shown, children }: { id: Guide; shown: boolean; childre
  *  showed; what has to be laid out anew for the new width (a diagram, split or unified)
  *  waits until it is released. `pct`: the Guide pane's share of the room;
  *  `tree`: how much of the workspace is not theirs to share (the tree panel at its usual
- *  width); `treeNow`: what the tree panel takes as it is, which the code's least width is kept clear of. */
-function PaneDivider({ frame, pct, tree, treeNow, onChange }: { frame: RefObject<HTMLElement | null>; pct: number; tree: number; treeNow: number; onChange: (pct: number | null) => void }) {
+ *  width); `treeNow`: what the tree panel takes as it is, which the code's least width is kept clear of.
+ *  `stacked`: the panes are one above the other: it lies between them and is dragged up
+ *  and down, and `pct` is the Guide pane's share of the height. */
+function PaneDivider({ frame, pct, tree, treeNow, stacked, onChange }: { frame: RefObject<HTMLElement | null>; pct: number; tree: number; treeNow: number; stacked: boolean; onChange: (pct: number | null) => void }) {
   const drag = useRef<{ hold: ReturnType<typeof holdPlaces>; pct: number; tick: number } | null>(null)
-  /** the share a divider at `x` gives the Guide pane, within what each pane needs */
+  /** the share a divider at `x` (at that height, where the panes are stacked) gives the Guide pane, within what each pane needs */
   const shareAt = (x: number): number => {
     const r = frame.current?.getBoundingClientRect()
+    if (stacked) {
+      if (!r?.height) return pct
+      const px = Math.min(r.height - STACK_MIN.code - PANE_MIN.bar, Math.max(STACK_MIN.guide, x - r.top))
+      return Math.round((px / r.height) * 1000) / 10
+    }
     if (!r?.width) return pct
     const room = r.width - tree
     const px = Math.min(r.width - treeNow - PANE_MIN.code - PANE_MIN.bar, Math.max(PANE_MIN.guide, x - r.left))
@@ -1709,9 +1751,9 @@ function PaneDivider({ frame, pct, tree, treeNow, onChange }: { frame: RefObject
   const move = (e: RPointerEvent<HTMLDivElement>): void => {
     const d = drag.current
     if (!d) return
-    d.pct = shareAt(e.clientX)
+    d.pct = shareAt(stacked ? e.clientY : e.clientX)
     // straight onto the frame: nothing is drawn again by React at each step of the drag
-    frame.current?.style.setProperty('--guide-w', String(d.pct))
+    frame.current?.style.setProperty(stacked ? '--stack-h' : '--guide-w', String(d.pct))
     d.tick ||= window.requestAnimationFrame(() => { d.tick = 0; d.hold.now() })
   }
   const up = (): void => {
@@ -1725,30 +1767,57 @@ function PaneDivider({ frame, pct, tree, treeNow, onChange }: { frame: RefObject
   }
   const step = (by: number | null, at: number): void => { const hold = holdPlaces(); onChange(by == null ? null : shareAt(at + by)); hold.settle() }
   const key = (e: RKeyboardEvent<HTMLDivElement>): void => {
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); step(e.key === 'ArrowLeft' ? -24 : 24, e.currentTarget.getBoundingClientRect().left) }
+    const [less, more] = stacked ? ['ArrowUp', 'ArrowDown'] : ['ArrowLeft', 'ArrowRight']
+    if (e.key === less || e.key === more) { e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); step(e.key === less ? -24 : 24, stacked ? r.top : r.left) }
     else if (e.key === 'Home') step(null, 0)
   }
   return (
     <div
-      className="pane-divider" role="separator" aria-orientation="vertical" aria-label="Resize the Guide pane and the Code pane" tabIndex={0} data-gr="pane-divider"
+      className="pane-divider" role="separator" aria-orientation={stacked ? 'horizontal' : 'vertical'} aria-label="Resize the Guide pane and the Code pane" tabIndex={0} data-gr="pane-divider"
       aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}
       title="Drag to resize · double-click to reset" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onDoubleClick={() => step(null, 0)} onKeyDown={key}
     />
   )
 }
 
+/** The top of the sheet the code is in on a phone-width window: a handle (a click on it,
+ *  or pulling it down, lowers the sheet) and a close control. The Guide under the sheet is
+ *  given back where it was. */
+function SheetBar({ pane }: { pane: RefObject<HTMLElement | null> }) {
+  const drag = useRef<{ y: number; by: number } | null>(null)
+  const pulled = useRef(false)       // (the click that ends a pull is not a click on the handle)
+  const close = (): void => useStore.getState().set({ front: 'guide' })
+  const pull = (by: number): void => { if (pane.current) pane.current.style.transform = by > 0 ? `translateY(${by}px)` : '' }
+  const down = (e: RPointerEvent<HTMLButtonElement>): void => { drag.current = { y: e.clientY, by: 0 }; try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* a pointer the browser does not know */ } }
+  const move = (e: RPointerEvent<HTMLButtonElement>): void => { const d = drag.current; if (d) { d.by = e.clientY - d.y; pull(d.by) } }
+  const up = (): void => { const d = drag.current; drag.current = null; pull(0); pulled.current = Boolean(d && Math.abs(d.by) > 4); if (d && d.by > 72) close() }
+  return (
+    <div className="sheet-bar" data-gr="sheet-bar">
+      <button className="sheet-handle" data-gr="sheet-handle" title="Lower the code: the Guide, where it was" aria-label="Lower the code sheet" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onClick={() => { if (!pulled.current) close(); pulled.current = false }}><span aria-hidden="true" /></button>
+      <button className="icon-btn" data-gr="sheet-close" title="Close the code: the Guide, where it was (Esc)" aria-label="Close the code sheet" onClick={close}><Icon name="x" /></button>
+    </div>
+  )
+}
+
 /** The workspace: the Guide pane on the left, the Code pane beside it and the tree panel
  *  on the far right, each scrolling by itself, with a divider between Guide and code. The
  *  Guide pane can be closed (code and tree, as "Files changed" was) or given the whole
- *  width; a window too narrow for two panes shows one at a time. A jump to code moves the
- *  Code pane and nothing else. */
+ *  width. A jump to code moves the Code pane and nothing else.
+ *  On a window under 1100px the two are stacked: the Guide on top, the code below it, the
+ *  divider between them dragged up and down, and either can have the whole height. Under
+ *  760px the Guide has the workspace and the code is a sheet: a pick raises it over the
+ *  lower two thirds, and closing it gives the Guide back where it was. */
 function Workspace({ loaded }: { loaded: LoadedReview }) {
   const guide = useStore((s) => s.guide)
   const guideWide = useStore((s) => s.guideWide)
+  const codeWide = useStore((s) => s.codeWide)
   const front = useStore((s) => s.front)
-  // a window narrower than the two panes at their narrowest shows one at a time
-  const twoFit = useWide(PANE_MIN.guide + PANE_MIN.code + 20)
+  const layout = useLayout()
+  const side = layout === 'side'
+  const stacked = layout === 'stack' && guide != null
+  const sheet = layout === 'sheet' && guide != null
   const frame = useRef<HTMLElement>(null)
+  const codePane = useRef<HTMLElement>(null)
   const pane = useRef<HTMLElement>(null)
   const guideWidth = usePaneWidth(pane, GUIDE_STEPS)
   // Guides are mounted when first shown, and kept
@@ -1761,21 +1830,42 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
   const pinned = useStore((s) => s.treePinned)
   const place = useTreePlace()
   const treeWidth = useStore((s) => s.treeWidth)
-  const guideShown = guide != null && (twoFit || front === 'guide')
-  const codeShown = guide == null || (twoFit ? !guideWide : front === 'code')
+  const stackSplit = useStore((s) => s.stackSplit)
+  const guideShown = guide != null && !(stacked && codeWide)
+  const codeShown = guide == null || (sheet ? front === 'code' : !guideWide)
   const both = guideShown && codeShown
+  const sheetUp = sheet && codeShown
+  // The sheet leaves the Guide the upper third: the Guide is scrolled by the least that
+  // keeps the pick in view there (now, and once it is laid out: a section opening in
+  // place), and put back when the sheet goes down, by as much as it was scrolled for all
+  // the picks made while the sheet was up; not if the reviewer has scrolled it meanwhile.
+  const picked = useStore((s) => pickKey(s.pick))
+  const lift = useRef<Lift | null>(null)
+  useLayoutEffect(() => {
+    const was = lift.current
+    const sc = sheetUp ? document.querySelector<HTMLElement>(`[data-gr-scroll="${guide}"]`) : null
+    if (!sc) { lift.current = null; if (was) lowerPick(was); return }
+    const from = was && was.sc === sc && liftHolds(was) ? { by: was.by, y: was.y } : { by: 0, y: sc.scrollTop }
+    const keep = (): void => { lift.current = liftPick(sc, lift.current, from) }
+    const frame = window.requestAnimationFrame(keep)
+    const timers = [120, 320].map((ms) => window.setTimeout(keep, ms))
+    return () => { window.cancelAnimationFrame(frame); timers.forEach((t) => window.clearTimeout(t)) }
+  }, [sheetUp, picked, guide])
   // The room Guide and code share is what the tree panel leaves, wherever the tree has a
   // column to be in, whether it is switched on just now or not: hiding the tree gives its
   // room to the code, and the Guide (a diagram laid out for its width) stays as it is.
   // (Its share is taken of what the tree leaves at its usual width: resizing the tree
   // trades room with the code, as hiding it does. Only the least the code is left with
   // counts the tree as wide as it is.)
-  const tree = both && (reserved || pinned) ? treeWidthLimits.def + TREE_PAD : 0
-  const treeNow = both && place.column ? treeWidth + TREE_PAD : 0
+  const tree = side && both && (reserved || pinned) ? treeWidthLimits.def + TREE_PAD : 0
+  const treeNow = side && both && place.column ? treeWidth + TREE_PAD : 0
   const pct = (guide && widths[guide]) ?? GUIDE_START[guide ?? 'conversation']
-  const row = <GuideRow loaded={loaded} onePane={!twoFit} />
+  const row = <GuideRow loaded={loaded} layout={layout} />
+  // `both`: the two panes share the room, with the divider between them (side by side, or stacked);
+  // `sheet`: the code is a sheet over the Guide, `up` while it is raised
+  const cls = 'workspace' + (both && !sheet ? ' both' : '') + (stacked ? ' stack' : '') + (sheet ? ' sheet' + (sheetUp ? ' up' : '') : '')
   return (
-    <main className={'workspace' + (both ? ' both' : '')} ref={frame} style={{ '--guide-w': pct, '--tree-room': `${tree}px`, '--tree-now': `${treeNow}px` } as React.CSSProperties} data-gr="workspace">
+    <main className={cls} ref={frame} style={{ '--guide-w': pct, '--stack-h': stackSplit ?? STACK_START, '--tree-room': `${tree}px`, '--tree-now': `${treeNow}px` } as React.CSSProperties} data-gr="workspace" data-gr-layout={guide == null ? undefined : layout}>
       <section className={'guide-pane' + below(guideWidth, [520, 760, 1000, 1200])} ref={pane} hidden={!guideShown} aria-label="Guide" data-gr-pane="guide">
         {guideShown && row}
         {seen.map((g) => (
@@ -1784,12 +1874,16 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
           </GuideBody>
         ))}
       </section>
-      {both && <PaneDivider frame={frame} pct={pct} tree={tree} treeNow={treeNow} onChange={(v) => { if (guide) useStore.getState().setGuideWidth(guide, v) }} />}
-      <section className="code-pane" hidden={!codeShown} aria-label="Code" data-gr-pane="code">
+      {both && !sheet && (stacked
+        ? <PaneDivider frame={frame} stacked pct={stackSplit ?? STACK_START} tree={0} treeNow={0} onChange={(v) => useStore.getState().setStackSplit(v)} />
+        : <PaneDivider frame={frame} stacked={false} pct={pct} tree={tree} treeNow={treeNow} onChange={(v) => { if (guide) useStore.getState().setGuideWidth(guide, v) }} />)}
+      <section className="code-pane" ref={codePane} hidden={!codeShown} aria-label="Code" data-gr-pane="code">
+        {sheet && <SheetBar pane={codePane} />}
         {!guideShown && row}
         <FilesTab loaded={loaded} shown={codeShown} />
       </section>
       {codeShown && place.column && <TreePanel loaded={loaded} over={false} />}
+      {place.over && place.all && <TreePanel loaded={loaded} over />}
     </main>
   )
 }
@@ -1826,7 +1920,7 @@ export function Review() {
         const inGuide = document.activeElement?.closest('[data-gr-pane="guide"]') != null
         const toCode = st.guide == null || inGuide
         if (toCode) st.revealCode()
-        else st.set({ front: 'guide' })
+        else st.showGuide(st.guide)       // (it comes back on show where the code had the whole height; the sheet over it goes down)
         window.setTimeout(() => document.querySelector<HTMLElement>(toCode ? '[data-gr-scroll="code"]' : `[data-gr-scroll="${st.guide}"]`)?.focus({ preventScroll: true }), 40)
       } else if ((e.key === 'j' || e.key === 'k') && st.guide) {
         // the next (j) or the previous (k) thing to pick in the Guide on show: a box of the
@@ -1851,6 +1945,8 @@ export function Review() {
         if (st.composer) st.set({ composer: null })
         else if (st.treeOver) st.set({ treeOver: false })
         else if (document.querySelector('.menu-pop:not([hidden]), [data-gr="visual-card"]') || !st.guide) return
+        // (the sheet with the code, on a phone-width window: it goes down, and the pick stays)
+        else if (st.front === 'code' && window.innerWidth < SHEET_BELOW) { e.preventDefault(); st.set({ front: 'guide' }) }
         else if (st.picks[st.guide]) { e.preventDefault(); st.clearPick(st.guide) }
         // (this Guide has no pick of its own, but the code is narrowed to another's: all the files again; that pick stays where it was made)
         else if (!st.showAll && st.pick) { const hold = holdCodePlace(); st.showAllFiles(true); hold.settle() }
