@@ -77,8 +77,11 @@ export function liftPick(sc: HTMLElement, was: Lift | null, from: { by: number; 
     lift.by = lift.carry + lift.home - topIn(el, sc)
   }
   lift.put = sc.scrollTop
+  lifts.set(sc, lift)
   return lift
 }
+/** The lift of each Guide that has one (see `stayOnScreen`). */
+const lifts = new WeakMap<HTMLElement, Lift>()
 /** The link to code that was last pressed. The same line can be linked from several places
  *  in a Guide (a question and its answer), and all of them are marked as the pick: the one
  *  that was pressed is the one to keep in view. */
@@ -361,10 +364,10 @@ interface Held { sel: string; top: number; el: HTMLElement }
  *  after the pane lays out anew: the first diff line under the file header pinned to the
  *  top of the pane (by its address, since switching between split and unified replaces
  *  the rows), or failing that the file box there. Empty while the pane is folded away. */
-function readingSpot(): Held[] {
+function readingSpot(sized = false): Held[] {
   const sc = codeScroller()
   if (!sc || !drawn(sc)) return []
-  const same = asPut<Held[]>(sc)
+  const same = asPut<Held[]>(sc, sized)
   if (same && same[0]?.el.isConnected) return same
   const r = sc.getBoundingClientRect()
   let box: Held | null = null
@@ -402,12 +405,16 @@ export function unparkCodePlace(y: number): void {
  *  laid out anew, and the next hold starts from the same line at the same height instead of
  *  reading the pane again: a round trip through another width (to the Conversation and
  *  back, the whole width and back) then ends where it began, not a wrapped line further
- *  on, nor wherever a shorter layout in between could not scroll to. */
-const lastPut = new WeakMap<HTMLElement, { spots: unknown; y: number; h: number; w: number }>()
-const putAt = (sc: HTMLElement, spots: unknown): void => { lastPut.set(sc, { spots, y: sc.scrollTop, h: sc.scrollHeight, w: sc.clientWidth }) }
-function asPut<T>(sc: HTMLElement): T | null {
+ *  on, nor wherever a shorter layout in between could not scroll to.
+ *  `sized`: it was put there for a change of the window's size, where a pane is scrolled on
+ *  from its place to keep the pick, or a field being typed in, in view: that counts only for
+ *  the next change of size (the way back ends where it began). A hold then reads the pane as
+ *  it is: it would put it back where the window as it was before had it. */
+const lastPut = new WeakMap<HTMLElement, { spots: unknown; y: number; h: number; w: number; sized: boolean }>()
+const putAt = (sc: HTMLElement, spots: unknown, sized = false): void => { lastPut.set(sc, { spots, y: sc.scrollTop, h: sc.scrollHeight, w: sc.clientWidth, sized }) }
+function asPut<T>(sc: HTMLElement, sized = false): T | null {
   const was = lastPut.get(sc)
-  return was && Math.abs(was.y - sc.scrollTop) < 1.5 && was.h === sc.scrollHeight && was.w === sc.clientWidth ? (was.spots as T) : null
+  return was && (sized || !was.sized) && Math.abs(was.y - sc.scrollTop) < 1.5 && was.h === sc.scrollHeight && was.w === sc.clientWidth ? (was.spots as T) : null
 }
 /** Where all the files were last being read, noted when they give way to the pick's code or
  *  to the list of changed files: the list has no line to hold on to, so "Show all files"
@@ -440,7 +447,7 @@ export function backToPlace(at?: string): boolean {
   return true
 }
 /** Put the Code pane back on what it showed: the line if it is still there, else the file it was in. */
-function putBack(spots: Held[]): void {
+function putBack(spots: Held[], sized = false): void {
   const sc = codeScroller()
   if (!sc || !drawn(sc)) return
   for (const spot of spots) {
@@ -448,9 +455,31 @@ function putBack(spots: Held[]): void {
     if (el && drawn(el)) {
       const by = topIn(el, sc) - spot.top
       if (Math.abs(by) >= 1) sc.scrollBy({ top: by })
-      putAt(sc, spots)
+      putAt(sc, spots, sized)
       return
     }
+  }
+}
+/** Where each pane on show is on screen (the top edge of its scroller) and how far it is scrolled. */
+export type PaneTops = Map<HTMLElement, { top: number; y: number }>
+export const paneTops = (): PaneTops => new Map([...document.querySelectorAll<HTMLElement>('[data-gr-scroll]')].filter(drawn).map((sc) => [sc, { top: sc.getBoundingClientRect().top, y: sc.scrollTop }]))
+/** Something above the workspace has changed height (the requests strip has come, gone, or
+ *  lost a row) and every pane has moved down or up with it. What is being read stays where
+ *  it is on screen: each pane is scrolled by as much as it has moved (`was`: how the panes
+ *  were before, see `paneTops`), as far as it can be. To be called before the change is
+ *  painted. A pane counts as still being where it was last put, and where it was lifted to
+ *  for the sheet: nobody has scrolled it. */
+export function stayOnScreen(was: PaneTops): void {
+  for (const [sc, { top, y }] of was) {
+    if (!drawn(sc)) continue
+    // (from where it was scrolled to before: a pane at its end that has grown taller has been brought up already)
+    const to = y + sc.getBoundingClientRect().top - top
+    if (Math.abs(to - sc.scrollTop) < 0.5) continue
+    sc.scrollTop = to
+    const put = lastPut.get(sc)
+    if (put && Math.abs(put.y - y) < 1.5) put.y = sc.scrollTop
+    const lift = lifts.get(sc)
+    if (lift && Math.abs(lift.put - y) <= 2) { lift.y += sc.scrollTop - y; lift.put = sc.scrollTop }
   }
 }
 /** The parts of a Guide that can be held on to: the pieces of text, the rows and the boxes of a diagram. */
@@ -532,19 +561,19 @@ let seen: { code: Held[]; shows: string; guide: GuideHeld | null } = { code: [],
 function guideHeld(): GuideHeld | null {
   const sc = [...document.querySelectorAll<HTMLElement>('[data-gr-guide]')].find(drawn)
   if (!sc) return null
-  const same = asPut<GuideHeld>(sc)
-  if (same?.el.isConnected) return same
   const el = pickIn(sc)
-  if (el && drawn(el)) {
-    const r = el.getBoundingClientRect(); const s = sc.getBoundingClientRect()
-    if (r.bottom > s.top && r.top < s.bottom) return { sc, el, top: topIn(el, sc), pick: true }
-  }
-  return guideSpot()
+  let inView = false
+  if (el && drawn(el)) { const r = el.getBoundingClientRect(); const s = sc.getBoundingClientRect(); inView = r.bottom > s.top && r.top < s.bottom }
+  // (Where it was last put, while it is still there. Not with the pick in view, when it was
+  // put on something else: on what was at its top, by a hold, or on the pick before this one.)
+  const same = asPut<GuideHeld>(sc, true)
+  if (same?.el.isConnected && (!inView || (same.pick && same.el === el))) return same
+  return inView && el ? { sc, el, top: topIn(el, sc), pick: true } : guideSpot()
 }
 /** Note where both panes are. A Code pane that is folded away keeps the place it was noted at, while it still holds the same files. */
 function noteSeen(): void {
   const shows = codeShows()
-  const code = readingSpot()
+  const code = readingSpot(true)
   seen = { code: code.length || shows !== seen.shows ? code : seen.code, shows, guide: guideHeld() }
 }
 /** Put a Guide back on what it was held by; its pick is then kept in view, in a pane that is shorter now. */
@@ -556,7 +585,7 @@ function putGuide(g: GuideHeld): void {
   const by = topIn(el, g.sc) - g.top
   if (Math.abs(by) >= 1) g.sc.scrollBy({ top: by })
   if (g.pick) keepInView(el)
-  putAt(g.sc, g)
+  putAt(g.sc, g, true)
 }
 /** The line the Code pane is held by was the one showing under the file header pinned to
  *  the top, often by the last of the rows it wrapped to. In a wider window it is one row,
@@ -571,7 +600,7 @@ function showHeldLine(spots: Held[]): void {
   const top = topIn(el, sc)
   if (top + el.getBoundingClientRect().height >= 52) return
   sc.scrollBy({ top: top - 40 })
-  putAt(sc, spots)
+  putAt(sc, spots, true)
 }
 /** A field that is being typed in stays in view: where a pane is too short now for both
  *  what it is held by and the field (a phone on its side leaves the code 125px; a keyboard
@@ -582,9 +611,9 @@ function showTypedIn(): void {
   if (!(el instanceof HTMLElement) || !el.matches('textarea, input')) return
   const sc = scrollerOf(el)
   if (!sc || !drawn(sc)) return
-  const held = asPut<unknown>(sc)       // (what the pane was put on just now, if it was)
+  const held = asPut<unknown>(sc, true)       // (what the pane was put on just now, if it was)
   keepInView(el)
-  if (held) putAt(sc, held)
+  if (held) putAt(sc, held, true)
 }
 /** Keep the place in both panes while the window changes size (it is turned, dragged
  *  narrower or wider): to be called once, by the workspace; hands back how to stop. */
@@ -602,7 +631,7 @@ export function watchPlaces(): () => void {
     // (the page has gone to another step meanwhile, a jump the session made: that is where the panes belong)
     if (window.location.hash !== sizing.at) { done(); return }
     const { was } = sizing
-    if (was.code.length && was.shows === codeShows()) { putBack(was.code); showHeldLine(was.code) }
+    if (was.code.length && was.shows === codeShows()) { putBack(was.code, true); showHeldLine(was.code) }
     if (was.guide) putGuide(was.guide)
     showTypedIn()
   }

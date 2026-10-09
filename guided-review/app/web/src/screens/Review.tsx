@@ -3,7 +3,7 @@ import type {
   AnchorInput, Artifact, Comment, FactRow, FileDiff, FocusTarget, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, typing, SHEET_BELOW, STACK_BELOW, TREE_BESIDE_GUIDE, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, focusQuestion, followFiles, holdCodePlace, holdPlaces, liftHolds, liftPick, lowerPick, openSection, showIfOut, showPick, showSectionHeader, startTour, unparkCodePlace, watchPlaces, type Lift } from '../focus'
+import { focusAnchor, focusQuestion, followFiles, holdCodePlace, holdPlaces, liftHolds, liftPick, lowerPick, openSection, paneTops, showIfOut, showPick, showSectionHeader, startTour, stayOnScreen, unparkCodePlace, watchPlaces, type Lift, type PaneTops } from '../focus'
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, narrowingOf, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
@@ -244,9 +244,10 @@ const ANSWERED_FOR = 15_000
 /** What Claude Code has been asked and has not finished: one compact row each, under the top
  *  bar whatever is on show. A request that is finished while this page watched it wait stays
  *  a while, as answered (or done): nothing else on screen says so. The strip is in the flow
- *  of the page, so a row that goes moves both panes up: no row goes by itself while the
- *  reviewer is writing (the box they write in would move under them); it goes when they
- *  dismiss it, or once they have stopped. */
+ *  of the page, so a row that comes or goes moves both panes down or up: each pane is
+ *  scrolled by as much in the same frame, so what is being read stays where it is on screen
+ *  (as far as the pane can be scrolled). And no row goes by itself while the reviewer is
+ *  writing; it goes when they dismiss it, or once they have stopped. */
 function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
   const dismissed = useStore((s) => s.dismissed)
   const { cancelRequest, dismissRequest, retryRequest, showGuide } = useStore.getState()
@@ -262,9 +263,16 @@ function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
       : r.status === 'done' && waited.current.has(r.id) && (since(r) < ANSWERED_FOR || (writing && drawn.current.has(r.id))))))
   drawn.current = new Set(rows.map((r) => r.id))
   useTick(rows.length ? 1000 : 30_000)
+  // How tall the strip is and where the panes are, read while the page is still as it was
+  // last drawn; once the strip is drawn anew, and before that is painted, the panes are
+  // scrolled by as much as a strip of another height has moved them.
+  const strip = useRef<HTMLDivElement>(null)
+  const was = useRef<{ h: number; tops: PaneTops } | null>(null)
+  was.current = { h: strip.current?.offsetHeight ?? 0, tops: paneTops() }
+  useLayoutEffect(() => { if (was.current && (strip.current?.offsetHeight ?? 0) !== was.current.h) stayOnScreen(was.current.tops) })
   if (rows.length === 0) return null
   return (
-    <div className="req-strip" data-gr="requests">
+    <div className="req-strip" data-gr="requests" ref={strip}>
       {rows.map((r) => {
         const stuck = stuckReason(r, away)
         const why = stuck && stuckText(r, stuck)
@@ -1897,8 +1905,36 @@ function PaneDivider({ frame, pct, tree, treeNow, stacked, onChange }: { frame: 
 
 /** The top of the sheet the code is in on a phone-width window: a handle (a click on it,
  *  or pulling it down, lowers the sheet) and a close control. The Guide under the sheet is
- *  given back where it was. */
-function SheetBar({ pane }: { pane: RefObject<HTMLElement | null> }) {
+ *  given back where it was.
+ *  While the sheet shows the code of the Walkthrough's open section, the bar also has that
+ *  section's "Reviewed, next": the sheet leaves the Guide the upper third of the window, and
+ *  the section's own actions are at the end of its text, a long way below that. Pressing it
+ *  ticks the section and opens the next one not yet reviewed, whose code the sheet then shows. */
+function SheetBar({ pane, loaded }: { pane: RefObject<HTMLElement | null>; loaded: LoadedReview }) {
+  const openId = useStore((s) => { const p = s.picks.walkthrough; return s.guide === 'walkthrough' && !s.showAll && p != null && 'section' in p && s.pick != null && 'section' in s.pick && s.pick.section === p.section ? p.section : null })
+  const reviewed = useStore((s) => s.reviewedSections)
+  const sections = loaded.state.walkthrough?.sections ?? []
+  const no = sections.findIndex((x) => x.id === openId)
+  const sec = no < 0 ? null : sections[no]
+  const ticked = sec != null && reviewed.includes(sec.id)
+  const allDone = sections.every((x) => reviewed.includes(x.id))
+  // (as in the Walkthrough: the next one still to review, after this one, then round to the earliest)
+  const next = [...sections.slice(no + 1), ...sections.slice(0, Math.max(no, 0))].find((x) => !reviewed.includes(x.id))
+  const pressed = useRef(0)
+  const reviewedNext = (): void => {
+    if (!sec) return
+    // (the button stays where it is: the second click of a double click would tick the section just arrived at, unread)
+    const now = Date.now()
+    if (now - pressed.current < DOUBLE_CLICK) return
+    pressed.current = now
+    const go = (): void => { if (next) openSection(next.id) }
+    if (ticked) return go()
+    // (a review not saved yet is saved by the tick first, as in the Walkthrough)
+    const saved = useStore.getState().sessionId != null
+    const tick = useStore.getState().toggleSectionReviewed(sec.id)
+    if (saved) return go()
+    void tick.then(() => { const p = useStore.getState().picks.walkthrough; if (p && 'section' in p && p.section === sec.id) go() })
+  }
   const drag = useRef<{ y: number; by: number } | null>(null)
   const pulled = useRef(false)       // (the click that ends a pull is not a click on the handle)
   const close = (): void => useStore.getState().set({ front: 'guide' })
@@ -1907,7 +1943,15 @@ function SheetBar({ pane }: { pane: RefObject<HTMLElement | null> }) {
   const move = (e: RPointerEvent<HTMLButtonElement>): void => { const d = drag.current; if (d) { d.by = e.clientY - d.y; pull(d.by) } }
   const up = (): void => { const d = drag.current; drag.current = null; pull(0); pulled.current = Boolean(d && Math.abs(d.by) > 4); if (d && d.by > 72) close() }
   return (
-    <div className="sheet-bar" data-gr="sheet-bar">
+    <div className={'sheet-bar' + (sec ? ' sec' : '')} data-gr="sheet-bar" data-gr-sheet-section={sec?.id} data-gr-reviewed={sec ? (ticked ? 'true' : 'false') : undefined}>
+      {sec && (allDone
+        ? <span className="sec-all-done small" data-gr="sheet-sections-done"><Icon name="check" size={14} />{sections.length === 1 ? 'The section is reviewed' : `All ${sections.length} sections reviewed`}</span>
+        : (
+          <button className="btn sm primary" data-gr="sheet-reviewed-next" title={ticked ? `“${sec.name}” is reviewed. Go to the next section you have not reviewed: “${next?.name}”` : next ? `Mark “${sec.name}” reviewed and open the next section you have not reviewed: “${next.name}”` : `Mark “${sec.name}” reviewed — it is the last one left`} onClick={reviewedNext}>
+            <Icon name={ticked ? 'arrowDown' : 'check'} size={14} />{ticked ? 'Next unreviewed' : next ? 'Reviewed, next' : 'Reviewed, finish'}
+          </button>
+        ))}
+      {sec && ticked && !allDone && <span className="sec-tick" role="img" aria-label="Reviewed" title="You marked this section reviewed" data-gr="sheet-section-tick"><Icon name="check" size={14} /></span>}
       <button className="sheet-handle" data-gr="sheet-handle" title="Lower the code: the Guide, where it was" aria-label="Lower the code sheet" onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up} onClick={() => { if (!pulled.current) close(); pulled.current = false }}><span aria-hidden="true" /></button>
       <button className="icon-btn" data-gr="sheet-close" title="Close the code: the Guide, where it was (Esc)" aria-label="Close the code sheet" onClick={close}><Icon name="x" /></button>
     </div>
@@ -2004,7 +2048,7 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
         ? <PaneDivider frame={frame} stacked pct={stackSplit ?? STACK_START} tree={0} treeNow={0} onChange={(v) => useStore.getState().setStackSplit(v)} />
         : <PaneDivider frame={frame} stacked={false} pct={pct} tree={tree} treeNow={treeNow} onChange={(v) => { if (guide) useStore.getState().setGuideWidth(guide, v) }} />)}
       <section className="code-pane" ref={codePane} hidden={!codeShown} aria-label="Code" data-gr-pane="code">
-        {sheet && <SheetBar pane={codePane} />}
+        {sheet && <SheetBar pane={codePane} loaded={loaded} />}
         {!guideShown && row}
         <FilesTab loaded={loaded} shown={codeShown} />
       </section>

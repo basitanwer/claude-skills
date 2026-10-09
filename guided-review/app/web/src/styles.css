@@ -281,6 +281,9 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .sheet-handle { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; border: 0; background: none; padding: 0; cursor: grab; touch-action: none; }
 .sheet-handle > span { width: 44px; height: 4px; border-radius: 2px; background: var(--border-strong); } .sheet-handle:hover > span, .sheet-handle:focus-visible > span { background: var(--muted); }
 .sheet-bar > .icon-btn { position: absolute; top: 0; right: 6px; height: 24px; }
+/* (with the open section's "Reviewed, next" in it: the button, then the handle in what is left) */
+.sheet-bar.sec { height: 40px; align-items: center; gap: 8px; padding: 0 38px 0 12px; } .sheet-bar.sec > .sheet-handle { align-self: stretch; } .sheet-bar.sec > .icon-btn { height: 40px; }
+.sheet-bar.sec > .btn, .sheet-bar.sec > .sec-all-done { flex: none; white-space: nowrap; }
 /* (the sheet's toolbar on one line: how many files are viewed is left to the tree) */
 .workspace.sheet .viewed-progress { display: none; }
 .guide-scroll { flex: 1 1 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; --foot: 80px; padding: 0 var(--pad) var(--foot); }

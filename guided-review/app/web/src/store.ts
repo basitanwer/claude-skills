@@ -400,10 +400,12 @@ export const useStore = create<Store>((set, get) => {
       // an address of the Commits tab there once was: the commits are in Details now
       detailsOpen: Boolean(route.commits)
     })
+    // (Whether this step of the trail, or where the review was left, says each Guide's own
+    // pick. Asked before the address is brought up to date: that writes them into the step.)
+    const stepped = stepPicks() != null || (!route.here && left != null)
     // the address says what is on show from here on (and loses what it named that made no sense)
     move({ guide: guide ?? undefined, pick: pickKey(pick) || undefined, all: all && guide != null ? true : undefined }, 'replace')
-    // (where the review was left says each Guide's own pick, as a step of the trail does)
-    const from = madeIn(pick, guide, get().picks, stepPicks() != null || (!route.here && left != null))
+    const from = madeIn(pick, guide, get().picks, stepped)
     // (with all the files on show the pick is outlined, and the code is at its place among them)
     if (pick && all) { get().pickCode(pick, { from, how: 'replace' }); get().showAllFiles(true); showPick(pick, { placeOnly: true }) }
     else if (pick) showPick(pick, { from, how: 'replace' })
@@ -591,6 +593,9 @@ export const useStore = create<Store>((set, get) => {
         const leaving = get().route
         notePlace(routeHash(leaving))
         set({ route })
+        // (Back, or Forward, out of the step a tour made ends the tour: its bar goes with it)
+        const tour = get().tour
+        if (tour && leaving.name === 'review' && leaving.focus && stepTour() !== tour.id) set({ tour: null })
         const guide = route.guide ?? null
         if (guide !== get().guide) get().showGuide(guide, 'follow')
         if (route.commits) set({ detailsOpen: true })       // (an address of the Commits tab there once was)

@@ -314,7 +314,8 @@ export function Composer({ anchor, k }: { anchor: AnchorInput; k: string }) {
   const addComment = useStore((s) => s.addComment)
   const request = useStore((s) => s.request)
   const set = useStore((s) => s.set)
-  // (kept while the composer is elsewhere or its diff is drawn anew; dropped when it is sent or cancelled)
+  // (kept while the composer is elsewhere or its diff is drawn anew, and when Esc closes it:
+  // it is there again when the composer is opened at the same spot; dropped when it is sent or cancelled)
   const [key] = useState(() => draftKey(`composer:${k}`))
   const [text, write] = useState(() => drafts.get(key)?.text ?? '')
   const setText = (t: string): void => { write(t); if (t) drafts.set(key, { mode: 'open', text: t }); else drafts.delete(key) }
@@ -342,7 +343,7 @@ export function Composer({ anchor, k }: { anchor: AnchorInput; k: string }) {
     <div className="composer" data-gr="composer" data-gr-composer={k} ref={box}>
       <textarea name="gr-text" autoFocus rows={3} value={text} placeholder="Leave a comment"
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) add(); if (e.key === 'Escape') close() }}
+        onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) add(); if (e.key === 'Escape') set({ composer: null }) }}
       />
       <div className="row gap end wrap">
         <button className="btn sm" onClick={close}>Cancel</button>
