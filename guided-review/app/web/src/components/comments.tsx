@@ -1,7 +1,7 @@
-import { createContext, Fragment, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, Fragment, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { AnchorInput, Comment } from '@shared/types'
 import { useStore } from '../store'
-import { focusAnchor, focusChanged, focusQuestion } from '../focus'
+import { focusAnchor, focusChanged, focusQuestion, showWhole } from '../focus'
 import { ago, anchorLabel, ASK, askExchanges, askStatus, baseName, focusable, fromEarlier, hasPendingReply, isOpen, plural, short } from '../util'
 import { Icon, Md, Menu, MenuItem, usePickLink } from './common'
 
@@ -332,8 +332,14 @@ export function Composer({ anchor, k }: { anchor: AnchorInput; k: string }) {
     // the question and its answer show right here (and in Conversation): stay put
     void request({ kind: 'question', text: text.trim(), anchor }).then((r) => { setBusy(false); if (r) close() })
   }
+  // (it opens with all of it in view: where the pane ends just under the spot, its buttons would be out of sight)
+  const box = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => { if (box.current) showWhole(box.current) })
+    return () => window.cancelAnimationFrame(frame)
+  }, [])
   return (
-    <div className="composer" data-gr="composer" data-gr-composer={k}>
+    <div className="composer" data-gr="composer" data-gr-composer={k} ref={box}>
       <textarea name="gr-text" autoFocus rows={3} value={text} placeholder="Leave a comment"
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) add(); if (e.key === 'Escape') close() }}

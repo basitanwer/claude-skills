@@ -1,6 +1,6 @@
 import type { ChangedRange, FocusTarget, TourStop } from '@shared/types'
 import { typing, useStore, type How } from './store'
-import { baseName, cssq, narrowingOf, newId, type CodePick, type Guide, type Pane } from './util'
+import { baseName, cssq, narrowingOf, newId, PANES_SETTLED, pickKey, type CodePick, type Guide, type Pane } from './util'
 
 // ── the panes ─────────────────────────────────────────────────
 // The page itself never scrolls. The Code pane and each Guide scroll by themselves, and
@@ -48,6 +48,9 @@ function keepInView(el: Element): void {
   if (r.bottom > s.bottom - 8) sc.scrollBy({ top: Math.min(r.bottom - s.bottom + 8, r.top - s.top - 8) })
   else if (r.top < s.top + 8) sc.scrollBy({ top: r.top - s.top - 8 })
 }
+/** A box that has just opened in a pane (a comment being written): the pane is scrolled by
+ *  the least that shows the whole of it, its buttons too. */
+export const showWhole = (el: Element): void => keepInView(el)
 /** A Guide that was scrolled to keep its pick in view while the sheet with the pick's code
  *  is up (a phone-width window: the sheet leaves the Guide the upper third). `y`: how far
  *  the Guide was scrolled before the sheet went up, and `by` how far it has been scrolled
@@ -76,9 +79,14 @@ export function liftPick(sc: HTMLElement, was: Lift | null, from: { by: number; 
   lift.put = sc.scrollTop
   return lift
 }
+/** The link to code that was last pressed. The same line can be linked from several places
+ *  in a Guide (a question and its answer), and all of them are marked as the pick: the one
+ *  that was pressed is the one to keep in view. */
+let pressedLink: HTMLElement | null = null
 /** The pick as it is drawn in a Guide (`sc`: the Guide's scroller): the outlined box, the open section's row, the marked link. */
 function pickIn(sc: HTMLElement): HTMLElement | null {
   const pick = useStore.getState().pick
+  if (pick && pressedLink && sc.contains(pressedLink) && pressedLink.matches('.picked') && drawn(pressedLink)) return pressedLink
   const mine = !pick ? [] : 'box' in pick ? ['[data-gr-pick]'] : 'section' in pick ? ['[data-gr-open="true"] > .sec-item-head'] : ['.link-chip.picked']
   return pick ? find([...mine, '[data-gr-pick], .link-chip.picked, .link.picked'], sc) : null
 }
@@ -505,6 +513,114 @@ export function holdPlaces(): Hold {
       putAt(guide.sc, guide)
     }
   }, spots.length > 0 || guide != null)
+}
+
+// ── the place, when the window changes size ───────────────────
+// A window that is turned, or dragged across one of the widths where the layout changes
+// (side by side, stacked, the sheet), wraps every line anew before anything on the page
+// hears of it: by then the same scroll offset is other code, and what was on show can no
+// longer be read off the panes. So the place is noted while the reviewer reads (after a
+// scroll, after anything the page does), and put back when the window's size changes: the
+// Code pane on its line, the Guide on its pick when that was in view, else on what was at
+// its top. By the line and the element, never by an offset.
+/** What the Guide on show is held by: its pick (`pick`), when that is in view, or what is at its top. */
+interface GuideHeld { sc: HTMLElement; el: Element; top: number; pick?: boolean }
+/** What the Code pane shows, as far as the store decides it: a place noted for other files is not put back. */
+const codeShows = (): string => { const st = useStore.getState(); return JSON.stringify([st.guide == null, st.showAll, pickKey(st.pick), st.view.commit ?? '', st.diffMode]) }
+let seen: { code: Held[]; shows: string; guide: GuideHeld | null } = { code: [], shows: '', guide: null }
+/** What the Guide on show is to be held by, as it is now. */
+function guideHeld(): GuideHeld | null {
+  const sc = [...document.querySelectorAll<HTMLElement>('[data-gr-guide]')].find(drawn)
+  if (!sc) return null
+  const same = asPut<GuideHeld>(sc)
+  if (same?.el.isConnected) return same
+  const el = pickIn(sc)
+  if (el && drawn(el)) {
+    const r = el.getBoundingClientRect(); const s = sc.getBoundingClientRect()
+    if (r.bottom > s.top && r.top < s.bottom) return { sc, el, top: topIn(el, sc), pick: true }
+  }
+  return guideSpot()
+}
+/** Note where both panes are. A Code pane that is folded away keeps the place it was noted at, while it still holds the same files. */
+function noteSeen(): void {
+  const shows = codeShows()
+  const code = readingSpot()
+  seen = { code: code.length || shows !== seen.shows ? code : seen.code, shows, guide: guideHeld() }
+}
+/** Put a Guide back on what it was held by; its pick is then kept in view, in a pane that is shorter now. */
+function putGuide(g: GuideHeld): void {
+  if (!drawn(g.sc)) return
+  // (a diagram laid out anew for the width draws its boxes again: the pick is found afresh)
+  const el = g.el.isConnected ? g.el : g.pick ? pickIn(g.sc) : null
+  if (!el || !drawn(el)) return
+  const by = topIn(el, g.sc) - g.top
+  if (Math.abs(by) >= 1) g.sc.scrollBy({ top: by })
+  if (g.pick) keepInView(el)
+  putAt(g.sc, g)
+}
+/** The line the Code pane is held by was the one showing under the file header pinned to
+ *  the top, often by the last of the rows it wrapped to. In a wider window it is one row,
+ *  and would lie behind that header: it is brought out from under it. (The pane still
+ *  counts as put on that line where it was, so the way back ends where it began.) */
+function showHeldLine(spots: Held[]): void {
+  const sc = codeScroller()
+  const spot = spots[0]
+  if (!sc || !drawn(sc) || !spot?.sel.startsWith('[data-gr-line')) return
+  const el = spot.el.isConnected ? spot.el : find([spot.sel], sc)
+  if (!el || !drawn(el)) return
+  const top = topIn(el, sc)
+  if (top + el.getBoundingClientRect().height >= 52) return
+  sc.scrollBy({ top: top - 40 })
+  putAt(sc, spots)
+}
+/** Keep the place in both panes while the window changes size (it is turned, dragged
+ *  narrower or wider): to be called once, by the workspace; hands back how to stop. */
+export function watchPlaces(): () => void {
+  let noting = 0
+  let sizing: { was: typeof seen; at: string; timers: number[] } | null = null
+  const note = (): void => {
+    if (sizing) return
+    window.clearTimeout(noting)
+    noting = window.setTimeout(noteSeen, 180)
+  }
+  const done = (): void => { if (sizing) { sizing.timers.forEach((t) => window.clearTimeout(t)); sizing = null } }
+  const put = (): void => {
+    if (!sizing) return
+    // (the page has gone to another step meanwhile, a jump the session made: that is where the panes belong)
+    if (window.location.hash !== sizing.at) { done(); return }
+    const { was } = sizing
+    if (was.code.length && was.shows === codeShows()) { putBack(was.code); showHeldLine(was.code) }
+    if (was.guide) putGuide(was.guide)
+  }
+  const resized = (): void => {
+    // (the first of a run: what was noted before it is what is held to, whatever the panes pass through on the way)
+    if (!sizing) { window.clearTimeout(noting); sizing = { was: seen, at: window.location.hash, timers: [] } }
+    sizing.timers.forEach((t) => window.clearTimeout(t))
+    put()
+    window.requestAnimationFrame(put)
+    // (again once the layout for the new size is drawn, and after what is laid out late: a diff gone unified, a diagram drawn anew)
+    sizing.timers = [150, 420, 900].map((ms) => window.setTimeout(put, ms))
+    sizing.timers.push(window.setTimeout(() => { put(); done(); noteSeen() }, 1300))
+  }
+  // (the reviewer moves on: nothing is put back under them)
+  const moves = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const
+  // (which of several links to the same code was pressed: see `pickIn`)
+  const pressed = (e: Event): void => { const link = e.target instanceof Element ? e.target.closest<HTMLElement>('.link-chip, .link') : null; if (link) pressedLink = link }
+  document.addEventListener('click', pressed, true)
+  const stop = useStore.subscribe(note)
+  document.addEventListener('scroll', note, { capture: true, passive: true })
+  window.addEventListener(PANES_SETTLED, note)
+  window.addEventListener('resize', resized)
+  for (const m of moves) window.addEventListener(m, done, { capture: true, passive: true })
+  note()
+  return () => {
+    stop(); done(); window.clearTimeout(noting)
+    document.removeEventListener('click', pressed, true)
+    document.removeEventListener('scroll', note, { capture: true })
+    window.removeEventListener(PANES_SETTLED, note)
+    window.removeEventListener('resize', resized)
+    for (const m of moves) window.removeEventListener(m, done, { capture: true })
+  }
 }
 
 /** Show a section's header among the files (the files grouped by section): all the files, at that header. */

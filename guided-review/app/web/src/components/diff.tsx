@@ -54,6 +54,18 @@ let hovered: string | null = null
 export const hoveredLine = (): string | null => hovered
 /** the same for a block of a rendered Markdown file, which stands for its first line */
 const hoverLine = (key: string | null): void => { hovered = key }
+// ── the line that was tapped, where nothing hovers ────────────
+// The "+" that comments on a line shows while the pointer is on the line. A touch screen
+// has no pointer to rest there: the line last tapped is marked instead (`data-tapped`, an
+// attribute React does not manage), and the styles show its "+" where there is no hover.
+let tappedLine: HTMLElement | null = null
+function tapLine(e: { target: EventTarget }): void {
+  const cell = e.target instanceof Element ? e.target.closest<HTMLElement>('.code') : null
+  if (!cell || cell === tappedLine || !cell.querySelector(':scope > .add-line')) return
+  if (tappedLine) delete tappedLine.dataset.tapped
+  cell.dataset.tapped = ''
+  tappedLine = cell
+}
 
 const keyOf = (path: string, side: 'old' | 'new', n: number): string => `diff:${path}:${side}:${n}`
 const lineKeys = (path: string, l: DiffLine): string[] => {
@@ -423,13 +435,11 @@ const GENERATED = /(^|\/)(dist|node_modules|vendor)\/|\.min\.[a-z]+$|\.map$|(^|\
 const sizeText = (chars: number): string => (chars >= 1_000_000 ? `${(chars / 1_000_000).toFixed(1)} MB` : chars >= 1000 ? `${Math.round(chars / 1000)} KB` : `${chars} B`)
 
 /** A changed file, in the shape of a GitHub "Files changed" box. */
-export function FileBox({ file, split, section, sectionNo, grouped, note, whitespaceOnly, hidden: outOfSight, order }: {
+export function FileBox({ file, split, section, sectionNo, grouped, note, whitespaceOnly, hidden: outOfSight }: {
   file: FileDiff; split: boolean; section?: Section; note?: string
   /** kept as it is, out of sight: the Code pane is narrowed to other files. It comes back
    *  as it was (its diff is not drawn or highlighted again) when the narrowing reaches it. */
   hidden?: boolean
-  /** its place among the files on show, where that is not the list's own order (a section's files, in the walkthrough's order) */
-  order?: number
   /** the section's position in the walkthrough: picks its colour */
   sectionNo?: number
   /** the file sits under its section's header, which already says what it belongs to */
@@ -539,7 +549,7 @@ export function FileBox({ file, split, section, sectionNo, grouped, note, whites
   const body = <DiffBody key={`${signature}|${view?.ignoreWhitespace ? 'w' : ''}`} file={file} hunks={hunks} split={split} placed={placed} outside={outside} composer={commitView ? null : composer} canExpand={canExpand} readOnly={commitView} expandAll={expandAll} />
 
   return (
-    <div className={'file' + (open ? ' open' : '') + (section && !grouped ? ' in-sec' : '')} style={{ ...(section ? secStyle(sectionNo) : {}), ...(order != null ? { order } : {}) }} hidden={outOfSight} data-gr-file={file.path} data-gr-file-section={section?.id} data-gr-viewed={viewed ? 'true' : changed ? 'changed' : 'false'}>
+    <div className={'file' + (open ? ' open' : '') + (section && !grouped ? ' in-sec' : '')} style={section ? secStyle(sectionNo) : undefined} hidden={outOfSight} data-gr-file={file.path} data-gr-file-section={section?.id} data-gr-viewed={viewed ? 'true' : changed ? 'changed' : 'false'} onClick={tapLine}>
       <div className="file-head">
         <button className="icon-btn" aria-expanded={open} aria-label={open ? 'Collapse file' : 'Expand file'} onClick={() => setFileOpen(file.path, !open)}>
           <Icon name={open ? 'chevDown' : 'chevRight'} />

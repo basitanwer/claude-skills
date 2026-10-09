@@ -3,13 +3,13 @@ import type {
   AnchorInput, Artifact, Comment, FactRow, FileDiff, FocusTarget, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
 import { useStore, typing, SHEET_BELOW, STACK_BELOW, TREE_BESIDE_GUIDE, treeWidthLimits, type Filters } from '../store'
-import { focusAnchor, focusQuestion, followFiles, holdCodePlace, holdPlaces, liftHolds, liftPick, lowerPick, openSection, showIfOut, showPick, showSectionHeader, startTour, unparkCodePlace, type Lift } from '../focus'
+import { focusAnchor, focusQuestion, followFiles, holdCodePlace, holdPlaces, liftHolds, liftPick, lowerPick, openSection, showIfOut, showPick, showSectionHeader, startTour, unparkCodePlace, watchPlaces, type Lift } from '../focus'
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, narrowingOf, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
   PANES_SETTLED, pickKey, sinceActive, stuckReason, stuckText, symLabel, targetLabel, type CodePick, type DiffMode, type Guide, type Narrowing
 } from '../util'
-import { AwayHint, CopyButton, DiffStat, FileIcon, GuideCtx, Icon, Md, Menu, MenuItem, PresenceDot, ThemeToggle, currentTheme, setTheme, usePickLink } from '../components/common'
+import { AwayHint, CopyButton, DiffStat, FileIcon, GuideCtx, Icon, Md, Menu, MenuItem, PresenceDot, ThemeToggle, currentTheme, setTheme, useFitted, usePickLink } from '../components/common'
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
 import { FileBox, hoveredLine } from '../components/diff'
 import { VisualTab } from '../components/visual'
@@ -113,6 +113,8 @@ function Details({ loaded, title }: { loaded: LoadedReview; title: string }) {
   const open = useStore((s) => s.detailsOpen)
   const setOpen = (detailsOpen: boolean): void => useStore.getState().set({ detailsOpen })
   const box = useRef<HTMLDivElement>(null)
+  const pop = useRef<HTMLDivElement>(null)
+  useFitted(pop, open)
   const { pair } = loaded.session
   const files = loaded.files.filter((f) => !f.excluded)
   // the commits made since the walkthrough was written, or since the approval, are marked off from the ones before
@@ -134,7 +136,7 @@ function Details({ loaded, title }: { loaded: LoadedReview; title: string }) {
       <button className="btn sm" aria-haspopup="true" aria-expanded={open} aria-controls="gr-details" data-gr="details" title="The comparison, the commits, the effort and the size of this change" onClick={() => setOpen(!open)}>
         Details{threads.length > 0 && <span className="counter" title={`${plural(threads.length, 'comment')} on the title`}>{threads.length}</span>}<Icon name="chevDown" size={12} />
       </button>
-      <div className="menu-pop left details-pop" id="gr-details" hidden={!open} role="group" aria-label="About this review" data-gr="details-pop">
+      <div className="menu-pop left details-pop" id="gr-details" hidden={!open} role="group" aria-label="About this review" data-gr="details-pop" ref={pop}>
         <div className="details-body">
           <div className="pr-title-row">
             <h2>{title}{saved && <span className="pr-num"> #{loaded.sessionId}</span>}</h2>
@@ -696,6 +698,18 @@ function useTreePlace(): { room: boolean; column: boolean; over: boolean; all: b
   return { room, column, over: treeOver && !column, all: guide && !beside, canPin: guide && beside && !big }
 }
 
+/** The click that ends the press now under way goes nowhere: the press was spent on closing
+ *  what lay over the page. It is the next click only, and only if it follows at once (a
+ *  press that turns into a drag, or is let go off the page, ends in none). */
+function swallowClick(): void {
+  const end = (): void => { document.removeEventListener('click', eat, true); document.removeEventListener('mouseup', released, true); document.removeEventListener('mousedown', end, true) }
+  const eat = (e: Event): void => { e.preventDefault(); e.stopPropagation(); end() }
+  const released = (): void => { window.setTimeout(end, 0) }       // (the click, if there is one, comes straight after the release)
+  document.addEventListener('click', eat, true)
+  document.addEventListener('mouseup', released, true)
+  document.addEventListener('mousedown', end, true)       // (a new press: not heard for the one under way)
+}
+
 /** the last "open the tree at this folder" that the tree panel carried out */
 let shownAt = 0
 /** The tree panel: the changed files as a tree (or a list, or grouped by walkthrough
@@ -768,11 +782,20 @@ function TreePanel({ loaded, over }: { loaded: LoadedReview; over: boolean }) {
     if (!over) return
     const shut = (): void => set({ treeOver: false })
     const key = (e: KeyboardEvent): void => { if (e.key === 'Escape') shut() }
-    // (the toggle and the path bar open and close it themselves)
-    const off = (e: MouseEvent): void => { if (e.target instanceof Element && !box.current?.contains(e.target) && !e.target.closest('[data-gr="tree-toggle"], [data-gr="path-bar"], .menu-pop')) shut() }
+    // A press outside it closes it, and does nothing else: what lies under the press (a
+    // Guide's tab, a section's row, a file's header in the strip beside the tree) is not
+    // also acted on. (The toggle and the path bar open and close it themselves.)
+    const off = (e: MouseEvent): void => {
+      if (!(e.target instanceof Element) || box.current?.contains(e.target) || e.target.closest('[data-gr="tree-toggle"], [data-gr="path-bar"], .menu-pop')) return
+      if (e.button === 0) { e.preventDefault(); e.stopPropagation(); swallowClick() }
+      shut()
+    }
+    // (a mouse's press is heard here before the press itself: nothing under it starts a drag. A finger's is left alone, it may be a scroll.)
+    const press = (e: PointerEvent): void => { if (e.pointerType === 'mouse' && e.button === 0 && e.target instanceof Element && !box.current?.contains(e.target) && !e.target.closest('[data-gr="tree-toggle"], [data-gr="path-bar"], .menu-pop')) e.stopPropagation() }
     document.addEventListener('keydown', key)
-    document.addEventListener('mousedown', off)
-    return () => { document.removeEventListener('keydown', key); document.removeEventListener('mousedown', off) }
+    document.addEventListener('pointerdown', press, true)
+    document.addEventListener('mousedown', off, true)
+    return () => { document.removeEventListener('keydown', key); document.removeEventListener('pointerdown', press, true); document.removeEventListener('mousedown', off, true) }
   }, [over, set])
   return (
     <PickedCtx.Provider value={picked}>
@@ -986,6 +1009,14 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   // narrowing leave out just now: a file that goes out of sight and comes back is the same
   // box, in the same place.
   const groups = useMemo(() => F.group(kept), [loaded.files, F.wsPaths, bySection, treeView, wt])       // eslint-disable-line react-hooks/exhaustive-deps
+  // Files on show in another order than the list's (a section's, in the walkthrough's order)
+  // sit in the page in that order too, the others after them: what the keys and a screen
+  // reader go through is what is seen, top to bottom. (The boxes are moved, not drawn anew.)
+  const inOrder = (files: FileDiff[]): FileDiff[] => {
+    if (show !== 'pick' || !to?.ordered) return files
+    const at = (f: FileDiff): number => { const i = to.files.indexOf(f.path); return i < 0 ? to.files.length : i }
+    return [...files].sort((a, b) => at(a) - at(b))
+  }
   // a file's box is drawn the first time the file is on show, and kept from then on
   const drawn = useRef(new Set<string>())
   for (const g of groups) for (const f of g.files) if (on(f)) drawn.current.add(f.path)
@@ -1093,7 +1124,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
               {bySection && (g.section
                 ? <SectionHeader section={g.section} files={g.files} no={sectionNo(g.section)} />
                 : <div className="sec-head plain" id="gr-loose"><h3>Not in the walkthrough</h3><span className="muted small">{plural(g.files.length, 'file')}</span></div>)}
-              {g.files.map((f) => (drawn.current.has(f.path) ? <FileBox key={f.path} file={f} split={split} hidden={!on(f)} order={show === 'pick' && to?.ordered ? to.files.indexOf(f.path) : undefined} whitespaceOnly={F.wsPaths.has(f.path)} section={sectionOf.get(f.path)} sectionNo={sections.get(f.path)?.no} grouped={bySection} note={sectionOf.get(f.path)?.plainNotes?.[f.path]} /> : null))}
+              {inOrder(g.files).map((f) => (drawn.current.has(f.path) ? <FileBox key={f.path} file={f} split={split} hidden={!on(f)} whitespaceOnly={F.wsPaths.has(f.path)} section={sectionOf.get(f.path)} sectionNo={sections.get(f.path)?.no} grouped={bySection} note={sectionOf.get(f.path)?.plainNotes?.[f.path]} /> : null))}
             </div>
           ))}
           {show === 'all' && filters.showExcluded && excluded.length > 0 && (
@@ -1448,10 +1479,13 @@ function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
             const now = Date.now()
             if (now - pressed.current < DOUBLE_CLICK) return
             pressed.current = now
-            // the next row opens where this one's head was, when that was in view; else at the top of the pane
+            // The next row opens where this one's head was, when that was in view with room
+            // under it to read in (its head, some lines of its text and the actions pinned to
+            // the foot of the pane: a short pane, where the panes are stacked, has that room
+            // only near its top); else at the top of the pane.
             const head = row ? topOf(row) : 8
             const sc = row?.closest('[data-gr-scroll]')
-            const at = sc && head >= 0 && head < sc.clientHeight - 120 ? head : 8
+            const at = sc && head >= 0 && head < sc.clientHeight - 200 ? head : 8
             const go = (): void => { if (next) open(next.id, next.id, at) }
             // never a toggle: on a section already ticked it only moves on
             if (ticked) return go()
@@ -1931,13 +1965,18 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
     const here = guide ? document.querySelector<HTMLElement>(`[data-gr-scroll="${guide}"]`) : null
     if (!was && here) { was = parked.current.get(here) ?? null; parked.current.delete(here) }
     const sc = sheetUp ? here : null
-    if (!sc) { lift.current = null; if (was) lowerPick(was); return }
+    // (The sheet is gone because the window is wide enough for both panes now, not because
+    // it was closed: the Guide is not put back where it was before the pick. It is held on
+    // its pick, as it is through any change of the window's size.)
+    if (!sc) { lift.current = null; if (was && layout === 'sheet') lowerPick(was); return }
     const from = was && was.sc === sc && liftHolds(was) ? { by: was.by, y: was.y } : { by: 0, y: sc.scrollTop }
     const keep = (): void => { lift.current = liftPick(sc, lift.current, from) }
     const frame = window.requestAnimationFrame(keep)
     const timers = [120, 320].map((ms) => window.setTimeout(keep, ms))
     return () => { window.cancelAnimationFrame(frame); timers.forEach((t) => window.clearTimeout(t)) }
-  }, [sheetUp, picked, guide])
+  }, [sheetUp, picked, guide])       // eslint-disable-line react-hooks/exhaustive-deps
+  // the place in both panes, kept while the window changes size (a phone turned, a window dragged across a layout line)
+  useEffect(() => watchPlaces(), [])
   // The room Guide and code share is what the tree panel leaves, wherever the tree has a
   // column to be in, whether it is switched on just now or not: hiding the tree gives its
   // room to the code, and the Guide (a diagram laid out for its width) stays as it is.

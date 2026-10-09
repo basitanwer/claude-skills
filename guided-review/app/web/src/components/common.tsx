@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { createContext, memo, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { FocusTarget, Presence, RefOptions } from '@shared/types'
@@ -108,7 +108,10 @@ export function currentTheme(): 'light' | 'dark' {
 export function setTheme(next: 'light' | 'dark'): void {
   document.documentElement.dataset.theme = next
   try { localStorage.setItem('gr-theme', next) } catch { /* storage blocked — the choice lasts for this page */ }
+  window.dispatchEvent(new window.Event(THEME_SET))
 }
+/** told to the window when the theme is chosen (the top bar's button and View settings both choose it) */
+const THEME_SET = 'gr-theme-set'
 
 // ── icons (16px, stroke = currentColor) ───────────────────────
 const PATHS: Record<string, string> = {
@@ -212,6 +215,40 @@ export function CopyButton({ text, title }: { text: string; title: string }) {
   return <button className="icon-btn" title={done ? 'Copied' : title} aria-label={title} onClick={copy}><Icon name={done ? 'check' : 'copy'} /></button>
 }
 
+/** Keep an open popover inside the window: it hangs from its button, to the left or to the
+ *  right, and on a narrow window (or from a button near an edge) that would put part of it
+ *  off the page, where nothing scrolls to it. It is moved sideways by what it sticks out,
+ *  inside the pane that would cut it off if it is in one, and made no taller than the room
+ *  under its top: it scrolls inside itself. Fitted when it opens, and again when it or the
+ *  window changes size. */
+export function useFitted(pop: RefObject<HTMLElement | null>, open: boolean): void {
+  useLayoutEffect(() => {
+    const el = pop.current
+    if (!open || !el) return
+    const fit = (): void => {
+      el.style.transform = ''
+      el.style.maxWidth = ''
+      el.style.maxHeight = ''
+      let r = el.getBoundingClientRect()
+      if (!r.width) return
+      const pane = el.closest('[data-gr-scroll]')?.getBoundingClientRect()
+      const lo = Math.max(8, (pane?.left ?? 0) + 4)
+      const hi = Math.min(window.innerWidth - 8, (pane?.right ?? window.innerWidth) - 4)
+      if (r.width > hi - lo) { el.style.maxWidth = `${Math.floor(hi - lo)}px`; r = el.getBoundingClientRect() }
+      const by = r.right > hi ? Math.max(lo - r.left, hi - r.right) : r.left < lo ? lo - r.left : 0
+      if (Math.abs(by) >= 1) el.style.transform = `translateX(${Math.round(by)}px)`
+      // (in a pane, what is under the pane's edge is scrolled to with the pane)
+      const room = window.innerHeight - r.top - 8
+      if (!pane && r.height > room) el.style.maxHeight = `${Math.max(96, Math.floor(room))}px`
+    }
+    fit()
+    const ro = new ResizeObserver(fit)
+    ro.observe(el)
+    window.addEventListener('resize', fit)
+    return () => { ro.disconnect(); window.removeEventListener('resize', fit); el.style.transform = ''; el.style.maxWidth = ''; el.style.maxHeight = '' }
+  }, [pop, open])
+}
+
 /** A button that opens a popover; closes on outside click and Escape. */
 export function Menu({ label, title, className, align = 'left', children, hook, onOpen }: {
   label: ReactNode; title?: string; className?: string; align?: 'left' | 'right'; hook?: string; onOpen?: () => void
@@ -219,6 +256,8 @@ export function Menu({ label, title, className, align = 'left', children, hook, 
 }) {
   const [open, setOpen] = useState(false)
   const box = useRef<HTMLDivElement>(null)
+  const pop = useRef<HTMLDivElement>(null)
+  useFitted(pop, open)
   useEffect(() => {
     if (!open) return
     const off = (e: MouseEvent): void => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false) }
@@ -230,7 +269,7 @@ export function Menu({ label, title, className, align = 'left', children, hook, 
   return (
     <div className="menu" ref={box}>
       <button className={className ?? 'btn sm'} title={title} aria-haspopup="true" aria-expanded={open} data-gr={hook} onClick={() => { if (!open) onOpen?.(); setOpen(!open) }}>{label}</button>
-      {open && <div className={'menu-pop ' + align} role="menu">{typeof children === 'function' ? children(() => setOpen(false)) : children}</div>}
+      {open && <div className={'menu-pop ' + align} role="menu" ref={pop}>{typeof children === 'function' ? children(() => setOpen(false)) : children}</div>}
     </div>
   )
 }
@@ -377,6 +416,14 @@ export function TourBar() {
 
 export function ThemeToggle() {
   const [, bump] = useState(0)
+  // (with no theme chosen the page follows the system's: when that changes under the page, so does what this button offers)
+  useEffect(() => {
+    const m = window.matchMedia?.('(prefers-color-scheme: dark)')
+    const on = (): void => bump((n) => n + 1)
+    m?.addEventListener('change', on)
+    window.addEventListener(THEME_SET, on)
+    return () => { m?.removeEventListener('change', on); window.removeEventListener(THEME_SET, on) }
+  }, [])
   const dark = currentTheme() === 'dark'
   return (
     <button className="icon-btn" title={dark ? 'Switch to light' : 'Switch to dark'} aria-label="Switch theme" onClick={() => { setTheme(dark ? 'light' : 'dark'); bump((n) => n + 1) }}>

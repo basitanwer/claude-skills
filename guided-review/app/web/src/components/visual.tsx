@@ -110,19 +110,29 @@ function NodeCard({ node, view, loaded, at, link, pane, beside }: {
   const code = useMemo(() => (beside && link ? { lines: [], more: 0 } : codeOf(node, loaded)), [node, loaded, beside, link])
   const vh = window.innerHeight
   const W = Math.min(440, pane.right - pane.left - 16)
+  // how tall the card is with everything in it showing: known once it is drawn, and it is placed again by it before it is seen
+  const card = useRef<HTMLDivElement>(null)
+  const [need, setNeed] = useState(0)
+  useLayoutEffect(() => { const el = card.current; if (el) setNeed(el.scrollHeight + el.offsetHeight - el.clientHeight) })
   // Beside the box when the pane has room there, so that the boxes above and below it,
   // which are usually the ones it connects to, stay in view; else under it, else above it.
   // From its upper half the card hangs down, from its lower half it stands up: in both it
   // ends 8px short of the pane's edge (`lo`, `hi`), and is cut off there if it is longer.
+  // In a short pane (the panes stacked) a card beside its box is moved up, or down, by what
+  // it would be cut off by while the pane can hold more of it; one under or above its box
+  // goes to whichever of the two has room for it, and never over the box.
   const side = pane.right - at.right >= W + 20 ? at.right + 12 : at.left - pane.left >= W + 20 ? at.left - W - 12 : null
   const lo = pane.top + 8
   const hi = pane.bottom - 8
   const upper = at.top < (pane.top + pane.bottom) / 2
-  const top = Math.max(lo, side != null ? at.top : at.bottom + 8)
-  const foot = Math.min(hi, side != null ? at.bottom : at.top - 8)
-  const where = { left: side ?? Math.max(pane.left + 8, Math.min(at.left, pane.right - W - 8)), ...(upper ? { top, maxHeight: Math.max(0, hi - top) } : { bottom: vh - foot, maxHeight: Math.max(0, foot - lo) }) }
+  const under = hi - at.bottom - 8
+  const over = at.top - 8 - lo
+  const down = side != null || !need ? upper : upper ? need <= under || under >= over : !(need <= over || over >= under)
+  const top = Math.max(lo, side != null ? Math.min(at.top, hi - need) : at.bottom + 8)
+  const foot = Math.min(hi, side != null ? Math.max(at.bottom, lo + need) : at.top - 8)
+  const where = { left: side ?? Math.max(pane.left + 8, Math.min(at.left, pane.right - W - 8)), ...(down ? { top, maxHeight: Math.max(0, hi - top) } : { bottom: vh - foot, maxHeight: Math.max(0, foot - lo) }) }
   return (
-    <div className="viz-card" id="gr-viz-card" role="tooltip" data-gr="visual-card" style={{ width: W, ...where }}>
+    <div className="viz-card" id="gr-viz-card" role="tooltip" data-gr="visual-card" ref={card} style={{ width: W, ...where }}>
       <div className="viz-card-head">
         <strong>{node.label}</strong>
         <span className={'label viz-status ' + node.status}>{STATUS[node.status].label}</span>
@@ -245,7 +255,8 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
         {view.edges.some((e) => e.kind === 'removed') && <span className="viz-key" title="Claude Code's reading of the change, not something git can confirm"><span className="viz-line removed" aria-hidden="true" />Connection removed</span>}
         {groups.map((g, i) => <span key={g} className="viz-key" style={secStyle(i)}><span className="sec-dot" aria-hidden="true" />{g}</span>)}
         <span className="grow" />
-        <span className="muted">Point at a box for what it is and its code. Click one to show its code beside the diagram.</span>
+        <span className="muted viz-hint point">Point at a box for what it is and its code. Click one to show its code in the Code pane.</span>
+        <span className="muted viz-hint touch">Tap a box to show its code.</span>
       </div>
       <div className="viz-canvas" ref={canvas}>
         {/* never wider than the Guide pane: a wide layer was broken into rows, and what is still too wide is drawn smaller */}

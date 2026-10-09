@@ -32,7 +32,7 @@
   --radius: 6px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --tk-kw: #a626a4; --tk-str: #2f7d32; --tk-num: #b5651d; --tk-com: #8a94a0; --tk-fn: #1f5fbf; --tk-type: #0f7f8c;
+  --tk-kw: #a626a4; --tk-str: #2f7d32; --tk-num: #b5651d; --tk-com: #656d76; --tk-fn: #1f5fbf; --tk-type: #0f7f8c;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
@@ -43,7 +43,7 @@
     --add-bg: #12281b; --add-mark: #1f5a36; --del-bg: #2f1917; --del-mark: #6b2a25; --since: #2fc59d; --since-viewed: #e2b04a;
     --flash: #4a4212; --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.45);
     --sec-1: #58a6ff; --sec-2: #bc8cff; --sec-3: #f778ba; --sec-4: #f0883e; --sec-5: #39c5cf; --sec-6: #c9b458; --sec-7: #8c9eff; --sec-8: #d4a373;
-    --tk-kw: #d08ce0; --tk-str: #9bd39b; --tk-num: #e0a56a; --tk-com: #6f7c8a; --tk-fn: #7fb2f5; --tk-type: #62c8d3;
+    --tk-kw: #d08ce0; --tk-str: #9bd39b; --tk-num: #e0a56a; --tk-com: #8591a0; --tk-fn: #7fb2f5; --tk-type: #62c8d3;
     color-scheme: dark;
   }
 }
@@ -54,7 +54,7 @@
   --add-bg: #12281b; --add-mark: #1f5a36; --del-bg: #2f1917; --del-mark: #6b2a25; --since: #2fc59d; --since-viewed: #e2b04a;
   --flash: #4a4212; --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.45);
     --sec-1: #58a6ff; --sec-2: #bc8cff; --sec-3: #f778ba; --sec-4: #f0883e; --sec-5: #39c5cf; --sec-6: #c9b458; --sec-7: #8c9eff; --sec-8: #d4a373;
-  --tk-kw: #d08ce0; --tk-str: #9bd39b; --tk-num: #e0a56a; --tk-com: #6f7c8a; --tk-fn: #7fb2f5; --tk-type: #62c8d3;
+  --tk-kw: #d08ce0; --tk-str: #9bd39b; --tk-num: #e0a56a; --tk-com: #8591a0; --tk-fn: #7fb2f5; --tk-type: #62c8d3;
   color-scheme: dark;
 }
 
@@ -320,9 +320,11 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .workspace > .tree-panel, .tree-panel.over { flex: none; width: calc(var(--tree-w, 300px) + 26px); max-width: 100%; padding: 8px 16px 0 10px; border-left: 1px solid var(--border); background: var(--bg); }
 /* (over the files only: the toolbar, the path bar and what the pane says it shows stay in reach above it) */
 .tree-panel.over { position: absolute; top: 0; right: 0; bottom: 0; z-index: 55; border-left-color: var(--border-strong); box-shadow: var(--shadow); }
+/* (a tour's bar floats over the foot of the page: the tree's last rows can be scrolled clear of it) */
+body:has(.tourbar) .tree-panel.over > .tree { padding-bottom: 148px; }
 /* the pane the keys go to (`w` moves them): a quiet line along its top */
 [data-gr-scroll]:focus { outline: 0; box-shadow: inset 0 2px 0 var(--accent); }
-/* files on show in another order than the list's (a section's, in the walkthrough's order) are placed by `order` */
+/* (a column: the boxes of a group, one under the other; a pick's files sit in the page in the order they are shown in) */
 .file-group { display: flex; flex-direction: column; }
 /* the Walkthrough Guide: the summary, then the sections as rows; one is open in place */
 .walk { display: flex; flex-direction: column; gap: 12px; } .walk > .flash-banner { margin: 0; } .walk .effort-line { margin: 0; }
@@ -399,6 +401,8 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .code.since { box-shadow: inset -3px 0 0 var(--since); } .code.since-viewed { box-shadow: inset -3px 0 0 var(--since-viewed); }
 .add-line { position: absolute; left: -11px; top: -1px; width: 22px; height: 22px; display: none; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; z-index: 2; box-shadow: var(--shadow); }
 .code:hover > .add-line, .add-line:focus-visible { display: inline-flex; } .add-line:hover { transform: scale(1.15); }
+/* where nothing hovers (a touch screen) the "+" cannot wait for a pointer: it shows on the line that was last tapped */
+@media (hover: none) { .code[data-tapped] > .add-line { display: inline-flex; } .add-line:hover { transform: none; } }
 .dr-threads { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--bg); padding: 8px 12px 8px 60px; font: 14px/1.5 var(--font); }
 .dr-threads.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding: 0; } .dr-threads.two > div { padding: 8px 12px 8px 60px; min-width: 0; } .dr-threads.two > div + div { border-left: 1px solid var(--border); }
 .dr-threads.two > div:empty { background: var(--bg-soft); }
@@ -563,6 +567,8 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .viz-views { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .viz-caption { margin-bottom: 10px; color: var(--text-2); }
 .viz { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); margin-bottom: 12px; }
+/* (what the legend says to do with a box, where there is a pointer and where there is none) */
+.viz-hint.touch { display: none; } @media (hover: none) { .viz-hint.point { display: none; } .viz-hint.touch { display: inline; } }
 .viz-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-soft); border-radius: var(--radius) var(--radius) 0 0; color: var(--text-2); }
 .viz-key { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .viz-swatch { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 14px; border: 1.5px solid var(--border-strong); border-radius: 3px; font-size: 11px; font-weight: 700; line-height: 1; background: var(--bg); }
