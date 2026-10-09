@@ -5,7 +5,7 @@ import type { FocusTarget, Presence, RefOptions } from '@shared/types'
 import { api } from '../api'
 import { highlightBlock } from '../highlight'
 import { useStore } from '../store'
-import { focusAnchor, goBack } from '../focus'
+import { focusAnchor } from '../focus'
 import { short, type Guide } from '../util'
 
 // ── the Guide a thing is drawn in ─────────────────────────────
@@ -370,21 +370,6 @@ export function TourBar() {
         <button className="btn sm" onClick={() => focusAnchor(stop.target)}>Show again</button>
         <button className="btn sm primary" disabled={!tour.loop && tour.idx === n - 1} onClick={() => step(1)}>Next</button>
       </div>
-    </div>
-  )
-}
-
-/** After a jump took a pane far from what the reviewer was reading in it: one click back
- *  to where it was. Drawn in the pane it is about (`pane`: the Guide pane or the Code pane). */
-export function BackBar({ pane }: { pane: 'guide' | 'code' }) {
-  const back = useStore((s) => s.returnTo)
-  const tour = useStore((s) => s.tour != null)
-  const set = useStore((s) => s.set)
-  if (!back || (back.pane === 'code') !== (pane === 'code')) return null
-  return (
-    <div className={'backbar' + (tour ? ' above-tour' : '')} data-gr="back">
-      <button className="backbar-go" title="Return to where you were before the jump" onClick={goBack}><Icon name="arrowLeft" size={14} />Back to <strong className="clip">{back.label}</strong></button>
-      <button className="icon-btn" aria-label="Dismiss" onClick={() => set({ returnTo: null })}>×</button>
     </div>
   )
 }

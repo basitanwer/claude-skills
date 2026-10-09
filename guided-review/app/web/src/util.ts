@@ -7,10 +7,11 @@ import type {
 /** What the tabs of the page were called, which an address from before the workspace still names (`tab=`). */
 type Tab = 'conversation' | 'commits' | 'spec' | 'visual' | 'files'
 /** One of the things the reviewer reasons from, shown in the Guide pane beside the code:
- *  the Walkthrough, Visualize, the Conversation, Spec & plan (and, until it goes, Commits).
- *  The address names it as `guide=`. */
-export type Guide = 'walkthrough' | 'visual' | 'conversation' | 'spec' | 'commits'
-export const GUIDES: Guide[] = ['walkthrough', 'visual', 'conversation', 'spec', 'commits']
+ *  the Walkthrough, Visualize, the Conversation, Spec & plan. The address names it as
+ *  `guide=`. (The commits are not one: they open from Details in the top bar and from the
+ *  changes menu of the Code pane.) */
+export type Guide = 'walkthrough' | 'visual' | 'conversation' | 'spec'
+export const GUIDES: Guide[] = ['walkthrough', 'visual', 'conversation', 'spec']
 /** A pick: the item chosen in a Guide, which the Code pane is narrowed to. It is small
  *  enough for the address to carry, and says where its code is, not what the code was: a
  *  box of a diagram (by diagram and box, so a redrawn diagram is asked again), a section of
@@ -102,6 +103,9 @@ export type Route =
       /** the address itself says where to be (a Guide, a pick, a focus): it is followed,
        *  and the review is not reopened where it was left. Not part of the address. */
       here?: boolean
+      /** the address is one of the Commits tab there once was: the review opens with the
+       *  Guide pane closed and the commits on show (in Details). Not part of the address. */
+      commits?: boolean
       /** hide whitespace-only changes */
       w?: boolean
       /** show only this commit of the range */
@@ -124,14 +128,15 @@ export function parseHash(hash: string): Route {
     const all = guide && sp.get('all') === '1' ? true : undefined
     // (`guide=none`: the Guide pane closed, said outright, so that the address of a review
     // with the pane closed opens so anywhere, and not where another browser left it)
-    const here = Boolean(guide || pick || focus || tab === 'files' || sp.get('guide') === 'none') || undefined
+    const commits = tab === 'commits' || sp.get('guide') === 'commits' || undefined
+    const here = Boolean(guide || pick || focus || tab === 'files' || sp.get('guide') === 'none' || commits) || undefined
     const w = sp.get('w') === '1' ? true : undefined
     const commit = sp.get('commit') || undefined
-    if (sp.get('session') && Number.isFinite(session)) return { name: 'review', session, focus, guide, pick, all, here, w, commit }
+    if (sp.get('session') && Number.isFinite(session)) return { name: 'review', session, focus, guide, pick, all, here, commits, w, commit }
     if (sp.get('repo')) {
       return {
         name: 'review', repo: sp.get('repo')!, base: sp.get('base') ?? undefined, compare: sp.get('compare') ?? undefined,
-        fresh: sp.get('fresh') === '1', direct: sp.get('direct') === '1', focus, guide, pick, all, here, w, commit
+        fresh: sp.get('fresh') === '1', direct: sp.get('direct') === '1', focus, guide, pick, all, here, commits, w, commit
       }
     }
   }

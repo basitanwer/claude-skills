@@ -459,7 +459,6 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .mode-btn { max-width: min(360px, 60vw); } .mode-label { overflow: hidden; text-overflow: ellipsis; }
 .menu-item input[type="checkbox"] { margin: 0; } label.menu-item { cursor: pointer; }
 .viewed-box.off { opacity: 0.55; cursor: default; }
-.commit-link { font-weight: 600; color: var(--text); } .commit-link:hover { color: var(--accent-ink); }
 .resize-handle { position: absolute; top: 0; left: 0; bottom: 0; width: 6px; cursor: col-resize; border-left: 2px solid transparent; touch-action: none; }
 .resize-handle:hover, .resize-handle:focus-visible, .resize-handle:active { border-left-color: var(--accent); outline: 0; }
 .st-approved { color: var(--ok); } .st-stale { color: var(--warn); }
@@ -493,11 +492,6 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .tree-row.here { background: color-mix(in srgb, var(--sec, var(--accent)) 16%, transparent); box-shadow: inset 3px 0 0 var(--sec, var(--accent)); border-radius: 0 var(--radius) var(--radius) 0; font-weight: 600; }
 .tree-row.here:hover { background: color-mix(in srgb, var(--sec, var(--accent)) 26%, transparent); }
 
-/* back to where a pane was before a jump: at the foot of that pane */
-.backbar { position: absolute; left: 16px; bottom: 16px; z-index: 60; display: flex; align-items: center; gap: 2px; max-width: min(440px, calc(100vw - 32px)); padding: 3px 4px; background: var(--panel); border: 1px solid var(--accent); border-radius: 2em; box-shadow: var(--shadow); }
-.backbar-go { display: inline-flex; align-items: center; gap: 6px; min-width: 0; border: 0; background: none; padding: 4px 10px; border-radius: 2em; cursor: pointer; color: var(--accent-ink); white-space: nowrap; }
-.backbar-go:hover { background: var(--bg-sunk); } .backbar-go strong { color: var(--text); }
-
 /* the open section of the walkthrough: its files, and the chip of a file whose section is open */
 .sec-panel-files { display: flex; flex-direction: column; border-top: 1px solid var(--border); padding-top: 10px; }
 .sec-chip.on { background: color-mix(in srgb, var(--sec) 28%, transparent); border-color: var(--sec); color: var(--text); }
@@ -506,8 +500,6 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .file-msg.held { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .more-line { display: inline-block; margin-left: 8px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 2em; background: var(--bg); color: var(--accent-ink); font: 500 12px/18px var(--font); white-space: normal; max-width: 100%; user-select: none; cursor: pointer; }
 .more-line:hover { background: var(--bg-sunk); }
-/* a tour's bar sits at the bottom centre: the way back moves above it */
-.backbar.above-tour { bottom: 172px; }
 
 /* question follow-ups */
 .thread.ask .thread-main.reply.failed, .thread.ask .thread-main.reply.cancelled { flex-wrap: wrap; } .thread.ask .thread-main.reply > .btn { margin-left: auto; }

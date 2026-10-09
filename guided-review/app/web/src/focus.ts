@@ -64,37 +64,6 @@ function find(sels: string[], within: ParentNode = document): HTMLElement | null
   return null
 }
 
-const PANE_NAMES: Record<Pane, string> = { code: 'the code', walkthrough: 'Walkthrough', conversation: 'Conversation', commits: 'Commits', spec: 'Spec & plan', visual: 'Visualize' }
-type Spot = NonNullable<ReturnType<typeof useStore.getState>['returnTo']>
-/** The reviewer's place in a pane: how far it is scrolled and, in the Code pane, the file
- *  under the top of the pane with how far down the pane it starts. Null when the pane is
- *  not on screen: there is no place in it to come back to. */
-function whereAmI(pane: Pane): Spot | null {
-  const sc = scrollerFor(pane)
-  if (!sc || !drawn(sc)) return null
-  const here: Spot = { pane, y: sc.scrollTop, top: null, label: PANE_NAMES[pane] }
-  if (pane !== 'code') return here
-  // the file the tree marks as the current one, when it is known; else the first one that reaches below the top of the pane
-  const cur = useStore.getState().currentFile
-  const at = cur ? sc.querySelector<HTMLElement>(`[data-gr-file="${cssq(cur)}"]`) : null
-  for (const el of at ? [at] : sc.querySelectorAll<HTMLElement>('[data-gr-file]')) {
-    const top = topIn(el, sc)
-    if (at || top + el.offsetHeight > 24) return { ...here, top, label: baseName(el.dataset.grFile ?? ''), target: { kind: 'file', file: el.dataset.grFile ?? '' } }
-  }
-  return here
-}
-/** Whether a jump took the reviewer away from what they were reading in the pane it
- *  landed in: the file they were in (or, in a Guide, the Guide itself) is now about a
- *  pane's height or more from where it was. A shorter hop leaves the old spot on screen
- *  or one scroll away. */
-function movedFrom(spot: Spot): boolean {
-  const sc = scrollerFor(spot.pane)
-  if (!sc) return false
-  const el = spot.target && spot.top != null ? find(selectorsFor(spot.target).slice(-1), sc) : null
-  const by = el && spot.top != null ? topIn(el, sc) - spot.top : sc.scrollTop - spot.y
-  return Math.abs(by) > sc.clientHeight * 0.9
-}
-
 /** Run `then` on the first drawn element matching one of the selectors, once there is one
  *  (`pane`: looked for in that pane only, once the pane is on show). */
 function whenMounted(sels: string[], then: (el: HTMLElement) => void, pane?: Pane, tries = 25): void {
@@ -117,8 +86,6 @@ function paneOf(t: FocusTarget): Pane {
 }
 /** How a jump to code treats the narrowing of the Code pane. */
 interface JumpOpts {
-  /** the reviewer picked the destination themselves (a file in the tree, a box of a diagram): no "Back to …" pill */
-  nav?: boolean
   /** the target is put at the top of the pane, to be read from its first line, instead of in its middle */
   top?: boolean
   /** The Guide the jump was made in, when it was made in one: a jump from a Guide to code
@@ -136,9 +103,8 @@ interface JumpOpts {
  *  that Guide's pick). Whatever would hide the target gives
  *  way first: a Code pane folded away comes back, a narrowing the target is not part of is
  *  left for all the files, filters that hide the file are lifted, a collapsed file is
- *  opened, and a diff held back as large or generated is loaded.
- *  A jump the reviewer did not aim themselves (a comment in a menu, the session showing
- *  something) leaves a "Back to …" pill when it takes the pane far from where it was. */
+ *  opened, and a diff held back as large or generated is loaded. The way back from a jump
+ *  the reviewer made is the trail: a pick and a change of Guide are steps of it. */
 export function focusAnchor(t: FocusTarget, opts: JumpOpts = {}): void {
   const st = useStore.getState()
   // from a Guide to code: a pick
@@ -146,14 +112,12 @@ export function focusAnchor(t: FocusTarget, opts: JumpOpts = {}): void {
     showPick(t.kind === 'file' ? { file: t.file } : { file: t.file, side: t.side, line: t.line, end: opts.end }, { from: opts.from })
     return
   }
-  // during a tour the way back leads to where the tour started, from whichever stop
-  jump(t, opts.nav ? null : st.tour?.origin ?? whereAmI(paneOf(t)), opts)
+  jump(t, opts)
 }
 /** Make something the pick and show its code: the Code pane is narrowed to it, taken to its
  *  lines and flashes them, and the Guide it was picked in (`from`; a box and a section say
  *  theirs) does not move and keeps it outlined. A step of the trail unless `how` says
- *  otherwise (see How). A pick is the reviewer's own aim, so it leaves no "Back to …" pill.
- *  Returns false when it has no code to show (a box that is not code, something that is
+ *  otherwise (see How). Returns false when it has no code to show (a box that is not code, something that is
  *  gone): nothing changes then, except that an address naming such a pick is followed to
  *  no pick. */
 export function showPick(pick: CodePick | null, opts: { from?: Guide | null; how?: How; placeOnly?: boolean } = {}): boolean {
@@ -164,8 +128,8 @@ export function showPick(pick: CodePick | null, opts: { from?: Guide | null; how
     const at = st.view.commit ? null : narrowingOf(pick, st.loaded)
     const where = at?.file ?? at?.files[0]
     if (!at || !where) return false
-    if (at.line != null && at.side === 'new') focusLines(where, at.line, at.end ?? at.line, { nav: true, picked: true })
-    else focusAnchor({ kind: 'file', file: where }, { nav: true, top: true, picked: true })
+    if (at.line != null && at.side === 'new') focusLines(where, at.line, at.end ?? at.line, { picked: true })
+    else focusAnchor({ kind: 'file', file: where }, { top: true, picked: true })
     return true
   }
   if (!pick) { st.pickCode(null, opts); return false }
@@ -185,9 +149,9 @@ export function showPick(pick: CodePick | null, opts: { from?: Guide | null; how
   const file = to.file ?? to.files[0]
   // (a section none of whose files are part of the comparison any more: it is open in the Walkthrough, with no code to show)
   if (!file) { st.toast(`None of the files of ${to.label.replace(/ \(.*$/, '')} are part of this comparison any more, so there is no code to show for it.`, 'info', undefined, { key: 'section-gone' }); return true }
-  if (to.line != null && to.side === 'new') focusLines(file, to.line, to.end ?? to.line, { nav: true, picked: true })
-  else if (to.line != null) focusAnchor({ kind: 'diff', file, side: 'old', line: to.line }, { nav: true, picked: true })
-  else focusAnchor({ kind: 'file', file }, { nav: true, top: true, picked: true })
+  if (to.line != null && to.side === 'new') focusLines(file, to.line, to.end ?? to.line, { picked: true })
+  else if (to.line != null) focusAnchor({ kind: 'diff', file, side: 'old', line: to.line }, { picked: true })
+  else focusAnchor({ kind: 'file', file }, { top: true, picked: true })
   return true
 }
 /** Open a section of the walkthrough: the Walkthrough becomes the Guide on show with that
@@ -205,27 +169,21 @@ export function openSection(id: string, opts: { file?: string; keep?: boolean; h
   const pick: CodePick = { section: id, ...(opts.file ? { file: opts.file } : {}) }
   if (hold) { useStore.getState().pickCode(pick, { how }); hold.settle() } else showPick(pick, { how })
 }
-/** Start a tour at one of its stops, remembering where the reviewer was in the code. */
+/** Start a tour at one of its stops. */
 export function startTour(stops: TourStop[], loop?: boolean, idx = 0): void {
   const st = useStore.getState()
   if (!stops[idx]) return
-  st.set({ tour: { stops, idx, loop, origin: st.tour?.origin ?? whereAmI('code') ?? undefined } })
+  st.set({ tour: { stops, idx, loop } })
   focusAnchor(stops[idx].target)
 }
-/** `origin`: where to offer the way back to, if the jump takes its pane far from there. */
-function jump(t: FocusTarget, origin: Spot | null, opts: JumpOpts = {}): void {
+function jump(t: FocusTarget, opts: JumpOpts = {}): void {
   const top = Boolean(opts.top)
   const st = useStore.getState()
   const loaded = st.loaded
   if (!loaded) return
   const to = paneOf(t)
-  // The way back is offered once the jump has landed, if it took its pane far. A place in
-  // another pane needs none: that pane has not moved (and a Guide swapped for another is
-  // kept as it was). Any other jump makes a remembered spot stale.
-  const from = origin?.pane === to ? origin : null
-  st.set({ returnTo: null })
   // a commit view shows another diff: targets belong to the whole comparison
-  if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, origin, opts)); return }
+  if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, opts)); return }
   // (a step of the trail whoever asked, the reviewer or the session: Back returns to where the reviewer was)
   if (t.kind === 'summary') st.showGuide('walkthrough')
   else if (t.kind === 'section') openSection(t.sectionId)
@@ -274,7 +232,6 @@ function jump(t: FocusTarget, origin: Spot | null, opts: JumpOpts = {}): void {
       // once more after late layout (a section opening beside the code changes every height above), unless the reviewer has scrolled since
       if (top) { const y = sc.scrollTop; window.setTimeout(() => { if (el.isConnected && sc.scrollTop === y) land() }, 150) }
       flash(el)
-      if (from && movedFrom(from)) useStore.getState().set({ returnTo: from })
       return
     }
     if (tries++ < 45) window.setTimeout(tick, 40)
@@ -283,53 +240,16 @@ function jump(t: FocusTarget, origin: Spot | null, opts: JumpOpts = {}): void {
 }
 
 /** Show a question asked from a spot where it sits in the Conversation: that Guide comes
- *  on show with the question's message in the middle of it, flashed. Asked from within
- *  the Conversation itself, far from there, it leaves the way back. */
+ *  on show with the question's message in the middle of it, flashed. */
 export function focusQuestion(requestId: string): void {
   const st = useStore.getState()
   const m = st.loaded?.state.messages.find((x) => x.role === 'user' && x.requestId === requestId)
-  const origin = st.guide === 'conversation' ? whereAmI('conversation') : null
-  st.set({ returnTo: null })
   st.showGuide('conversation')
   if (!m) return
   whenMounted([`[data-gr-message="${cssq(m.id)}"]`], (el) => {
     showInPane(el)
     flash(el.querySelector<HTMLElement>('.tl-box') ?? el)
-    if (origin && movedFrom(origin)) useStore.getState().set({ returnTo: origin })
   }, 'conversation')
-}
-
-/** Return a pane to where it was before a jump: in the Code pane the same file at the
- *  same height, its header flashed so the eye finds it; a Guide scrolled as it was. */
-export function goBack(): void {
-  const st = useStore.getState()
-  const back = st.returnTo
-  if (!back) return
-  st.set({ returnTo: null })
-  if (back.pane === 'code') st.revealCode()
-  else st.showGuide(back.pane)
-  const sels = back.target ? selectorsFor(back.target).slice(-1) : []
-  let tries = 0
-  const place = (): HTMLElement | null => {
-    const sc = scrollerFor(back.pane)
-    if (!sc) return null
-    const el = find(sels, sc)
-    // put the thing the link sat in back at the same height in the pane
-    if (el && back.top != null) sc.scrollBy({ top: topIn(el, sc) - back.top })
-    else sc.scrollTo({ top: back.y })
-    return el
-  }
-  const tick = (): void => {
-    // a pane that was folded away has to lay out again before the old position exists
-    const sc = scrollerFor(back.pane)
-    const ready = sc != null && drawn(sc) && sc.scrollHeight - sc.clientHeight >= back.y - sc.clientHeight
-    if (!(ready && (find(sels, sc) || !sels.length)) && tries++ < 45) { window.setTimeout(tick, 40); return }
-    const el = place()
-    window.setTimeout(place, 150)     // once more, after late layout (wrapped lines, highlighting)
-    const head = el?.querySelector<HTMLElement>('.file-head') ?? el
-    if (head) flash(head)
-  }
-  window.requestAnimationFrame(tick)
 }
 
 /** A thing on show in the Code pane and how far below the top of the pane it is. */
@@ -396,7 +316,7 @@ export function noteAllPlace(): void {
   const spots = readingSpot()
   if (spots.length) allPlace = spots
 }
-export function returnToAllPlace(): void {
+export function backToAllPlace(): void {
   const mine = allPlace
   if (mine) holding(() => putBack(mine), true).settle()
 }

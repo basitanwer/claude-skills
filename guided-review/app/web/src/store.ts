@@ -1,11 +1,11 @@
 import { create } from 'zustand'
 import type {
-  AnchorInput, Comment, CommentPatch, DashboardData, DriftSummary, FileDiff, FocusTarget, LoadedReview, Presence, PushMap,
+  AnchorInput, Comment, CommentPatch, DashboardData, DriftSummary, FileDiff, LoadedReview, Presence, PushMap,
   RepoState, RequestKind, ReviewRequest, ReviewState, ReviewView, SessionListItem, TourStop, UiAction, ViewMark
 } from '@shared/types'
 import { api, connect } from './api'
-import { errText, GUIDES, guideOfPick, isOpen, narrowingOf, newId, parseHash, parsePick, pickKey, refInput, routeHash, targetLabel, type DiffMode, type Guide, type Pane, type CodePick, type Route } from './util'
-import { focusAnchor, holdCodePlace, noteAllPlace, parkCodePlace, returnToAllPlace, showPick, startTour } from './focus'
+import { errText, GUIDES, guideOfPick, isOpen, narrowingOf, newId, parseHash, parsePick, pickKey, refInput, routeHash, targetLabel, type DiffMode, type Guide, type CodePick, type Route } from './util'
+import { focusAnchor, holdCodePlace, noteAllPlace, parkCodePlace, backToAllPlace, showPick, startTour } from './focus'
 
 /** `key`: a newer toast with the same key takes the place of an older one. */
 export interface Toast { id: string; text: string; kind: 'error' | 'info'; action?: { label: string; run: () => void }; key?: string }
@@ -20,11 +20,7 @@ export function typing(): boolean {
   if (el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && (el.type === 'text' || el.type === 'search') && !el.readOnly)) return true
   return [...document.querySelectorAll<HTMLTextAreaElement | HTMLInputElement>('textarea, input[name="gr-field"]:not([type]):not([readonly]):not(#gr-file-filter)')].some((f) => f.value.trim() !== '' && f.getClientRects().length > 0)
 }
-export interface Tour {
-  stops: TourStop[]; idx: number; loop?: boolean
-  /** where the reviewer was when the tour started: what "Back to …" returns to */
-  origin?: NonNullable<Store['returnTo']>
-}
+export interface Tour { stops: TourStop[]; idx: number; loop?: boolean }
 export interface Hub { repo: string; state: RepoState | null; sessions: SessionListItem[]; showArchived: boolean }
 /** The code under review moved while this view was open. */
 export interface Drift { signature: string; summary: DriftSummary | null }
@@ -109,6 +105,8 @@ interface Store {
   guideWide: boolean
   /** on a window too narrow for two panes side by side: the one on show */
   front: 'guide' | 'code'
+  /** Details in the top bar is open (the comparison, the effort, the commits) */
+  detailsOpen: boolean
   /** how the open review is being looked at: whitespace hidden, one commit only */
   view: ReviewView
   reveal: Reveal | null
@@ -161,10 +159,6 @@ interface Store {
   showAll: boolean
   composer: string | null
   tour: Tour | null
-  /** Where a pane was before a jump took it far from there: offered back by the "Back to …"
-   *  pill in that pane. `top` is how far down the pane the thing the reviewer was reading was
-   *  (restored exactly); `y` is how far the pane was scrolled, used if that thing is gone. */
-  returnTo: { pane: Pane; y: number; top: number | null; label: string; target?: FocusTarget } | null
   /** the file under the top of the Code pane, kept by followFiles: the path bar, the tree
    *  and the open section of the walkthrough mark it as where the reviewer is */
   currentFile: string | null
@@ -237,7 +231,7 @@ interface Store {
   setFileOpen(path: string, open: boolean): void
   setFileLoaded(path: string): void
   setMdSource(path: string, source: boolean): void
-  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'composer' | 'tour' | 'returnTo' | 'status' | 'navOpen' | 'panelOpen' | 'treeOver' | 'closedDirs' | 'fileQuery' | 'guideWide' | 'front'>>): void
+  set(patch: Partial<Pick<Store, 'excludedOpen' | 'factsOpen' | 'diffMode' | 'docPath' | 'visualView' | 'composer' | 'tour' | 'status' | 'detailsOpen' | 'navOpen' | 'panelOpen' | 'treeOver' | 'closedDirs' | 'fileQuery' | 'guideWide' | 'front'>>): void
   applyAction(action: UiAction): void
 
   onStreamOpen(): void
@@ -299,15 +293,14 @@ function pushHash(route: Route, state: StepState): void {
 
 export const useStore = create<Store>((set, get) => {
   const fail = (e: unknown): void => get().toast(errText(e), 'error')
-  /** What belongs to the review on screen and must not outlive it: the way back, a tour,
-   *  the open section, and toasts that would act on it. */
-  const leftReview = (): Pick<Store, 'returnTo' | 'tour' | 'toasts'> => ({ returnTo: null, tour: null, toasts: get().toasts.filter((t) => !t.action) })
+  /** What belongs to the review on screen and must not outlive it: a tour, and toasts that would act on it. */
+  const leftReview = (): Pick<Store, 'tour' | 'toasts'> => ({ tour: null, toasts: get().toasts.filter((t) => !t.action) })
   /** Bring the address up to date with where the reviewer now is (see How). */
   const move = (patch: { guide?: Guide; pick?: string; all?: boolean; commit?: string }, how: How): void => {
     const route = get().route
     if (route.name !== 'review' || how === 'follow') return
     // (from here on the address says where the reviewer is, the Guide pane closed included)
-    const next: Route = { ...route, ...patch, focus: undefined, here: true }
+    const next: Route = { ...route, ...patch, focus: undefined, here: true, commits: undefined }
     const state = { picks: get().picks }
     if (routeHash(next) === routeHash(route)) { syncHash(route, state); return }
     set({ route: next })
@@ -332,7 +325,11 @@ export const useStore = create<Store>((set, get) => {
     // Each Guide's own pick is not in the address: it comes back from this step of the
     // trail (a reload) or from where the review was left in this browser, whatever the
     // address says of the Guide on show and of the pick the code follows.
-    set({ guide, front: guide ? 'guide' : 'code', picks: stepPicks() ?? left?.picks ?? {}, showAll: all })
+    set({
+      guide, front: guide ? 'guide' : 'code', picks: stepPicks() ?? left?.picks ?? {}, showAll: all,
+      // an address of the Commits tab there once was: the commits are in Details now
+      detailsOpen: Boolean(route.commits)
+    })
     // the address says what is on show from here on (and loses what it named that made no sense)
     move({ guide: guide ?? undefined, pick: pickKey(pick) || undefined, all: all && guide != null ? true : undefined }, 'replace')
     const from = pick && 'file' in pick && !('section' in pick) && (guide === 'conversation' || guide === 'spec') ? guide : undefined
@@ -427,7 +424,7 @@ export const useStore = create<Store>((set, get) => {
       loaded, sessionId, preview, loading: false,
       viewedAt: loaded.state.viewedAt, reviewedSections: loaded.state.reviewedSections,
       drift: null, dismissed: [], fileOpen: {}, fileLoaded: {}, mdSource: {}, excludedOpen: false, factsOpen: false, diffMode: 'all', docPath: null, visualView: null, pick: null, picks: {}, showAll: false, closedDirs: [], treeAt: null, treeOver: false,
-      composer: null, tour: null, returnTo: null, fileQuery: '', wsOnly: []
+      composer: null, tour: null, detailsOpen: false, fileQuery: '', wsOnly: []
     })
     refreshWsOnly()
   }
@@ -461,6 +458,7 @@ export const useStore = create<Store>((set, get) => {
     guide: null,
     guideWide: false,
     front: 'code',
+    detailsOpen: false,
     view: {},
     reveal: null,
     treeWidth: storedTreeWidth(),
@@ -476,7 +474,6 @@ export const useStore = create<Store>((set, get) => {
     filters: { hideViewed: false, onlyCommented: false, bySection: pref('gr-by-section', ['1'] as const, null) === '1', showExcluded: false },
     treeView: pref('gr-files-view', ['tree', 'list'] as const, 'tree') ?? 'tree',
     tour: null,
-    returnTo: null,
     currentFile: null,
     status: null,
     navOpen: false,
@@ -511,6 +508,7 @@ export const useStore = create<Store>((set, get) => {
         set({ route })
         const guide = route.guide ?? null
         if (guide !== get().guide) get().showGuide(guide, 'follow')
+        if (route.commits) set({ detailsOpen: true })       // (an address of the Commits tab there once was)
         if (Boolean(next.ignoreWhitespace) !== Boolean(cur.ignoreWhitespace) || (next.commit ?? '') !== (cur.commit ?? '')) { set({ view: next }); await get().reload() }
         if (stale()) return
         // The pick the Code pane follows, and whether all the files were on show: the pane
@@ -529,7 +527,7 @@ export const useStore = create<Store>((set, get) => {
         } else if (!same || get().showAll) showPick(pick, { from, how: 'follow' })
         if (window.location.hash !== routeHash(get().route)) syncHash(get().route)
         saveLeft()
-        if (route.focus) { try { const t = JSON.parse(route.focus); window.setTimeout(() => focusAnchor(t, { nav: true }), 60) } catch { /* ignore */ } }
+        if (route.focus) { try { const t = JSON.parse(route.focus); window.setTimeout(() => focusAnchor(t), 60) } catch { /* ignore */ } }
         return
       }
       // a review opens with the Guide pane closed unless the address names a Guide
@@ -567,7 +565,7 @@ export const useStore = create<Store>((set, get) => {
             const loaded = await openSession(match.sessionId)
             if (stale()) return
             showLoaded(loaded, match.sessionId, null)
-            const found = routeWithView({ name: 'review', session: match.sessionId, focus: route.focus, guide: route.guide, pick: route.pick, all: route.all, here: route.here }, get().view)
+            const found = routeWithView({ name: 'review', session: match.sessionId, focus: route.focus, guide: route.guide, pick: route.pick, all: route.all, here: route.here, commits: route.commits }, get().view)
             set({ route: found })
             syncHash(found)
             arrive(found, loaded, match.sessionId)
@@ -578,6 +576,7 @@ export const useStore = create<Store>((set, get) => {
             const loaded = await preview().catch((e: unknown) => { if (!dropCommit(e)) throw e; return preview() })
             if (stale()) return
             showLoaded(loaded, null, { repo, base, compare, direct, fresh: Boolean(route.fresh) })
+            if (route.commits) set({ detailsOpen: true })
           }
         } else {
           set({ loading: false })
@@ -585,7 +584,7 @@ export const useStore = create<Store>((set, get) => {
         if (route.focus) {
           try {
             const target = JSON.parse(route.focus)
-            window.setTimeout(() => focusAnchor(target, { nav: true }), 250)     // opening a link: there is no earlier place to go back to
+            window.setTimeout(() => focusAnchor(target), 250)
           } catch { get().toast('The focus parameter in the URL is not valid JSON.', 'error') }
         }
       } catch (e) {
@@ -849,7 +848,7 @@ export const useStore = create<Store>((set, get) => {
       // (nothing is discarded: the Guide left behind is kept as it is, and so is a comment being written beside the code)
       set({ guide, front: guide ? 'guide' : 'code', treeOver: false, ...(guide ? {} : { guideWide: false }), ...(edge && (guide == null || how !== 'follow') ? { showAll: true } : {}) })
       move({ guide: guide ?? undefined, all: guide != null && get().showAll ? true : undefined }, how)
-      if (fromList) returnToAllPlace()
+      if (fromList) backToAllPlace()
       hold.settle()
       if (how !== 'follow') saveLeft()
     },
@@ -890,7 +889,7 @@ export const useStore = create<Store>((set, get) => {
       if (!all) noteAllPlace()
       set({ showAll: all })
       move({ all: all && cur.guide != null ? true : undefined }, 'replace')
-      if (fromList) returnToAllPlace()
+      if (fromList) backToAllPlace()
       saveLeft()
     },
     openTree() {

@@ -9,7 +9,7 @@ import {
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
   PANES_SETTLED, sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Guide, type Narrowing
 } from '../util'
-import { AwayHint, BackBar, CopyButton, DiffStat, FileIcon, GuideCtx, Icon, Md, Menu, MenuItem, PresenceDot, ThemeToggle, currentTheme, setTheme, usePickLink } from '../components/common'
+import { AwayHint, CopyButton, DiffStat, FileIcon, GuideCtx, Icon, Md, Menu, MenuItem, PresenceDot, ThemeToggle, currentTheme, setTheme, usePickLink } from '../components/common'
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
 import { FileBox, hoveredLine } from '../components/diff'
 import { VisualTab } from '../components/visual'
@@ -92,19 +92,25 @@ function reviewState(loaded: LoadedReview, saved: boolean): { cls: string; text:
 }
 
 /** What the top bar holds back until it is asked for: the whole title with its comments,
- *  the comparison, the size of the change, the effort line and the commits. It stays in
- *  the page while it is closed, so that what the session and the browser checks look for
- *  in it (the effort level, the thread on the title) is always there to be found. */
+ *  the comparison, the size of the change, the effort line and the commits (a click on one
+ *  shows only that commit's changes in the Code pane). It stays in the page while it is
+ *  closed, so that what the session and the browser checks look for in it (the effort
+ *  level, the thread on the title) is always there to be found. An address of the Commits
+ *  tab there once was opens it. */
 function Details({ loaded, title }: { loaded: LoadedReview; title: string }) {
   const saved = useStore((s) => s.sessionId != null)
   const composing = useStore((s) => s.composer === 'title')
   const threads = useCommentsAt('title')
-  const [open, setOpen] = useState(false)
+  const open = useStore((s) => s.detailsOpen)
+  const setOpen = (detailsOpen: boolean): void => useStore.getState().set({ detailsOpen })
   const box = useRef<HTMLDivElement>(null)
   const { pair } = loaded.session
   const files = loaded.files.filter((f) => !f.excluded)
+  // the commits made since the walkthrough was written, or since the approval, are marked off from the ones before
+  const since = loaded.since
+  const cut = since?.moved ? loaded.commits.findIndex((c) => c.sha === since.sha) : -1
   // a comment on the title is written, and read, in here
-  useEffect(() => { if (composing) setOpen(true) }, [composing])
+  useEffect(() => { if (composing) setOpen(true) }, [composing])       // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!open) return
     const off = (e: MouseEvent): void => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false) }
@@ -112,7 +118,7 @@ function Details({ loaded, title }: { loaded: LoadedReview; title: string }) {
     document.addEventListener('mousedown', off)
     document.addEventListener('keydown', key)
     return () => { document.removeEventListener('mousedown', off); document.removeEventListener('keydown', key) }
-  }, [open])
+  }, [open])       // eslint-disable-line react-hooks/exhaustive-deps
   const showCommit = (sha: string): void => { setOpen(false); useStore.getState().revealCode(); void useStore.getState().setView({ commit: sha }) }
   return (
     <div className="menu" ref={box}>
@@ -139,11 +145,14 @@ function Details({ loaded, title }: { loaded: LoadedReview; title: string }) {
           <EffortLine loaded={loaded} />
         </div>
         <div className="pop-head">{loaded.commits.length ? plural(loaded.commits.length, 'commit') : 'No commits'}</div>
-        {loaded.commits.map((c) => (
-          <button key={c.sha} className="menu-item commit-item" data-gr-details-commit={c.sha} title="Show only this commit's changes in the Code pane" onClick={() => showCommit(c.sha)}>
-            <span className="menu-check">{loaded.view?.commit === c.sha ? <Icon name="check" size={14} /> : null}</span>
-            <span className="grow"><span className="clip strong">{c.subject}</span><span className="muted small"><span className="mono">{short(c.sha)}</span> · {c.author} · {ago(c.date)}</span></span>
-          </button>
+        {loaded.commits.map((c, i) => (
+          <Fragment key={c.sha}>
+            {i === cut && cut > 0 && <div className="list-divider">↑ New since the {since?.kind === 'approved' ? 'approved state' : 'walkthrough'}</div>}
+            <button className="menu-item commit-item" data-gr-commit={c.sha} data-gr-details-commit={c.sha} aria-current={loaded.view?.commit === c.sha ? 'true' : undefined} title="Show only this commit's changes in the Code pane" onClick={() => showCommit(c.sha)}>
+              <span className="menu-check">{loaded.view?.commit === c.sha ? <Icon name="check" size={14} /> : null}</span>
+              <span className="grow"><span className="clip strong">{c.subject}</span><span className="muted small"><span className="mono">{short(c.sha)}</span> · {c.author} · {ago(c.date)}</span></span>
+            </button>
+          </Fragment>
         ))}
       </div>
     </div>
@@ -255,7 +264,7 @@ function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
 const generalComment = (c: Comment): boolean => ['summary', 'title', 'section', 'plan-step', 'acceptance', 'deviation'].includes(c.anchor.kind)
 
 /** The row that names the Guides and switches between them: Walkthrough, Visualize,
- *  Conversation, Spec & plan (and Commits, until it goes). It sits on top of
+ *  Conversation, Spec & plan. It sits on top of
  *  the Guide pane; while that pane is closed it sits on top of the Code pane, where it is
  *  the way to open one. Clicking the name of the Guide on show closes the Guide pane.
  *  `onePane`: the window fits one pane at a time. */
@@ -272,8 +281,7 @@ function GuideRow({ loaded, onePane }: { loaded: LoadedReview; onePane: boolean 
     { id: 'walkthrough', label: 'Walkthrough', icon: 'list', n: loaded.state.walkthrough?.sections.length ?? 0 },
     { id: 'visual', label: 'Visualize', icon: 'graph', n: loaded.state.visual?.views.length ?? 0 },
     { id: 'conversation', label: 'Conversation', icon: 'comment', n: conv },
-    ...(hasSpec ? [{ id: 'spec' as Guide, label: 'Spec & plan', icon: 'book', n: loaded.artifacts.length }] : []),
-    { id: 'commits', label: 'Commits', icon: 'commit', n: loaded.commits.length }
+    ...(hasSpec ? [{ id: 'spec' as Guide, label: 'Spec & plan', icon: 'book', n: loaded.artifacts.length }] : [])
   ]
   // in a window that fits one pane, a Guide can be open behind the code: its name brings it back
   const behind = onePane && front === 'code'
@@ -490,7 +498,7 @@ function TreeFile({ file, depth, comments, showDir, nested }: { file: FileDiff; 
   const picked = useContext(PickedCtx).has(file.path)
   const { ref, here } = useHere<HTMLButtonElement>((f) => f === file.path)
   // a click in the tree leaves the narrowing: all the files, at this one (and a tree that was opened over the code gives way to it)
-  const go = (): void => { useStore.getState().set({ treeOver: false }); focusAnchor({ kind: 'file', file: file.path }, { nav: true, top: true, all: true }) }
+  const go = (): void => { useStore.getState().set({ treeOver: false }); focusAnchor({ kind: 'file', file: file.path }, { top: true, all: true }) }
   return (
     <button ref={ref} className={'tree-row leaf' + (sec ? ' in-sec' : '') + (here ? ' here' : '') + (picked ? ' picked' : '')} aria-current={here ? 'true' : undefined} style={{ paddingLeft: `${8 + depth * TREE_STEP}px`, ...(sec ? secStyle(sec.no) : {}) }} title={`${file.path} (${file.status})${sec ? ` · ${sec.section.name}` : ''}${picked ? ' · part of the pick' : ''}`} data-gr-tree-file={file.path} data-gr-status={file.status} data-gr-picked={picked ? 'true' : undefined} onClick={go}>
       {nested && <span className="tree-chev" />}
@@ -906,7 +914,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
   const secCount = wt?.sections.length ?? 0
   const secDone = (wt?.sections ?? []).filter((s) => reviewed.includes(s.id)).length
   const secNext = wt?.sections.find((s) => !reviewed.includes(s.id)) ?? wt?.sections[0]
-  // the file under the top of the pane, for the path bar, the tree and the section panel
+  // the file under the top of the pane, for the path bar, the tree and the open section of the Walkthrough
   // to mark: followed anew when other boxes are on show, or the same ones in another order
   // or under other groups, which no scroll or resize tells
   const list = useRef<HTMLDivElement>(null)
@@ -1518,32 +1526,6 @@ function ConversationTab({ loaded }: { loaded: LoadedReview }) {
   )
 }
 
-// ── Commits ───────────────────────────────────────────────────
-function CommitsTab({ loaded }: { loaded: LoadedReview }) {
-  const since = loaded.since
-  const cut = since?.moved ? loaded.commits.findIndex((c) => c.sha === since.sha) : -1
-  return (
-    <div className="commits">
-      {loaded.commits.length === 0 && <div className="blankslate"><h3>No commits</h3><p className="muted">{loaded.dirty ? 'Only uncommitted changes are under review.' : 'Nothing separates the two sides.'}</p></div>}
-      <div className="list-box">
-        {loaded.commits.map((c, i) => (
-          <div key={c.sha}>
-            {i === cut && cut > 0 && <div className="list-divider">↑ New since the {since?.kind === 'approved' ? 'approved state' : 'walkthrough'}</div>}
-            <div className={'list-row' + (loaded.view?.commit === c.sha ? ' on' : '')} data-gr-commit={c.sha} aria-current={loaded.view?.commit === c.sha ? 'true' : undefined}>
-              <div className="grow">
-                <button className="link strong commit-link" title="Show only this commit's changes in the Code pane" onClick={() => { useStore.getState().revealCode(); void useStore.getState().setView({ commit: c.sha }) }}>{c.subject}</button>
-                <div className="muted small">{c.author} committed {ago(c.date)}</div>
-              </div>
-              <span className="ref-chip mono">{short(c.sha)}</span>
-              <CopyButton text={c.sha} title="Copy the full SHA" />
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 // ── Spec & plan ───────────────────────────────────────────────
 function DocLine({ path, n, text }: { path: string; n: number; text: string }) {
   const k = `artifact:${path}:${n}`
@@ -1676,7 +1658,7 @@ function SpecTab({ loaded }: { loaded: LoadedReview }) {
 
 // ── the workspace ─────────────────────────────────────────────
 /** How much of the workspace's width a Guide starts with, in percent: a diagram needs more room than text. */
-const GUIDE_START: Record<Guide, number> = { walkthrough: 40, visual: 56, conversation: 40, commits: 40, spec: 40 }
+const GUIDE_START: Record<Guide, number> = { walkthrough: 40, visual: 56, conversation: 40, spec: 40 }
 /** The window width from which the Guide's share is reckoned of what the tree panel would
  *  leave, whether the tree is on show or folded: showing it then takes room from the code
  *  only, and a diagram is not laid out anew for it. */
@@ -1798,16 +1780,14 @@ function Workspace({ loaded }: { loaded: LoadedReview }) {
         {guideShown && row}
         {seen.map((g) => (
           <GuideBody key={g} id={g} shown={guideShown && g === guide}>
-            {g === 'walkthrough' ? <WalkthroughGuide loaded={loaded} /> : g === 'conversation' ? <ConversationTab loaded={loaded} /> : g === 'commits' ? <CommitsTab loaded={loaded} /> : g === 'spec' ? <SpecTab loaded={loaded} /> : <VisualTab loaded={loaded} />}
+            {g === 'walkthrough' ? <WalkthroughGuide loaded={loaded} /> : g === 'conversation' ? <ConversationTab loaded={loaded} /> : g === 'spec' ? <SpecTab loaded={loaded} /> : <VisualTab loaded={loaded} />}
           </GuideBody>
         ))}
-        <BackBar pane="guide" />
       </section>
       {both && <PaneDivider frame={frame} pct={pct} tree={tree} treeNow={treeNow} onChange={(v) => { if (guide) useStore.getState().setGuideWidth(guide, v) }} />}
       <section className="code-pane" hidden={!codeShown} aria-label="Code" data-gr-pane="code">
         {!guideShown && row}
         <FilesTab loaded={loaded} shown={codeShown} />
-        <BackBar pane="code" />
       </section>
       {codeShown && place.column && <TreePanel loaded={loaded} over={false} />}
     </main>
