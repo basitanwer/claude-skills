@@ -1337,6 +1337,9 @@ function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
   const done = sections.filter((s) => reviewed.includes(s.id)).length
   const allDone = done === sections.length
   const topOf = (row: Element): number => { const sc = row.closest('[data-gr-scroll]'); return sc ? row.getBoundingClientRect().top - sc.getBoundingClientRect().top : 0 }
+  /** Where a row about to be opened is put: where it is, or, from the foot of the pane, as far
+   *  up as leaves room under it for the start of its text and its actions. */
+  const roomBelow = (row: Element): number => { const sc = row.closest('[data-gr-scroll]'); return sc ? Math.min(topOf(row), Math.max(8, sc.clientHeight - 120)) : 0 }
   /** Open a section in place (null: close the open one, which leaves the pick), keeping the
    *  row `id` at `top` px below the top of the pane: the section that was open above it
    *  closes, and the row would move under the reviewer's pointer otherwise. */
@@ -1400,7 +1403,7 @@ function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
           return (
             <div key={s.id} className={'sec-item' + (isOpen ? ' open' : '')} style={secStyle(no)} data-gr-section={s.id} data-gr-reviewed={ticked ? 'true' : 'false'} data-gr-open={isOpen ? 'true' : undefined}>
               <div className="sec-item-head">
-                <button className="sec-toggle" aria-expanded={isOpen} data-gr-pickable="" title={isOpen ? 'Close this section (the code shows all files again)' : 'Open this section: the code shows its files'} onClick={(e) => { const row = e.currentTarget.closest('.sec-item'); open(isOpen ? null : s.id, s.id, row ? topOf(row) : 0) }}>
+                <button className="sec-toggle" aria-expanded={isOpen} data-gr-pickable="" title={isOpen ? 'Close this section (the code shows all files again)' : 'Open this section: the code shows its files'} onClick={(e) => { const row = e.currentTarget.closest('.sec-item'); open(isOpen ? null : s.id, s.id, row ? (isOpen ? topOf(row) : roomBelow(row)) : 0) }}>
                   <Icon name={isOpen ? 'chevDown' : 'chevRight'} size={12} /><span className="sec-dot" /><strong>{s.name}</strong>{s.desc && <span className="muted"> — {s.desc}</span>}
                 </button>
                 <span className="muted small nowrap">{plural(s.files.length, 'file')}</span>
