@@ -2,7 +2,7 @@ import { createContext, Fragment, useContext, useEffect, useLayoutEffect, useMem
 import type {
   AnchorInput, Artifact, Comment, FactRow, FileDiff, FocusTarget, LoadedReview, Message, PlanMap, RefSide, ReviewRequest, Section, TourStop, UiAction
 } from '@shared/types'
-import { useStore, SHEET_BELOW, STACK_BELOW, TREE_BESIDE_GUIDE, treeWidthLimits, type Filters } from '../store'
+import { useStore, typing, SHEET_BELOW, STACK_BELOW, TREE_BESIDE_GUIDE, treeWidthLimits, type Filters } from '../store'
 import { focusAnchor, focusQuestion, followFiles, holdCodePlace, holdPlaces, liftHolds, liftPick, lowerPick, openSection, showIfOut, showPick, showSectionHeader, startTour, unparkCodePlace, type Lift } from '../focus'
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, narrowingOf, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
@@ -65,10 +65,10 @@ function usePaneWidth(ref: RefObject<HTMLElement | null>, steps: readonly number
   return step
 }
 /** Whether a key press is the reviewer typing, or a shortcut of the browser's: the caret is
- *  in a text field (a tick box or a button is not one), or Ctrl, Alt or Cmd is held. The
+ *  in a text field (a tick box or a button is not one), or Ctrl, Alt, Cmd or Shift is held. The
  *  workspace's keys leave such a press alone. */
 function typingKey(e: KeyboardEvent): boolean {
-  if (e.metaKey || e.ctrlKey || e.altKey) return true
+  if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return true
   const el = e.target as HTMLElement | null
   if (!el || !el.tagName) return false
   if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable) return true
@@ -157,10 +157,13 @@ function Details({ loaded, title }: { loaded: LoadedReview; title: string }) {
         {loaded.commits.map((c, i) => (
           <Fragment key={c.sha}>
             {i === cut && cut > 0 && <div className="list-divider">↑ New since the {since?.kind === 'approved' ? 'approved state' : 'walkthrough'}</div>}
-            <button className="menu-item commit-item" data-gr-commit={c.sha} data-gr-details-commit={c.sha} aria-current={loaded.view?.commit === c.sha ? 'true' : undefined} title="Show only this commit's changes in the Code pane" onClick={() => showCommit(c.sha)}>
-              <span className="menu-check">{loaded.view?.commit === c.sha ? <Icon name="check" size={14} /> : null}</span>
-              <span className="grow"><span className="clip strong">{c.subject}</span><span className="muted small"><span className="mono">{short(c.sha)}</span> · {c.author} · {ago(c.date)}</span></span>
-            </button>
+            <div className="commit-row">
+              <button className="menu-item commit-item" data-gr-commit={c.sha} data-gr-details-commit={c.sha} aria-current={loaded.view?.commit === c.sha ? 'true' : undefined} title="Show only this commit's changes in the Code pane" onClick={() => showCommit(c.sha)}>
+                <span className="menu-check">{loaded.view?.commit === c.sha ? <Icon name="check" size={14} /> : null}</span>
+                <span className="grow"><span className="clip strong">{c.subject}</span><span className="muted small"><span className="mono">{short(c.sha)}</span> · {c.author} · {ago(c.date)}</span></span>
+              </button>
+              <span data-gr="copy-sha" data-gr-copy-sha={c.sha}><CopyButton text={c.sha} title="Copy the full SHA" /></span>
+            </div>
           </Fragment>
         ))}
       </div>
@@ -234,13 +237,29 @@ function DriftBanner() {
   )
 }
 
-/** What Claude Code has been asked and has not finished: one compact row each, under the top bar whatever is on show. */
+/** How long a request Claude Code has finished stays in the strip, saying so, unless it is dismissed first. */
+const ANSWERED_FOR = 15_000
+/** What Claude Code has been asked and has not finished: one compact row each, under the top
+ *  bar whatever is on show. A request that is finished while this page watched it wait stays
+ *  a while, as answered (or done): nothing else on screen says so. The strip is in the flow
+ *  of the page, so a row that goes moves both panes up: no row goes by itself while the
+ *  reviewer is writing (the box they write in would move under them); it goes when they
+ *  dismiss it, or once they have stopped. */
 function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
-  useTick(loaded.state.requests.some(isOpen) ? 1000 : 30_000)
   const dismissed = useStore((s) => s.dismissed)
   const { cancelRequest, dismissRequest, retryRequest, showGuide } = useStore.getState()
   const away = loaded.presence === 'away'
-  const rows = loaded.state.requests.filter((r) => isOpen(r) || (r.status === 'failed' && !dismissed.includes(r.id) && Date.now() - Date.parse(r.finishedAt ?? r.createdAt) < 600_000))
+  // the requests this page has seen waiting, and the rows it drew last
+  const waited = useRef(new Set<string>())
+  const drawn = useRef(new Set<string>())
+  for (const r of loaded.state.requests) if (isOpen(r)) waited.current.add(r.id)
+  const since = (r: ReviewRequest): number => Date.now() - Date.parse(r.finishedAt ?? r.createdAt)
+  const writing = typing()
+  const rows = loaded.state.requests.filter((r) => isOpen(r) || (!dismissed.includes(r.id) && (
+    r.status === 'failed' ? since(r) < 600_000 || (writing && drawn.current.has(r.id))
+      : r.status === 'done' && waited.current.has(r.id) && (since(r) < ANSWERED_FOR || (writing && drawn.current.has(r.id))))))
+  drawn.current = new Set(rows.map((r) => r.id))
+  useTick(rows.length ? 1000 : 30_000)
   if (rows.length === 0) return null
   return (
     <div className="req-strip" data-gr="requests">
@@ -249,10 +268,10 @@ function RequestsStrip({ loaded }: { loaded: LoadedReview }) {
         const why = stuck && stuckText(r, stuck)
         return (
           <div key={r.id} className={'req-row ' + r.status} data-gr-request={r.id} data-gr-request-kind={r.kind} data-gr-request-status={r.status}>
-            {isOpen(r) ? <span className="spinner" /> : <Icon name="x" size={14} />}
-            <button className="link strong" onClick={() => showGuide(r.kind === 'visualize' ? 'visual' : 'conversation')}>{requestTitle(r)}</button>
+            {isOpen(r) ? <span className="spinner" /> : <Icon name={r.status === 'done' ? 'check' : 'x'} size={14} />}
+            <button className="link strong" title={r.status !== 'done' ? undefined : r.kind === 'visualize' ? 'Show it in Visualize' : r.kind === 'question' ? 'Show it in the Conversation' : undefined} onClick={() => showGuide(r.kind === 'visualize' ? 'visual' : 'conversation')}>{requestTitle(r)}</button>
             <span className="muted" data-gr="request-state">
-              {r.status === 'pending' ? 'waiting for Claude Code' : r.status === 'running' ? `${stuck === 'away' ? 'picked up' : 'working for'} ${elapsed(r.startedAt) || '0s'}${stuck === 'away' ? ' ago' : ''}` : `failed: ${r.error ?? 'no reason given'}`}
+              {r.status === 'pending' ? 'waiting for Claude Code' : r.status === 'running' ? `${stuck === 'away' ? 'picked up' : 'working for'} ${elapsed(r.startedAt) || '0s'}${stuck === 'away' ? ' ago' : ''}` : r.status === 'done' ? (r.kind === 'question' ? 'answered' : 'done') : `failed: ${r.error ?? 'no reason given'}`}
             </span>
             {why && <span className="label warn" data-gr="request-stuck" data-gr-stuck={stuck} title={why.title}>{why.label}</span>}
             {isOpen(r) && r.progress.length > 0 && <span className="req-progress" title={r.progress.map((p) => p.text).join('\n')}>{r.progress[r.progress.length - 1].text}</span>}
@@ -1101,7 +1120,7 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
 function CodeChip({ target, children, title, hook, disabled }: { target: FocusTarget | null; children: ReactNode; title?: string; hook?: string; disabled?: boolean }) {
   const link = usePickLink(target)
   const code = target != null && (target.kind === 'file' || target.kind === 'diff')
-  return <button className={'ref-chip mono link-chip' + (link.picked ? ' picked' : '')} data-gr={hook} title={title} disabled={disabled || !target} aria-pressed={link.from ? link.picked : undefined} data-gr-pickable={link.from && link.from !== 'walkthrough' && code && !disabled ? '' : undefined} onClick={() => target && focusAnchor(target, { from: link.from })}>{children}</button>
+  return <button className={'ref-chip mono link-chip' + (link.picked ? ' picked' : '')} data-gr={hook} title={title} disabled={disabled || !target} aria-pressed={link.from ? link.picked : undefined} data-gr-pickable={link.from && link.from !== 'walkthrough' && (code || target?.kind === 'section') && !disabled ? '' : undefined} onClick={() => target && focusAnchor(target, { from: link.from })}>{children}</button>
 }
 
 // ── Conversation ──────────────────────────────────────────────
@@ -1337,6 +1356,11 @@ function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
   const reviewed = useStore((s) => s.reviewedSections)
   const openId = useStore((s) => { const p = s.picks.walkthrough; return p && 'section' in p ? p.section : null })
   const pickedFile = useStore((s) => { const p = s.picks.walkthrough; return p && 'section' in p ? p.file ?? null : null })
+  // Whether the Code pane is narrowed to the open section's files. It is not while it follows
+  // a pick made in another Guide since, shows all the files, or shows the list of them (the
+  // review reopened with its plain address): the section is open to be read, but is not what
+  // the code shows, and a click on its row shows its files instead of closing it.
+  const showing = useStore((s) => { const p = s.picks.walkthrough; return p != null && 'section' in p && s.pick != null && 'section' in s.pick && s.pick.section === p.section && !s.showAll })
   const here = useStore((s) => s.currentFile)
   const { request, showGuide, toggleSectionReviewed, set } = useStore.getState()
   const [steer, setSteer] = useState('')
@@ -1439,12 +1463,12 @@ function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
             void tick.then(() => { const p = useStore.getState().picks.walkthrough; if (p && 'section' in p && p.section === s.id) go() })
           }
           return (
-            <div key={s.id} className={'sec-item' + (isOpen ? ' open' : '')} style={secStyle(no)} data-gr-section={s.id} data-gr-reviewed={ticked ? 'true' : 'false'} data-gr-open={isOpen ? 'true' : undefined}>
+            <div key={s.id} className={'sec-item' + (isOpen ? ' open' : '') + (isOpen && !showing ? ' aside' : '')} style={secStyle(no)} data-gr-section={s.id} data-gr-reviewed={ticked ? 'true' : 'false'} data-gr-open={isOpen ? 'true' : undefined} data-gr-showing={isOpen ? (showing ? 'true' : 'false') : undefined}>
               <div className="sec-item-head">
-                <button className="sec-toggle" aria-expanded={isOpen} data-gr-pickable="" title={isOpen ? 'Close this section (the code shows all files again)' : 'Open this section: the code shows its files'} onClick={(e) => { const row = e.currentTarget.closest('.sec-item'); open(isOpen ? null : s.id, s.id, row ? (isOpen ? topOf(row) : roomBelow(row)) : 0) }}>
+                <button className="sec-toggle" aria-expanded={isOpen} data-gr-pickable="" title={!isOpen ? 'Open this section: the code shows its files' : showing ? 'Close this section (the code shows all files again)' : 'Show only this section’s files in the Code pane'} onClick={(e) => { const row = e.currentTarget.closest('.sec-item'); const shut = isOpen && showing; open(shut ? null : s.id, s.id, row ? (isOpen ? topOf(row) : roomBelow(row)) : 0, isOpen ? pickedFile ?? undefined : undefined) }}>
                   <Icon name={isOpen ? 'chevDown' : 'chevRight'} size={12} /><span className="sec-dot" /><strong>{s.name}</strong>{s.desc && <span className="muted"> — {s.desc}</span>}
                 </button>
-                <span className="muted small nowrap">{plural(s.files.length, 'file')}</span>
+                <span className="muted small nowrap">{plural(s.files.length, 'file')}{isOpen && !showing && <span data-gr="section-aside">, not what the Code pane shows</span>}</span>
                 {ticked && <span className="sec-tick" role="img" aria-label="Reviewed" title="You marked this section reviewed" data-gr="section-tick"><Icon name="check" size={14} /></span>}
               </div>
               {isOpen && (
@@ -1639,10 +1663,17 @@ function PlanRow({ anchor, cls, label, children }: { anchor: AnchorInput; cls: s
     </li>
   )
 }
+/** A plan row's link to the section that carries it out: a pick in the Guide it is in
+ *  (Spec & plan): the Code pane is narrowed to the section's files, and the Guide stays. */
+function PlanLink({ section }: { section: Section }) {
+  const target: FocusTarget = { kind: 'section', sectionId: section.id }
+  const link = usePickLink(target)
+  return <button className={'link small' + (link.picked ? ' picked' : '')} data-gr="plan-section" aria-pressed={link.from ? link.picked : undefined} data-gr-pickable={link.from && link.from !== 'walkthrough' ? '' : undefined} title={`Show the files of “${section.name}” in the Code pane`} onClick={() => focusAnchor(target, { from: link.from })}>{section.name}</button>
+}
 function PlanCheck({ plan, sections }: { plan: PlanMap; sections: Section[] }) {
   const link = (id: string): ReactNode => {
     const s = sections.find((x) => x.id === id)
-    return s ? <> <button className="link small" onClick={() => focusAnchor({ kind: 'section', sectionId: id })}>{s.name}</button></> : null
+    return s ? <> <PlanLink section={s} /></> : null
   }
   if (plan.acceptance.length + plan.steps.length + plan.deviations.length === 0) return null
   return (

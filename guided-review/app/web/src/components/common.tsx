@@ -5,7 +5,7 @@ import type { FocusTarget, Presence, RefOptions } from '@shared/types'
 import { api } from '../api'
 import { highlightBlock } from '../highlight'
 import { useStore } from '../store'
-import { focusAnchor } from '../focus'
+import { tourStop } from '../focus'
 import { short, type Guide } from '../util'
 
 // ── the Guide a thing is drawn in ─────────────────────────────
@@ -20,6 +20,8 @@ export function usePickLink(t: FocusTarget | null): { from: Guide | null; picked
     // (each Guide keeps its own pick outlined, whatever was picked elsewhere since)
     // (in the Walkthrough, whose own pick is the open section, a link is marked while the code follows it)
     const p = from === 'walkthrough' ? s.pick ?? undefined : from ? s.picks[from] : undefined
+    // (a link to a section, in another Guide than the Walkthrough, is that Guide's pick while the section is)
+    if (from && from !== 'walkthrough' && t?.kind === 'section') return p != null && 'section' in p && p.section === t.sectionId
     if (!from || !t || !p || !('file' in p) || 'section' in p || (t.kind !== 'file' && t.kind !== 'diff') || p.file !== t.file) return false
     return t.kind === 'file' ? p.line == null : p.line === t.line && (p.side ?? 'new') === t.side
   })
@@ -354,8 +356,7 @@ export function TourBar() {
       if (!tour.loop) return
       idx = (idx + n) % n
     }
-    set({ tour: { ...tour, idx } })
-    focusAnchor(tour.stops[idx].target)
+    tourStop(idx)
   }
   return (
     <div className="tourbar" data-gr="tour">
@@ -367,7 +368,7 @@ export function TourBar() {
       {stop.note && <div className="tour-note">{stop.note}</div>}
       <div className="row gap">
         <button className="btn sm" disabled={!tour.loop && tour.idx === 0} onClick={() => step(-1)}>Previous</button>
-        <button className="btn sm" onClick={() => focusAnchor(stop.target)}>Show again</button>
+        <button className="btn sm" onClick={() => tourStop(tour.idx)}>Show again</button>
         <button className="btn sm primary" disabled={!tour.loop && tour.idx === n - 1} onClick={() => step(1)}>Next</button>
       </div>
     </div>

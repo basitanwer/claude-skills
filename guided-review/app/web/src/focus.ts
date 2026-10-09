@@ -1,6 +1,6 @@
 import type { ChangedRange, FocusTarget, TourStop } from '@shared/types'
 import { typing, useStore, type How } from './store'
-import { baseName, cssq, narrowingOf, type CodePick, type Guide, type Pane } from './util'
+import { baseName, cssq, narrowingOf, newId, type CodePick, type Guide, type Pane } from './util'
 
 // ── the panes ─────────────────────────────────────────────────
 // The page itself never scrolls. The Code pane and each Guide scroll by themselves, and
@@ -17,13 +17,27 @@ const scrollerOf = (el: Element): HTMLElement | null => el.closest<HTMLElement>(
 const drawn = (el: Element): boolean => el.getClientRects().length > 0
 /** How far below the top edge of its scroller an element is. */
 const topIn = (el: Element, sc: Element): number => el.getBoundingClientRect().top - sc.getBoundingClientRect().top
+/** How much of the foot of a pane lies under the tour's bar (which floats over the page), in px. */
+function underTour(sc: HTMLElement): number {
+  const bar = document.querySelector('[data-gr="tour"]')
+  if (!bar) return 0
+  const b = bar.getBoundingClientRect(); const s = sc.getBoundingClientRect()
+  return b.right <= s.left || b.left >= s.right || b.bottom <= s.top ? 0 : Math.max(0, s.bottom - b.top)
+}
+/** The height of a pane that can be read: what the tour's bar does not lie over. */
+const roomIn = (sc: HTMLElement): number => sc.clientHeight - underTour(sc)
 /** Bring an element into view by scrolling the pane it is in, and only that: to the top of
- *  the pane, or to its middle (an element taller than the pane is shown from its top). */
+ *  the pane, or to its middle (an element taller than the pane is shown from its top).
+ *  While a tour's bar lies over the foot of the pane, the middle is that of what is left
+ *  above the bar; where that is little (a short window, the panes stacked), the element
+ *  goes just under the file header pinned to the top, so that the lines after it show too. */
 export function showInPane(el: HTMLElement, at: 'top' | 'middle' = 'middle'): void {
   const sc = scrollerOf(el)
   if (!sc) return
   const h = el.getBoundingClientRect().height
-  sc.scrollBy({ top: at === 'top' || h > sc.clientHeight - 16 ? topIn(el, sc) - 8 : topIn(el, sc) + h / 2 - sc.clientHeight / 2 })
+  const room = roomIn(sc)
+  const middle = room === sc.clientHeight ? room / 2 - h / 2 : Math.min(room / 2 - h / 2, Math.max(44, room - h - 80))
+  sc.scrollBy({ top: at === 'top' || h > room - 16 ? topIn(el, sc) - 8 : topIn(el, sc) - middle })
 }
 
 /** Scroll an element's pane by the least that brings the element into view (nothing, when it is). */
@@ -52,9 +66,7 @@ export function liftHolds(lift: Lift): boolean {
  *  same pick handed back (it is called again after late layout); `from`: what the Guide
  *  had been scrolled by for the sheet already, and from where, when this pick was made. */
 export function liftPick(sc: HTMLElement, was: Lift | null, from: { by: number; y: number }): Lift {
-  const pick = useStore.getState().pick
-  const mine = !pick ? [] : 'box' in pick ? ['[data-gr-pick]'] : 'section' in pick ? ['[data-gr-open="true"] > .sec-item-head'] : ['.link-chip.picked']
-  const el = pick ? find([...mine, '[data-gr-pick], .link-chip.picked'], sc) : null
+  const el = pickIn(sc)
   const lift = was && was.el === el ? was : { sc, el, home: el ? topIn(el, sc) : 0, carry: from.by, by: from.by, y: from.y, put: 0 }
   if (el) {
     keepInView(el)
@@ -63,6 +75,19 @@ export function liftPick(sc: HTMLElement, was: Lift | null, from: { by: number; 
   }
   lift.put = sc.scrollTop
   return lift
+}
+/** The pick as it is drawn in a Guide (`sc`: the Guide's scroller): the outlined box, the open section's row, the marked link. */
+function pickIn(sc: HTMLElement): HTMLElement | null {
+  const pick = useStore.getState().pick
+  const mine = !pick ? [] : 'box' in pick ? ['[data-gr-pick]'] : 'section' in pick ? ['[data-gr-open="true"] > .sec-item-head'] : ['.link-chip.picked']
+  return pick ? find([...mine, '[data-gr-pick], .link-chip.picked, .link.picked'], sc) : null
+}
+/** A pick made while the Guide had the whole width (the whole height, where the panes are
+ *  stacked) brings the Code pane back, and the Guide is left with less room: it is scrolled
+ *  by the least that keeps the pick in view (nothing, when it still is), once the panes are
+ *  laid out anew, unless the reviewer has moved on by then. */
+function keepPickInView(guide: Guide): void {
+  holding(() => { const sc = scrollerFor(guide); const el = sc && drawn(sc) ? pickIn(sc) : null; if (el) keepInView(el) }, true).settle()
 }
 /** The sheet is down again: the Guide goes back to where it was, unless the reviewer has scrolled it since. */
 export function lowerPick(was: Lift): void {
@@ -143,6 +168,12 @@ interface JumpOpts {
   all?: boolean
   /** the target is the pick's own code: the narrowing is set already, and stays */
   picked?: boolean
+  /** The session asked for the jump (`gr focus`, a tour): it is a step of the trail, so that
+   *  Back returns to what was on show before it and to where the Code pane was scrolled. (A
+   *  jump the reviewer makes inside the Code pane, a click in the tree, is not one.) */
+  how?: 'step'
+  /** the tour the jump is a stop of: a whole tour is one step, which each later stop rewrites */
+  tour?: string
 }
 /** Take one pane to a target and flash it: a jump. Code is shown in the Code pane and the
  *  Guide beside it does not move; the summary and the sections are shown in the
@@ -151,15 +182,26 @@ interface JumpOpts {
  *  way first: a Code pane folded away comes back, a narrowing the target is not part of is
  *  left for all the files, filters that hide the file are lifted, a collapsed file is
  *  opened, and a diff held back as large or generated is loaded. The way back from a jump
- *  the reviewer made is the trail: a pick and a change of Guide are steps of it. */
+ *  is the trail: a pick, a change of Guide and a jump the session asked for are steps of it.
+ *  A link to a section in another Guide than the Walkthrough (a plan row, a note's "section
+ *  …") is a pick in that Guide: the Code pane is narrowed to the section's files, the Guide
+ *  stays, and the Walkthrough's own open section is left as it is. */
 export function focusAnchor(t: FocusTarget, opts: JumpOpts = {}): void {
-  const st = useStore.getState()
   // from a Guide to code: a pick
   if (opts.from && (t.kind === 'file' || t.kind === 'diff')) {
     showPick(t.kind === 'file' ? { file: t.file } : { file: t.file, side: t.side, line: t.line, end: opts.end }, { from: opts.from })
     return
   }
+  if (opts.from && opts.from !== 'walkthrough' && t.kind === 'section') { showPick({ section: t.sectionId }, { from: opts.from }); return }
   jump(t, opts)
+}
+/** Go to a stop of the tour that is on. The whole tour is one step of the trail: Back
+ *  returns to what was on show before it started. */
+export function tourStop(idx: number): void {
+  const tour = useStore.getState().tour
+  if (!tour?.stops[idx]) return
+  if (idx !== tour.idx) useStore.getState().set({ tour: { ...tour, idx } })
+  focusAnchor(tour.stops[idx].target, { how: 'step', tour: tour.id })
 }
 /** Make something the pick and show its code: the Code pane is narrowed to it, taken to its
  *  lines and flashes them, and the Guide it was picked in (`from`; a box and a section say
@@ -218,10 +260,9 @@ export function openSection(id: string, opts: { file?: string; keep?: boolean; h
 }
 /** Start a tour at one of its stops. */
 export function startTour(stops: TourStop[], loop?: boolean, idx = 0): void {
-  const st = useStore.getState()
   if (!stops[idx]) return
-  st.set({ tour: { stops, idx, loop } })
-  focusAnchor(stops[idx].target)
+  useStore.getState().set({ tour: { stops, idx, loop, id: newId('tour') } })
+  tourStop(idx)
 }
 function jump(t: FocusTarget, opts: JumpOpts = {}): void {
   const top = Boolean(opts.top)
@@ -231,11 +272,18 @@ function jump(t: FocusTarget, opts: JumpOpts = {}): void {
   const to = paneOf(t)
   // a commit view shows another diff: targets belong to the whole comparison
   if (st.view.commit && (t.kind === 'file' || t.kind === 'diff')) { void st.setView({ commit: undefined }).then(() => jump(t, opts)); return }
+  // A jump to code the session asked for, and every stop of a tour, is a step of the trail,
+  // made before anything moves: the place the Code pane is left at is noted for the way
+  // back, and what the jump then changes (all the files, the Guide) goes into its step.
+  const stepped = opts.how === 'step' && (to === 'code' || opts.tour != null)
+  if (stepped) { notePlace(); st.jumpStep(t, opts.tour) }
   // (a step of the trail whoever asked, the reviewer or the session: Back returns to where the reviewer was)
-  if (t.kind === 'summary') st.showGuide('walkthrough')
-  else if (t.kind === 'section') openSection(t.sectionId)
+  if (t.kind === 'summary') st.showGuide('walkthrough', stepped ? 'replace' : 'step')
+  else if (t.kind === 'section') openSection(t.sectionId, stepped ? { how: 'replace' } : {})
   else {
     parked = null                     // the Code pane is about to be somewhere else than it was folded away on
+    // (a pick made with the Guide at whole width: the Guide is about to have less room)
+    if (opts.picked && st.guideWide && st.guide) keepPickInView(st.guide)
     st.revealCode()
     if (st.treeOver) st.set({ treeOver: false })       // (a tree that lies over the code would cover what is being shown)
     const file = loaded.files.find((f) => f.path === t.file || f.oldPath === t.file)
@@ -355,24 +403,29 @@ function asPut<T>(sc: HTMLElement): T | null {
 }
 /** Where all the files were last being read, noted when they give way to the pick's code or
  *  to the list of changed files: the list has no line to hold on to, so "Show all files"
- *  from it, or closing the Guide pane while it shows, returns here. It is also noted by the
- *  step of the trail they were on show at (`at`, that step's address; the last steps only):
- *  Back or Forward to a step that showed all the files returns to where they were left. */
+ *  from it, or closing the Guide pane while it shows, returns here. */
 let allPlace: Held[] | null = null
+/** Where the Code pane was, by the step of the trail it was on show at (that step's address;
+ *  the last steps only), whatever it was narrowed to: Back or Forward to a step that showed
+ *  all the files returns to where they were left, and Back from a jump the session made
+ *  returns to the line the reviewer was on. */
 const placeAt = new Map<string, Held[]>()
-export function noteAllPlace(at: string = window.location.hash): void {
+/** Note where the Code pane is, for the step of the trail the page is at (`at`: its address). */
+export function notePlace(at: string = window.location.hash): void {
   const st = useStore.getState()
-  if (st.guide != null && !st.showAll && !st.view.commit) return     // (narrowed: what is on show is not all the files)
   const spots = readingSpot()
   if (!spots.length) return
-  allPlace = spots
+  if (st.guide == null || st.showAll || st.view.commit) allPlace = spots     // (not narrowed: what is on show is all the files)
   placeAt.delete(at)
   placeAt.set(at, spots)
   if (placeAt.size > 40) for (const old of placeAt.keys()) { placeAt.delete(old); break }
 }
-/** `at`: to where all the files were left at that step, rather than where they were last
- *  read. Returns whether there was a place to go back to. */
-export function backToAllPlace(at?: string): boolean {
+/** Whether the place of the Code pane at a step of the trail is remembered. */
+export const hasPlace = (at: string): boolean => placeAt.has(at)
+/** Put the Code pane back where it was: at a step of the trail (`at`, its address), or,
+ *  without one, where all the files were last read. Returns whether there was a place to
+ *  go back to. */
+export function backToPlace(at?: string): boolean {
   const mine = at == null ? allPlace : placeAt.get(at)
   if (!mine) return false
   holding(() => putBack(mine), true).settle()
@@ -532,9 +585,11 @@ function flashRange(file: string, r: ChangedRange): void {
   const els = linesOf(file, r.start, r.end)
   if (!sc || !els.length || !drawn(sc)) return
   const top = topIn(els[0], sc); const bottom = topIn(els[els.length - 1], sc) + els[els.length - 1].getBoundingClientRect().height
-  const room = sc.clientHeight
+  const room = roomIn(sc)
   sc.scrollBy({ top: bottom - top < room * 0.6 ? (top + bottom - room) / 2 : top - room * 0.3 })
   arriveAt(els[0])                    // the file these lines are in is where the reviewer now is
+  // (lines still flashing for the pick before this one stop: only what is picked now is lit)
+  for (const el of sc.querySelectorAll('.gr-flash-range')) if (!els.includes(el as HTMLElement)) el.classList.remove('gr-flash-range')
   for (const el of els) {
     el.classList.remove('gr-flash', 'gr-flash-range')
     void el.offsetWidth               // restart the animation on a repeat click

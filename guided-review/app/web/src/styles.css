@@ -285,7 +285,8 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .workspace.sheet .viewed-progress { display: none; }
 .guide-scroll { flex: 1 1 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; --foot: 80px; padding: 0 var(--pad) var(--foot); }
 .guide-scroll > * { max-width: 1280px; margin-left: auto; margin-right: auto; } .guide-scroll > :first-child { margin-top: 16px; }
-.req-row { display: flex; align-items: center; gap: 8px; padding: 6px 24px; font-size: 13px; min-width: 0; }
+/* (one height whatever the row ends with, a button or the dismiss mark: a request that is answered must not move the panes) */
+.req-row { display: flex; align-items: center; gap: 8px; padding: 6px 24px; font-size: 13px; min-width: 0; min-height: 40px; }
 .req-row + .req-row { border-top: 1px solid var(--border); } .req-row.failed { color: var(--bad); }
 .req-progress { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--text-2); font-family: var(--mono); font-size: 12px; }
 
@@ -329,6 +330,8 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 .walk-count { display: flex; align-items: baseline; gap: 8px; margin-bottom: -6px; } .walk-count .side-title { margin: 0; } .walk-count .sec-progress { display: inline-flex; align-items: center; gap: 4px; }
 .sec-toggle { flex-wrap: wrap; } .sec-toggle > strong { white-space: nowrap; }
 .sec-item.open > .sec-item-head { background: color-mix(in srgb, var(--sec, var(--accent)) 8%, transparent); } .sec-toggle .sec-dot { align-self: center; }
+/* open to be read, while the Code pane shows something else: not marked as what is on show */
+.sec-item.open.aside > .sec-item-head { background: none; }
 .sec-panel-files .tree-row { padding-top: 3px; padding-bottom: 3px; }
 .tree-toggle .ico { transform: scaleX(-1); }
 /* the files of the pick, in the tree; and a link in a Guide that is the pick */
@@ -486,6 +489,7 @@ input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visib
 /* commit menu, read-only strip, resize handle, list states */
 .commit-menu { width: min(380px, calc(100vw - 24px)); } .menu-sep { height: 1px; background: var(--border); margin: 4px 0; }
 .commit-item { align-items: flex-start; } .commit-item .grow { display: flex; flex-direction: column; min-width: 0; }
+.commit-row { display: flex; align-items: center; padding-right: 8px; } .commit-row > .commit-item { flex: 1; min-width: 0; width: auto; } .commit-row:hover { background: var(--bg-sunk); }
 .mode-btn { max-width: min(360px, 60vw); } .mode-label { overflow: hidden; text-overflow: ellipsis; }
 .menu-item input[type="checkbox"] { margin: 0; } label.menu-item { cursor: pointer; }
 .viewed-box.off { opacity: 0.55; cursor: default; }
