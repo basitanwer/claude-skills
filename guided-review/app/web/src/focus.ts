@@ -573,6 +573,19 @@ function showHeldLine(spots: Held[]): void {
   sc.scrollBy({ top: top - 40 })
   putAt(sc, spots)
 }
+/** A field that is being typed in stays in view: where a pane is too short now for both
+ *  what it is held by and the field (a phone on its side leaves the code 125px; a keyboard
+ *  that takes its room from the window), the field wins. (The pane still counts as put
+ *  where it was held, as above.) */
+function showTypedIn(): void {
+  const el = document.activeElement
+  if (!(el instanceof HTMLElement) || !el.matches('textarea, input')) return
+  const sc = scrollerOf(el)
+  if (!sc || !drawn(sc)) return
+  const held = asPut<unknown>(sc)       // (what the pane was put on just now, if it was)
+  keepInView(el)
+  if (held) putAt(sc, held)
+}
 /** Keep the place in both panes while the window changes size (it is turned, dragged
  *  narrower or wider): to be called once, by the workspace; hands back how to stop. */
 export function watchPlaces(): () => void {
@@ -591,6 +604,7 @@ export function watchPlaces(): () => void {
     const { was } = sizing
     if (was.code.length && was.shows === codeShows()) { putBack(was.code); showHeldLine(was.code) }
     if (was.guide) putGuide(was.guide)
+    showTypedIn()
   }
   const resized = (): void => {
     // (the first of a run: what was noted before it is what is held to, whatever the panes pass through on the way)
