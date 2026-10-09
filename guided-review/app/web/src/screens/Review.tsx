@@ -7,7 +7,7 @@ import { focusAnchor, focusQuestion, followFiles, holdCodePlace, holdPlaces, lif
 import {
   ago, anchorKey, anchorLabel, askThreads, baseName, cssq, driftText, EFFORT, narrowingOf, EFFORT_LEVELS, effortTitle, elapsed, focusable, fromEarlier, hasPendingReply, indexComments, isOpen, isUnclaimed, pendingLabel,
   pendingThreads, plural, requestTitle, routeHash, secStyle, short, SIDE_KIND,
-  PANES_SETTLED, pickKey, sinceActive, stuckReason, stuckText, symLabel, targetLabel, type DiffMode, type Guide, type Narrowing
+  PANES_SETTLED, pickKey, sinceActive, stuckReason, stuckText, symLabel, targetLabel, type CodePick, type DiffMode, type Guide, type Narrowing
 } from '../util'
 import { AwayHint, CopyButton, DiffStat, FileIcon, GuideCtx, Icon, Md, Menu, MenuItem, PresenceDot, ThemeToggle, currentTheme, setTheme, usePickLink } from '../components/common'
 import { CommentButton, CommentSlot, CommentsCtx, Composer, STATUS, Thread, Who, useCommentsAt } from '../components/comments'
@@ -399,6 +399,20 @@ function ReviewMenu({ loaded }: { loaded: LoadedReview }) {
   )
 }
 
+/** A comment chosen in the top bar's menu. One on code is a pick of its file and line: the
+ *  Code pane is narrowed to that file and taken to the line, in one step of the trail, so
+ *  Back returns to what was on show. With the Guide pane closed there is no narrowing: the
+ *  step is made all the same, and the code goes to the line among all the files. One on the
+ *  summary or on a section shows it in the Walkthrough, as any jump there does. */
+function showComment(t: FocusTarget): void {
+  if (t.kind !== 'file' && t.kind !== 'diff') { focusAnchor(t); return }
+  const st = useStore.getState()
+  const pick: CodePick = t.kind === 'file' ? { file: t.file } : { file: t.file, side: t.side, line: t.line }
+  if (st.guide == null) { st.pickCode(pick); focusAnchor(t) }
+  // (a file that is not part of the comparison cannot be a pick: it is shown as before)
+  else if (!showPick(pick)) focusAnchor(t)
+}
+
 function CommentsMenu({ loaded }: { loaded: LoadedReview }) {
   const showGuide = useStore((s) => s.showGuide)
   const all = loaded.state.comments
@@ -421,7 +435,7 @@ function CommentsMenu({ loaded }: { loaded: LoadedReview }) {
               {g.list.map((c) => {
                 const t = c.lineGone || c.status === 'outdated' ? null : focusable(c.anchor)
                 return (
-                  <button key={c.id} className="pop-item col" onClick={() => { close(); if (t) focusAnchor(t); else showGuide(c.anchor.kind === 'artifact' ? 'spec' : 'conversation') }}>
+                  <button key={c.id} className="pop-item col" onClick={() => { close(); if (t) showComment(t); else showGuide(c.anchor.kind === 'artifact' ? 'spec' : 'conversation') }}>
                     <span className="mono small muted">{c.author === 'agent' ? 'Claude' : 'You'} · {anchorLabel(c.anchor)}</span>
                     <span className="clip">{c.text}</span>
                   </button>
@@ -687,6 +701,17 @@ function TreePanel({ loaded, over }: { loaded: LoadedReview; over: boolean }) {
   const closed = useMemo(() => new Set(closedDirs), [closedDirs])
   const toggleDir = (p: string): void => set({ closedDirs: closed.has(p) ? closedDirs.filter((x) => x !== p) : [...closedDirs, p] })
   const box = useRef<HTMLElement>(null)
+  /** Resize the column. Beside a Guide the tree is made wider at the code's cost only: it
+   *  stops growing where the Code pane is at its least width, so the Guide (a diagram is
+   *  laid out for its width) is not squeezed by it. Narrower is always possible. */
+  const resize = (px: number | null): void => {
+    const frame = box.current?.parentElement
+    const beside = frame?.querySelector<HTMLElement>(':scope > [data-gr-pane="guide"]:not([hidden])')
+    if (!frame || !beside) { setTreeWidth(px); return }
+    const most = Math.max(treeWidth, frame.clientWidth - beside.offsetWidth - PANE_MIN.bar - PANE_MIN.code - TREE_PAD)
+    const want = px ?? treeWidthLimits.def
+    setTreeWidth(px == null && want <= most ? null : Math.min(want, most))
+  }
   // Opened at a folder (from the path bar): unfold down to it, bring its row into view and
   // flash it. A chain of folders with one child each is one row: the row that holds the
   // folder stands for it. Where there are no folder rows (a list, or grouped by section),
@@ -734,7 +759,7 @@ function TreePanel({ loaded, over }: { loaded: LoadedReview; over: boolean }) {
     <PickedCtx.Provider value={picked}>
     <SectionsCtx.Provider value={F.bySection ? NO_SECTIONS : F.sections}>
       <aside className={'tree-panel' + (over ? ' over' : '')} ref={box} style={{ '--tree-w': `${treeWidth}px` } as React.CSSProperties} aria-label="Files" data-gr="files-view" data-gr-files-view={F.bySection ? 'sections' : F.treeView} data-gr-tree={over ? 'over' : 'column'}>
-        {!over && <ResizeHandle width={treeWidth} onChange={setTreeWidth} />}
+        {!over && <ResizeHandle width={treeWidth} onChange={resize} />}
         <div className="tree-filter">
           <span className="filter-input"><Icon name="search" size={14} /><input id="gr-file-filter" name="gr-field" value={query} placeholder="Filter files…" aria-label="Filter files" onChange={(e) => set({ fileQuery: e.target.value })}
             onKeyDown={(e) => { if (e.key === 'Escape' && !over) { if (query) set({ fileQuery: '' }); else e.currentTarget.blur() } }} /></span>
@@ -918,6 +943,15 @@ function FilesTab({ loaded, shown }: { loaded: LoadedReview; shown: boolean }) {
     return () => document.removeEventListener('keydown', onKey)
   })
   const treeShown = place.column || place.over
+  // The filter is the tree's: its text goes when the tree is hidden (switched off, closed,
+  // or folded for want of room), so the files are never filtered by text that is not on
+  // show. (The files that come back come in round the line being read: it is held.)
+  useLayoutEffect(() => {
+    if (treeShown || !useStore.getState().fileQuery) return
+    const hold = holdCodePlace()
+    set({ fileQuery: '' })
+    hold.settle()
+  }, [treeShown, set])
   // (under a Guide, on a stacked window, the diff is unified, however wide the pane is)
   const canSplit = guideBeside ? layout === 'side' && column >= 700 : win.roomy
   const split = canSplit && (diffView ?? ((guideBeside ? column >= 900 : win.wide) ? 'split' : 'unified')) === 'split'
@@ -1354,8 +1388,12 @@ function WalkthroughGuide({ loaded }: { loaded: LoadedReview }) {
     window.requestAnimationFrame(put)
     window.setTimeout(put, 120)       // once more, after late layout
   }
+  // The second click of a double click on "Reviewed, next" lands on whatever the next section
+  // put under the pointer (with the Guide at whole width the Code pane comes back and the
+  // Guide is laid out anew): it is dropped, wherever in the Walkthrough it lands.
+  const second = (e: { preventDefault(): void; stopPropagation(): void }): void => { if (Date.now() - pressed.current < DOUBLE_CLICK) { e.preventDefault(); e.stopPropagation() } }
   return (
-    <div className="walk" data-gr="walkthrough">
+    <div className="walk" data-gr="walkthrough" onClickCapture={second}>
       {loaded.walkthroughStale && (
         <div className="flash-banner warn" data-gr="stale">
           <span className="grow">The code changed since this walkthrough.</span>

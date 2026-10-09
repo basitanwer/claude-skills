@@ -355,17 +355,28 @@ function asPut<T>(sc: HTMLElement): T | null {
 }
 /** Where all the files were last being read, noted when they give way to the pick's code or
  *  to the list of changed files: the list has no line to hold on to, so "Show all files"
- *  from it, or closing the Guide pane while it shows, returns here. */
+ *  from it, or closing the Guide pane while it shows, returns here. It is also noted by the
+ *  step of the trail they were on show at (`at`, that step's address; the last steps only):
+ *  Back or Forward to a step that showed all the files returns to where they were left. */
 let allPlace: Held[] | null = null
-export function noteAllPlace(): void {
+const placeAt = new Map<string, Held[]>()
+export function noteAllPlace(at: string = window.location.hash): void {
   const st = useStore.getState()
   if (st.guide != null && !st.showAll && !st.view.commit) return     // (narrowed: what is on show is not all the files)
   const spots = readingSpot()
-  if (spots.length) allPlace = spots
+  if (!spots.length) return
+  allPlace = spots
+  placeAt.delete(at)
+  placeAt.set(at, spots)
+  if (placeAt.size > 40) for (const old of placeAt.keys()) { placeAt.delete(old); break }
 }
-export function backToAllPlace(): void {
-  const mine = allPlace
-  if (mine) holding(() => putBack(mine), true).settle()
+/** `at`: to where all the files were left at that step, rather than where they were last
+ *  read. Returns whether there was a place to go back to. */
+export function backToAllPlace(at?: string): boolean {
+  const mine = at == null ? allPlace : placeAt.get(at)
+  if (!mine) return false
+  holding(() => putBack(mine), true).settle()
+  return true
 }
 /** Put the Code pane back on what it showed: the line if it is still there, else the file it was in. */
 function putBack(spots: Held[]): void {

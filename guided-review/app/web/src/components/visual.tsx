@@ -98,8 +98,9 @@ function codeOf(n: VisualNode, loaded: LoadedReview): { lines: { sign: string; n
  *  code as the diff has it. Nothing in it is clicked: a click on the box itself is the pick. */
 function NodeCard({ node, view, loaded, at, link, pane, beside }: {
   node: VisualNode; view: VisualView; loaded: LoadedReview; at: DOMRect; link: boolean
-  /** the Guide pane on the screen: the card stays inside it, so it never lies over the code */
-  pane: { left: number; right: number }
+  /** the Guide pane on the screen: the card stays inside it, so it never lies over the code,
+   *  beside the Guide or under it */
+  pane: { left: number; right: number; top: number; bottom: number }
   /** the Code pane is on show beside the diagram: the box's code is one click away there, and the card leaves it out */
   beside: boolean
 }) {
@@ -111,11 +112,15 @@ function NodeCard({ node, view, loaded, at, link, pane, beside }: {
   const W = Math.min(440, pane.right - pane.left - 16)
   // Beside the box when the pane has room there, so that the boxes above and below it,
   // which are usually the ones it connects to, stay in view; else under it, else above it.
+  // From its upper half the card hangs down, from its lower half it stands up: in both it
+  // ends 8px short of the pane's edge (`lo`, `hi`), and is cut off there if it is longer.
   const side = pane.right - at.right >= W + 20 ? at.right + 12 : at.left - pane.left >= W + 20 ? at.left - W - 12 : null
-  const upper = at.top < vh / 2
-  const where = side != null
-    ? { left: side, ...(upper ? { top: Math.max(8, at.top), maxHeight: vh - Math.max(8, at.top) - 8 } : { bottom: Math.max(8, vh - at.bottom), maxHeight: at.bottom - 8 }) }
-    : { left: Math.max(pane.left + 8, Math.min(at.left, pane.right - W - 8)), ...(upper ? { top: at.bottom + 8, maxHeight: vh - at.bottom - 16 } : { bottom: vh - at.top + 8, maxHeight: at.top - 16 }) }
+  const lo = pane.top + 8
+  const hi = pane.bottom - 8
+  const upper = at.top < (pane.top + pane.bottom) / 2
+  const top = Math.max(lo, side != null ? at.top : at.bottom + 8)
+  const foot = Math.min(hi, side != null ? at.bottom : at.top - 8)
+  const where = { left: side ?? Math.max(pane.left + 8, Math.min(at.left, pane.right - W - 8)), ...(upper ? { top, maxHeight: Math.max(0, hi - top) } : { bottom: vh - foot, maxHeight: Math.max(0, foot - lo) }) }
   return (
     <div className="viz-card" id="gr-viz-card" role="tooltip" data-gr="visual-card" style={{ width: W, ...where }}>
       <div className="viz-card-head">
@@ -148,7 +153,7 @@ function NodeCard({ node, view, loaded, at, link, pane, beside }: {
 const SETTLE = 140
 function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
   // the box under the pointer or the keyboard, where it is on the screen, and what is round it there
-  const [hover, setHover] = useState<{ id: string; at: DOMRect; pane: { left: number; right: number }; beside: boolean } | null>(null)
+  const [hover, setHover] = useState<{ id: string; at: DOMRect; pane: { left: number; right: number; top: number; bottom: number }; beside: boolean } | null>(null)
   // the pick: the box whose code the Code pane was last taken to. Kept in the store, it
   // stays outlined while the reviewer reads that code, points at other boxes, or looks at
   // another Guide and comes back, until another box is picked. Only outlined: it does not
@@ -226,7 +231,7 @@ function Graph({ view, loaded }: { view: VisualView; loaded: LoadedReview }) {
   const point = (n: VisualNode, el: Element): void => {
     const pane = root.current?.closest('[data-gr-pane="guide"]')?.getBoundingClientRect()
     const code = document.querySelector('[data-gr-pane="code"]')
-    setHover({ id: n.id, at: el.getBoundingClientRect(), pane: pane ? { left: pane.left, right: pane.right } : { left: 0, right: window.innerWidth }, beside: Boolean(code && code.getClientRects().length > 0) })
+    setHover({ id: n.id, at: el.getBoundingClientRect(), pane: pane ? { left: pane.left, right: pane.right, top: pane.top, bottom: Math.min(pane.bottom, window.innerHeight) } : { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight }, beside: Boolean(code && code.getClientRects().length > 0) })
   }
   const onKey = (e: RKeyboardEvent, n: VisualNode): void => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(n) } else if (e.key === 'Escape') setHover(null) }
   const said = (n: VisualNode): string => [n.label, STATUS[n.status].label.toLowerCase(), placeOf(n), n.sub, n.note].filter(Boolean).join(', ')
